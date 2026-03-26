@@ -10,6 +10,7 @@ esp-println = { version = "0.16", default-features = false, features = ["esp32c3
 esp-bootloader-esp-idf = { version = "0.4", features = ["esp32c3"] }
 embedded-hal = "1.0"
 critical-section = "1.2"
+nb = "1.1"
 
 [features]
 default = []

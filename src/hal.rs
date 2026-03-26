@@ -49,21 +49,18 @@ pub fn get_wakeup_reason(usb_connected: bool) -> WakeupReason {
     }
 }
 
-// ADC thresholds for button detection (from C reference)
+// ADC thresholds for button detection (from C reference InputManager.cpp)
 // Button ADC values (recorded from real devices):
 // BACK: ~3512, CONFIRM: ~2694, LEFT: ~1493, RIGHT: ~5, UP: ~2242, DOWN: ~5
 // These ranges are midpoints between values
-#[allow(dead_code)]
-const ADC_NO_BUTTON: i32 = 3800;
-#[allow(dead_code)]
-const ADC_RANGES_1: [i32; 5] = [ADC_NO_BUTTON, 3100, 2090, 750, i32::MIN]; // BACK, CONFIRM, LEFT, RIGHT
-#[allow(dead_code)]
-const ADC_RANGES_2: [i32; 3] = [ADC_NO_BUTTON, 1120, i32::MIN]; // UP, DOWN
+// C code uses analogSetAttenuation(ADC_11db) for full range
+pub const ADC_NO_BUTTON: u16 = 3800;
+const ADC_RANGES_1: [u16; 5] = [ADC_NO_BUTTON, 3100, 2090, 750, 0]; // BACK, CONFIRM, LEFT, RIGHT
+const ADC_RANGES_2: [u16; 3] = [ADC_NO_BUTTON, 1120, 0]; // UP, DOWN
 
-/// Button indices
+/// Button indices (matching C BTN_* constants from HalGPIO.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-#[allow(dead_code)]
 pub enum Button {
     Back = 0,
     Confirm = 1,
@@ -74,15 +71,29 @@ pub enum Button {
     Power = 6,
 }
 
+impl Button {
+    /// Get button name as string
+    pub fn name(&self) -> &'static str {
+        match self {
+            Button::Back => "Back",
+            Button::Confirm => "Confirm",
+            Button::Left => "Left",
+            Button::Right => "Right",
+            Button::Up => "Up",
+            Button::Down => "Down",
+            Button::Power => "Power",
+        }
+    }
+}
+
 /// Button state - tracks which buttons are currently pressed
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ButtonState {
     pub state: u8,
 }
 
 impl ButtonState {
     /// Check if a specific button is pressed
-    #[allow(dead_code)]
     pub fn is_pressed(&self, button: Button) -> bool {
         (self.state & (1 << button as u8)) != 0
     }
@@ -97,12 +108,29 @@ impl ButtonState {
         self.state |= 1 << button as u8;
         self
     }
+    
+    /// Get the first pressed button (if any)
+    pub fn first_pressed(&self) -> Option<Button> {
+        if self.is_pressed(Button::Back) { return Some(Button::Back); }
+        if self.is_pressed(Button::Confirm) { return Some(Button::Confirm); }
+        if self.is_pressed(Button::Left) { return Some(Button::Left); }
+        if self.is_pressed(Button::Right) { return Some(Button::Right); }
+        if self.is_pressed(Button::Up) { return Some(Button::Up); }
+        if self.is_pressed(Button::Down) { return Some(Button::Down); }
+        if self.is_pressed(Button::Power) { return Some(Button::Power); }
+        None
+    }
 }
 
 /// Determine which button is pressed based on ADC value for ADC pin 1
-/// Returns button index or None if no button pressed
-#[allow(dead_code)]
-fn get_button_from_adc_1(adc_value: i32) -> Option<Button> {
+/// Returns button or None if no button pressed
+/// Uses range detection: ranges[i+1] < adcValue <= ranges[i]
+pub fn get_button_from_adc_1(adc_value: u16) -> Option<Button> {
+    // Check if above threshold (no button)
+    if adc_value > ADC_NO_BUTTON {
+        return None;
+    }
+    
     for i in 0..4 {
         if ADC_RANGES_1[i + 1] < adc_value && adc_value <= ADC_RANGES_1[i] {
             return match i {
@@ -118,9 +146,13 @@ fn get_button_from_adc_1(adc_value: i32) -> Option<Button> {
 }
 
 /// Determine which button is pressed based on ADC value for ADC pin 2
-/// Returns button index or None if no button pressed
-#[allow(dead_code)]
-fn get_button_from_adc_2(adc_value: i32) -> Option<Button> {
+/// Returns button or None if no button pressed
+pub fn get_button_from_adc_2(adc_value: u16) -> Option<Button> {
+    // Check if above threshold (no button)
+    if adc_value > ADC_NO_BUTTON {
+        return None;
+    }
+    
     for i in 0..2 {
         if ADC_RANGES_2[i + 1] < adc_value && adc_value <= ADC_RANGES_2[i] {
             return match i {
@@ -131,55 +163,6 @@ fn get_button_from_adc_2(adc_value: i32) -> Option<Button> {
         }
     }
     None
-}
-
-/// Button manager
-pub struct Buttons<P1, P2, PP> {
-    adc_pin1: P1,
-    adc_pin2: P2,
-    power_pin: PP,
-}
-
-impl<P1, P2, PP> Buttons<P1, P2, PP>
-where
-    P1: embedded_hal::digital::InputPin,
-    P2: embedded_hal::digital::InputPin,
-    PP: embedded_hal::digital::InputPin,
-{
-    /// Create a new button manager
-    pub fn new(adc_pin1: P1, adc_pin2: P2, power_pin: PP) -> Self {
-        Self {
-            adc_pin1,
-            adc_pin2,
-            power_pin,
-        }
-    }
-
-    /// Read the current button state
-    /// Note: For a proper implementation, we would need to use ADC to read the analog values.
-    /// For this MVP, we use digital reads which will detect any button press.
-    pub fn read_state(&mut self) -> ButtonState {
-        let mut state = ButtonState::default();
-        
-        // Check ADC pins for low (button pressed pulls low typically)
-        if self.adc_pin1.is_low().unwrap_or(false) {
-            // Some button on ADC1 is pressed - we can't tell which without ADC
-            // For MVP, just mark as "any" (we'll use Back as placeholder)
-            state = state.with_button(Button::Back);
-        }
-        
-        if self.adc_pin2.is_low().unwrap_or(false) {
-            // Some button on ADC2 is pressed
-            state = state.with_button(Button::Up);
-        }
-        
-        // Power button is active LOW with pull-up
-        if self.power_pin.is_low().unwrap_or(false) {
-            state = state.with_button(Button::Power);
-        }
-        
-        state
-    }
 }
 
 // ============================================================================
@@ -280,5 +263,25 @@ mod tests {
         // Down is below 1120
         assert_eq!(get_button_from_adc_2(500), Some(Button::Down));
         assert_eq!(get_button_from_adc_2(5), Some(Button::Down));
+    }
+    
+    #[test]
+    fn test_button_first_pressed() {
+        let state = ButtonState::default()
+            .with_button(Button::Confirm)
+            .with_button(Button::Up);
+        // First pressed should be Confirm (lower index)
+        assert_eq!(state.first_pressed(), Some(Button::Confirm));
+    }
+    
+    #[test]
+    fn test_button_name() {
+        assert_eq!(Button::Back.name(), "Back");
+        assert_eq!(Button::Confirm.name(), "Confirm");
+        assert_eq!(Button::Left.name(), "Left");
+        assert_eq!(Button::Right.name(), "Right");
+        assert_eq!(Button::Up.name(), "Up");
+        assert_eq!(Button::Down.name(), "Down");
+        assert_eq!(Button::Power.name(), "Power");
     }
 }

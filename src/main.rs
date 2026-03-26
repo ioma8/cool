@@ -4,6 +4,8 @@
 //! - Boot and initialize hardware
 //! - USB serial support for flashing and console output
 //! - Display text on E-ink screen
+//! - Read all 7 buttons via ADC and GPIO
+//! - Print new line on each button press
 //! - Enter deep sleep mode (without clearing screen)
 //! - Wake on any button press
 //! - Stay awake for 5 minutes before sleeping again
@@ -14,6 +16,7 @@
 use core::time::Duration;
 use esp_backtrace as _;
 use esp_hal::{
+    analog::adc::{Adc, AdcConfig, Attenuation},
     delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     main,
@@ -27,13 +30,16 @@ mod display;
 mod hal;
 
 use display::SSD1677Display;
-use hal::{Buttons, WakeupReason};
+use hal::{get_button_from_adc_1, get_button_from_adc_2, Button, ButtonState, WakeupReason};
 
 // For ESP-IDF bootloader support
 esp_bootloader_esp_idf::esp_app_desc!();
 
 // Awake timeout: 5 minutes in milliseconds
 const AWAKE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+
+// Maximum lines on display (480 height with ~20px per line)
+const MAX_LINES: usize = 24;
 
 #[main]
 fn main() -> ! {
@@ -129,41 +135,100 @@ fn main() -> ! {
     let mut display = SSD1677Display::new(spi, cs, dc, rst, busy, delay);
     display.init();
     
-    // Clear screen and draw info text
+    // Clear screen and draw initial info text
     esp_println::println!("Drawing to display...");
     display.clear(0xFF); // White
     display.draw_text(10, 10, b"Xteink X4 Rust MVP");
-    display.draw_text(10, 30, b"ESP32-C3 no_std");
-    display.draw_text(10, 50, b"Press any button to wake");
-    display.draw_text(10, 70, b"Sleep after 5 min idle");
+    display.draw_text(10, 30, b"All 7 buttons mapped via ADC");
+    display.draw_text(10, 50, b"Press any button...");
     display.refresh_full();
     
     esp_println::println!("Display initialized and content shown!");
     
-    // Initialize button inputs for reading
-    let adc_pin1 = peripherals.GPIO1;
-    let adc_pin2 = peripherals.GPIO2;  
-    let power_pin = peripherals.GPIO3;
+    // Initialize ADC for button reading
+    // GPIO1 = ADC channel for Back, Confirm, Left, Right
+    // GPIO2 = ADC channel for Up, Down
+    // GPIO3 = Power button (digital, active LOW)
+    let mut adc_config = AdcConfig::new();
+    let mut adc_pin1 = adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
+    let mut adc_pin2 = adc_config.enable_pin(peripherals.GPIO2, Attenuation::_11dB);
+    let mut adc = Adc::new(peripherals.ADC1, adc_config);
     
-    let mut buttons = Buttons::new(
-        Input::new(adc_pin1, InputConfig::default()),
-        Input::new(adc_pin2, InputConfig::default()),
-        Input::new(power_pin, InputConfig::default().with_pull(Pull::Up)),
-    );
+    let power_pin = Input::new(peripherals.GPIO3, InputConfig::default().with_pull(Pull::Up));
     
+    esp_println::println!("Buttons initialized with ADC");
     esp_println::println!("Entering main loop - will sleep after {} ms of inactivity", AWAKE_TIMEOUT_MS);
     
     let mut last_activity = Instant::now();
     let loop_delay = Delay::new();
     
+    // Track line position for button press text
+    let mut line_y: u16 = 80;
+    let mut press_count: u32 = 0;
+    let mut last_state = ButtonState::default();
+    
     loop {
-        // Check for button activity
-        let button_state = buttons.read_state();
+        // Read current button state
+        let mut current_state = ButtonState::default();
         
-        if button_state.any_pressed() {
-            esp_println::println!("Button press detected!");
-            last_activity = Instant::now();
+        // Read ADC pin 1 (Back, Confirm, Left, Right)
+        if let Ok(adc_value) = nb::block!(adc.read_oneshot(&mut adc_pin1)) {
+            if let Some(button) = get_button_from_adc_1(adc_value) {
+                current_state = current_state.with_button(button);
+            }
         }
+        
+        // Read ADC pin 2 (Up, Down)
+        if let Ok(adc_value) = nb::block!(adc.read_oneshot(&mut adc_pin2)) {
+            if let Some(button) = get_button_from_adc_2(adc_value) {
+                current_state = current_state.with_button(button);
+            }
+        }
+        
+        // Power button is digital, active LOW with pull-up
+        if power_pin.is_low() {
+            current_state = current_state.with_button(Button::Power);
+        }
+        
+        // Detect newly pressed buttons (edge detection)
+        let newly_pressed = ButtonState {
+            state: current_state.state & !last_state.state,
+        };
+        
+        if let Some(button) = newly_pressed.first_pressed() {
+            press_count += 1;
+            esp_println::println!("Button pressed: {} (count: {})", button.name(), press_count);
+            
+            // Read raw ADC values for debugging
+            let adc1_raw = nb::block!(adc.read_oneshot(&mut adc_pin1)).unwrap_or(0);
+            let adc2_raw = nb::block!(adc.read_oneshot(&mut adc_pin2)).unwrap_or(0);
+            esp_println::println!("  ADC1={}, ADC2={}", adc1_raw, adc2_raw);
+            
+            // Draw new line on display
+            // Format: "N: ButtonName"
+            let mut text_buf = [0u8; 32];
+            let text_len = format_button_press(&mut text_buf, press_count, button.name());
+            
+            display.draw_text(10, line_y, &text_buf[..text_len]);
+            display.refresh_fast(); // Use fast refresh for responsiveness
+            
+            // Move to next line, wrap if needed
+            line_y += 20;
+            if line_y >= (MAX_LINES as u16 * 20) {
+                // Clear and reset
+                display.clear(0xFF);
+                display.draw_text(10, 10, b"Button Press Log (continued)");
+                display.refresh_full();
+                line_y = 40;
+            }
+            
+            last_activity = Instant::now();
+            
+            // Small debounce delay
+            loop_delay.delay_millis(150);
+        }
+        
+        last_state = current_state;
         
         // Check if we've exceeded the awake timeout
         let elapsed = last_activity.elapsed().as_millis() as u64;
@@ -173,13 +238,7 @@ fn main() -> ! {
             // Put display into deep sleep (keeps content on screen)
             display.deep_sleep();
             
-            // Configure GPIO13 for battery latch (must be low during sleep)
-            // Note: On ESP32-C3, we need to use a valid GPIO for power latch
-            // For this MVP, we skip the battery latch as it requires low-level register access
-            
             // Enter deep sleep - wake on timer (as fallback) or power button
-            // Note: On this device, power button is hard-wired to provide power on press,
-            // so it will wake regardless. Timer is backup.
             let timer = TimerWakeupSource::new(Duration::from_secs(3600)); // 1 hour fallback
             
             esp_println::println!("Sleeping now...");
@@ -191,8 +250,54 @@ fn main() -> ! {
         }
         
         // Small delay to prevent tight loop
-        loop_delay.delay_millis(50);
+        loop_delay.delay_millis(20);
     }
+}
+
+/// Format button press message into buffer, returns length
+fn format_button_press(buf: &mut [u8], count: u32, name: &str) -> usize {
+    let mut pos = 0;
+    
+    // Write count
+    let mut num = count;
+    let mut digits = [0u8; 10];
+    let mut digit_count = 0;
+    
+    if num == 0 {
+        digits[0] = b'0';
+        digit_count = 1;
+    } else {
+        while num > 0 {
+            digits[digit_count] = b'0' + (num % 10) as u8;
+            num /= 10;
+            digit_count += 1;
+        }
+    }
+    
+    // Write digits in reverse order
+    for i in (0..digit_count).rev() {
+        if pos < buf.len() {
+            buf[pos] = digits[i];
+            pos += 1;
+        }
+    }
+    
+    // Write ": "
+    if pos + 2 <= buf.len() {
+        buf[pos] = b':';
+        buf[pos + 1] = b' ';
+        pos += 2;
+    }
+    
+    // Write button name
+    for &c in name.as_bytes() {
+        if pos < buf.len() {
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+    
+    pos
 }
 
 // Unit tests - these run on host with cargo test (not on device)
@@ -203,6 +308,19 @@ mod tests {
     #[test]
     fn test_awake_timeout_is_5_minutes() {
         assert_eq!(AWAKE_TIMEOUT_MS, 5 * 60 * 1000);
+    }
+    
+    #[test]
+    fn test_format_button_press() {
+        let mut buf = [0u8; 32];
+        let len = format_button_press(&mut buf, 1, "Back");
+        assert_eq!(&buf[..len], b"1: Back");
+        
+        let len = format_button_press(&mut buf, 42, "Confirm");
+        assert_eq!(&buf[..len], b"42: Confirm");
+        
+        let len = format_button_press(&mut buf, 100, "Power");
+        assert_eq!(&buf[..len], b"100: Power");
     }
 }
 
