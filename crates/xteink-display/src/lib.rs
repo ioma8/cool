@@ -6,6 +6,8 @@ use embedded_hal::{
     spi::SpiBus,
 };
 
+pub mod bookerly;
+
 const PHYSICAL_WIDTH: u16 = 800;
 const PHYSICAL_HEIGHT: u16 = 480;
 pub const DISPLAY_WIDTH_BYTES: u16 = PHYSICAL_WIDTH / 8;
@@ -42,49 +44,6 @@ pub enum RefreshMode {
     Full,
     Half,
     Fast,
-}
-
-const FONT_5X7: [[u8; 5]; 95] = [
-    [0x00, 0x00, 0x00, 0x00, 0x00], [0x00, 0x00, 0x5F, 0x00, 0x00], [0x00, 0x07, 0x00, 0x07, 0x00],
-    [0x14, 0x7F, 0x14, 0x7F, 0x14], [0x24, 0x2A, 0x7F, 0x2A, 0x12], [0x23, 0x13, 0x08, 0x64, 0x62],
-    [0x36, 0x49, 0x55, 0x22, 0x50], [0x00, 0x05, 0x03, 0x00, 0x00], [0x00, 0x1C, 0x22, 0x41, 0x00],
-    [0x00, 0x41, 0x22, 0x1C, 0x00], [0x08, 0x2A, 0x1C, 0x2A, 0x08], [0x08, 0x08, 0x3E, 0x08, 0x08],
-    [0x00, 0x50, 0x30, 0x00, 0x00], [0x08, 0x08, 0x08, 0x08, 0x08], [0x00, 0x60, 0x60, 0x00, 0x00],
-    [0x20, 0x10, 0x08, 0x04, 0x02], [0x3E, 0x51, 0x49, 0x45, 0x3E], [0x00, 0x42, 0x7F, 0x40, 0x00],
-    [0x42, 0x61, 0x51, 0x49, 0x46], [0x21, 0x41, 0x45, 0x4B, 0x31], [0x18, 0x14, 0x12, 0x7F, 0x10],
-    [0x27, 0x45, 0x45, 0x45, 0x39], [0x3C, 0x4A, 0x49, 0x49, 0x30], [0x01, 0x71, 0x09, 0x05, 0x03],
-    [0x36, 0x49, 0x49, 0x49, 0x36], [0x06, 0x49, 0x49, 0x29, 0x1E], [0x00, 0x36, 0x36, 0x00, 0x00],
-    [0x00, 0x56, 0x36, 0x00, 0x00], [0x08, 0x14, 0x22, 0x41, 0x00], [0x14, 0x14, 0x14, 0x14, 0x14],
-    [0x00, 0x41, 0x22, 0x14, 0x08], [0x02, 0x01, 0x51, 0x09, 0x06], [0x32, 0x49, 0x79, 0x41, 0x3E],
-    [0x7E, 0x11, 0x11, 0x11, 0x7E], [0x7F, 0x49, 0x49, 0x49, 0x36], [0x3E, 0x41, 0x41, 0x41, 0x22],
-    [0x7F, 0x41, 0x41, 0x22, 0x1C], [0x7F, 0x49, 0x49, 0x49, 0x41], [0x7F, 0x09, 0x09, 0x09, 0x01],
-    [0x3E, 0x41, 0x49, 0x49, 0x7A], [0x7F, 0x08, 0x08, 0x08, 0x7F], [0x00, 0x41, 0x7F, 0x41, 0x00],
-    [0x20, 0x40, 0x41, 0x3F, 0x01], [0x7F, 0x08, 0x14, 0x22, 0x41], [0x7F, 0x40, 0x40, 0x40, 0x40],
-    [0x7F, 0x02, 0x0C, 0x02, 0x7F], [0x7F, 0x04, 0x08, 0x10, 0x7F], [0x3E, 0x41, 0x41, 0x41, 0x3E],
-    [0x7F, 0x09, 0x09, 0x09, 0x06], [0x3E, 0x41, 0x51, 0x21, 0x5E], [0x7F, 0x09, 0x19, 0x29, 0x46],
-    [0x46, 0x49, 0x49, 0x49, 0x31], [0x01, 0x01, 0x7F, 0x01, 0x01], [0x3F, 0x40, 0x40, 0x40, 0x3F],
-    [0x1F, 0x20, 0x40, 0x20, 0x1F], [0x3F, 0x40, 0x38, 0x40, 0x3F], [0x63, 0x14, 0x08, 0x14, 0x63],
-    [0x07, 0x08, 0x70, 0x08, 0x07], [0x61, 0x51, 0x49, 0x45, 0x43], [0x00, 0x7F, 0x41, 0x41, 0x00],
-    [0x02, 0x04, 0x08, 0x10, 0x20], [0x00, 0x41, 0x41, 0x7F, 0x00], [0x04, 0x02, 0x01, 0x02, 0x04],
-    [0x40, 0x40, 0x40, 0x40, 0x40], [0x00, 0x01, 0x02, 0x04, 0x00], [0x20, 0x54, 0x54, 0x54, 0x78],
-    [0x7F, 0x48, 0x44, 0x44, 0x38], [0x38, 0x44, 0x44, 0x44, 0x20], [0x38, 0x44, 0x44, 0x48, 0x7F],
-    [0x38, 0x54, 0x54, 0x54, 0x18], [0x08, 0x7E, 0x09, 0x01, 0x02], [0x0C, 0x52, 0x52, 0x52, 0x3E],
-    [0x7F, 0x08, 0x04, 0x04, 0x78], [0x00, 0x44, 0x7D, 0x40, 0x00], [0x20, 0x40, 0x44, 0x3D, 0x00],
-    [0x7F, 0x10, 0x28, 0x44, 0x00], [0x00, 0x41, 0x7F, 0x40, 0x00], [0x7C, 0x04, 0x18, 0x04, 0x78],
-    [0x7C, 0x08, 0x04, 0x04, 0x78], [0x38, 0x44, 0x44, 0x44, 0x38], [0x7C, 0x14, 0x14, 0x14, 0x08],
-    [0x08, 0x14, 0x14, 0x18, 0x7C], [0x7C, 0x08, 0x04, 0x04, 0x08], [0x48, 0x54, 0x54, 0x54, 0x20],
-    [0x04, 0x3F, 0x44, 0x40, 0x20], [0x3C, 0x40, 0x40, 0x20, 0x7C], [0x1C, 0x20, 0x40, 0x20, 0x1C],
-    [0x3C, 0x40, 0x30, 0x40, 0x3C], [0x44, 0x28, 0x10, 0x28, 0x44], [0x0C, 0x50, 0x50, 0x50, 0x3C],
-    [0x44, 0x64, 0x54, 0x4C, 0x44], [0x00, 0x08, 0x36, 0x41, 0x00], [0x00, 0x00, 0x7F, 0x00, 0x00],
-    [0x00, 0x41, 0x36, 0x08, 0x00], [0x10, 0x08, 0x08, 0x10, 0x08],
-];
-
-fn get_char_bitmap(c: u8) -> [u8; 5] {
-    if (32..127).contains(&c) {
-        FONT_5X7[(c - 32) as usize]
-    } else {
-        FONT_5X7[0]
-    }
 }
 
 pub struct SSD1677Display<SPI, CS, DC, RST, BUSY, DELAY>
@@ -162,21 +121,57 @@ where
         }
     }
 
-    pub fn draw_text(&mut self, x: u16, y: u16, text: &[u8]) {
-        let mut cx = x;
-        for &c in text {
-            if cx + 6 > DISPLAY_WIDTH {
-                break;
+    pub fn draw_text(&mut self, x: u16, y: u16, text: &str) {
+        let mut cursor_x = i32::from(x);
+        let mut cursor_y = i32::from(y);
+        let line_height = i32::from(bookerly::BOOKERLY.line_height_px());
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                cursor_x = i32::from(x);
+                cursor_y += line_height;
+                continue;
             }
-            let bmp = get_char_bitmap(c);
-            for (col, bits) in bmp.iter().enumerate() {
-                for row in 0..7 {
-                    if (bits >> row) & 1 == 1 {
-                        self.set_pixel(cx + col as u16, y + row as u16, true);
-                    }
+
+            let glyph = bookerly::BOOKERLY.glyph_for_char(ch);
+            let left = cursor_x + i32::from(glyph.left);
+            let top = cursor_y + i32::from(glyph.top);
+            self.draw_glyph(glyph, left, top);
+            cursor_x += i32::from(glyph.advance_x);
+        }
+    }
+
+    fn draw_glyph(&mut self, glyph: &bookerly::Glyph, x: i32, y: i32) {
+        if glyph.width == 0 || glyph.height == 0 || glyph.data_length == 0 {
+            return;
+        }
+
+        let row_bytes = usize::from(glyph.width).div_ceil(8);
+        let start = glyph.data_offset as usize;
+        let end = start + glyph.data_length as usize;
+        let bitmap = &bookerly::BOOKERLY.bitmap[start..end];
+
+        for row in 0..glyph.height {
+            let row_start = usize::from(row) * row_bytes;
+            for col in 0..glyph.width {
+                let byte = bitmap[row_start + usize::from(col / 8)];
+                let mask = 1 << (7 - (col % 8));
+                if byte & mask == 0 {
+                    continue;
                 }
+
+                let px = x + i32::from(col);
+                let py = y + i32::from(row);
+                if px < 0
+                    || py < 0
+                    || px >= i32::from(DISPLAY_WIDTH)
+                    || py >= i32::from(DISPLAY_HEIGHT)
+                {
+                    continue;
+                }
+
+                self.set_pixel(px as u16, py as u16, true);
             }
-            cx += 6;
         }
     }
 
@@ -511,14 +506,23 @@ mod tests {
     }
 
     #[test]
-    fn draw_text_renders_5x7_glyphs_with_spacing() {
+    fn draw_text_renders_bookerly_glyphs_with_spacing() {
         let mut display = new_display();
 
         display.clear(0xFF);
-        display.draw_text(0, 0, b"A");
+        display.draw_text(0, 0, "A");
 
-        let idx = logical_pixel_index(0, 1);
-        assert_eq!(display.framebuffer()[idx] & (1 << 6), 0);
+        assert!(display.framebuffer().iter().any(|&byte| byte != 0xFF));
+    }
+
+    #[test]
+    fn draw_text_accepts_utf8_text() {
+        let mut display = new_display();
+
+        display.clear(0xFF);
+        display.draw_text(0, 0, "é");
+
+        assert!(display.framebuffer().iter().any(|&byte| byte != 0xFF));
     }
 
     #[test]
@@ -574,23 +578,48 @@ mod tests {
         display.display_buffer(RefreshMode::Full);
 
         assert_eq!(
-            display.spi().writes.iter().filter(|write| write.as_slice() == [0x24]).count(),
+            display
+                .spi()
+                .writes
+                .iter()
+                .filter(|write| write.as_slice() == [0x24])
+                .count(),
             1
         );
         assert_eq!(
-            display.spi().writes.iter().filter(|write| write.as_slice() == [0x26]).count(),
+            display
+                .spi()
+                .writes
+                .iter()
+                .filter(|write| write.as_slice() == [0x26])
+                .count(),
             1
         );
         assert_eq!(
-            display.spi().writes.iter().filter(|write| write.as_slice() == [0x21]).count(),
+            display
+                .spi()
+                .writes
+                .iter()
+                .filter(|write| write.as_slice() == [0x21])
+                .count(),
             1
         );
         assert_eq!(
-            display.spi().writes.iter().filter(|write| write.as_slice() == [0x22]).count(),
+            display
+                .spi()
+                .writes
+                .iter()
+                .filter(|write| write.as_slice() == [0x22])
+                .count(),
             1
         );
         assert_eq!(
-            display.spi().writes.iter().filter(|write| write.as_slice() == [0x20]).count(),
+            display
+                .spi()
+                .writes
+                .iter()
+                .filter(|write| write.as_slice() == [0x20])
+                .count(),
             1
         );
     }
@@ -602,11 +631,21 @@ mod tests {
         display.display_buffer(RefreshMode::Fast);
 
         assert_eq!(
-            display.spi().writes.iter().filter(|write| write.as_slice() == [0x24]).count(),
+            display
+                .spi()
+                .writes
+                .iter()
+                .filter(|write| write.as_slice() == [0x24])
+                .count(),
             1
         );
         assert_eq!(
-            display.spi().writes.iter().filter(|write| write.as_slice() == [0x26]).count(),
+            display
+                .spi()
+                .writes
+                .iter()
+                .filter(|write| write.as_slice() == [0x26])
+                .count(),
             1
         );
     }
@@ -618,11 +657,18 @@ mod tests {
         display.display_buffer(RefreshMode::Full);
         display.deep_sleep();
 
-        assert!(display.spi().writes.iter().any(|write| write.as_slice() == [0x10]));
+        assert!(
+            display
+                .spi()
+                .writes
+                .iter()
+                .any(|write| write.as_slice() == [0x10])
+        );
     }
 
-    fn new_display(
-    ) -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay> {
+    fn new_display()
+    -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay>
+    {
         SSD1677Display::new(
             FakeSpi::default(),
             FakeOutputPin::default(),

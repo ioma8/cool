@@ -38,16 +38,10 @@ pub fn classify_wakeup_reason(
     usb_connected: bool,
 ) -> WakeupReason {
     match (wake_cause, reset_reason, usb_connected) {
-        (WakeCause::Undefined, Some(ResetReason::ChipPowerOn), false) => {
-            WakeupReason::PowerButton
-        }
-        (WakeCause::Gpio, Some(ResetReason::CoreDeepSleep), true) => {
-            WakeupReason::PowerButton
-        }
+        (WakeCause::Undefined, Some(ResetReason::ChipPowerOn), false) => WakeupReason::PowerButton,
+        (WakeCause::Gpio, Some(ResetReason::CoreDeepSleep), true) => WakeupReason::PowerButton,
         (WakeCause::Undefined, None, true) => WakeupReason::AfterFlash,
-        (WakeCause::Undefined, Some(ResetReason::ChipPowerOn), true) => {
-            WakeupReason::AfterUSBPower
-        }
+        (WakeCause::Undefined, Some(ResetReason::ChipPowerOn), true) => WakeupReason::AfterUSBPower,
         _ => WakeupReason::Other,
     }
 }
@@ -63,22 +57,16 @@ mod tests {
 
     #[test]
     fn classifies_power_button_boot_without_usb() {
-        let reason = classify_wakeup_reason(
-            WakeCause::Undefined,
-            Some(ResetReason::ChipPowerOn),
-            false,
-        );
+        let reason =
+            classify_wakeup_reason(WakeCause::Undefined, Some(ResetReason::ChipPowerOn), false);
 
         assert_eq!(reason, WakeupReason::PowerButton);
     }
 
     #[test]
     fn classifies_power_button_gpio_wake_with_usb() {
-        let reason = classify_wakeup_reason(
-            WakeCause::Gpio,
-            Some(ResetReason::CoreDeepSleep),
-            true,
-        );
+        let reason =
+            classify_wakeup_reason(WakeCause::Gpio, Some(ResetReason::CoreDeepSleep), true);
 
         assert_eq!(reason, WakeupReason::PowerButton);
     }
@@ -92,22 +80,15 @@ mod tests {
 
     #[test]
     fn classifies_usb_power_boot() {
-        let reason = classify_wakeup_reason(
-            WakeCause::Undefined,
-            Some(ResetReason::ChipPowerOn),
-            true,
-        );
+        let reason =
+            classify_wakeup_reason(WakeCause::Undefined, Some(ResetReason::ChipPowerOn), true);
 
         assert_eq!(reason, WakeupReason::AfterUSBPower);
     }
 
     #[test]
     fn classifies_unknown_combinations_as_other() {
-        let reason = classify_wakeup_reason(
-            WakeCause::Other,
-            Some(ResetReason::Other),
-            false,
-        );
+        let reason = classify_wakeup_reason(WakeCause::Other, Some(ResetReason::Other), false);
 
         assert_eq!(reason, WakeupReason::Other);
     }

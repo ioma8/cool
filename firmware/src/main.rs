@@ -4,33 +4,34 @@
 use esp_backtrace as _;
 use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
-    delay::Delay,
     clock::CpuClock,
+    delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    spi::master::{Config as SpiConfig, Spi},
     main,
     rtc_cntl::{SocResetReason, reset_reason, wakeup_cause},
+    spi::master::{Config as SpiConfig, Spi},
     system::{Cpu, SleepSource},
+    time::Instant,
     time::Rate,
-    time::{Instant},
 };
 use xteink_buttons::{Button, ButtonState, get_button_from_adc_1, get_button_from_adc_2};
 use xteink_display::SSD1677Display;
-use xteink_power::{
-    ResetReason, WakeCause, WakeupReason, classify_wakeup_reason,
-};
+use xteink_power::{ResetReason, WakeCause, WakeupReason, classify_wakeup_reason};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
 const DEBOUNCE_DELAY_MS: u64 = 5;
-const BUTTON_LABEL_HEADER: &[u8] = b"Buttons:";
+const BUTTON_LABEL_HEADER: &str = "Buttons:";
 
 #[main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
     let delay = Delay::new();
-    let usb_detect = Input::new(peripherals.GPIO20, InputConfig::default().with_pull(Pull::None));
+    let usb_detect = Input::new(
+        peripherals.GPIO20,
+        InputConfig::default().with_pull(Pull::None),
+    );
     let usb_connected = usb_detect.is_high();
 
     if usb_connected {
@@ -106,8 +107,12 @@ fn main() -> ! {
     let mut adc_pin1 = adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
     let mut adc_pin2 = adc_config.enable_pin(peripherals.GPIO2, Attenuation::_11dB);
     let mut adc = Adc::new(peripherals.ADC1, adc_config);
-    let power_button = Input::new(peripherals.GPIO3, InputConfig::default().with_pull(Pull::Up));
-    let mut display_row = 22u16;
+    let power_button = Input::new(
+        peripherals.GPIO3,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    let line_height = xteink_display::bookerly::BOOKERLY.line_height_px();
+    let mut display_row = 4u16 + line_height;
 
     esp_println::println!("Buttons initialized with ADC");
     esp_println::println!("Entering main loop");
@@ -163,14 +168,14 @@ fn main() -> ! {
             for button in ORDERED_BUTTONS {
                 if pressed_events.is_pressed(button) {
                     esp_println::println!("Button pressed: {}", button.name());
-                    if display_row + 16 >= xteink_display::DISPLAY_HEIGHT {
+                    if display_row + line_height >= xteink_display::DISPLAY_HEIGHT {
                         display.clear(0xFF);
                         display.draw_text(4, 4, BUTTON_LABEL_HEADER);
-                        display_row = 22;
+                        display_row = 4 + line_height;
                     }
-                    display.draw_text(4, display_row, button.name().as_bytes());
+                    display.draw_text(4, display_row, button.name());
                     display.refresh_fast();
-                    display_row += 16;
+                    display_row += line_height;
                 }
             }
         }
