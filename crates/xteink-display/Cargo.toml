@@ -1,0 +1,10 @@
+[package]
+name = "xteink-display"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+embedded-hal.workspace = true
+
+[lib]
+path = "src/lib.rs"

@@ -1134,6 +1134,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "xteink-buttons"
+version = "0.1.0"
+
+[[package]]
+name = "xteink-display"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
+name = "xteink-power"
+version = "0.1.0"
+
+[[package]]
 name = "xteink-reader"
 version = "0.1.0"
 dependencies = [
@@ -1144,6 +1159,9 @@ dependencies = [
  "esp-hal",
  "esp-println",
  "nb 1.1.0",
+ "xteink-buttons",
+ "xteink-display",
+ "xteink-power",
 ]
 
 [[package]]

@@ -1,0 +1,20 @@
+[package]
+name = "xteink-reader"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+esp-hal.workspace = true
+esp-backtrace.workspace = true
+esp-println.workspace = true
+esp-bootloader-esp-idf.workspace = true
+embedded-hal.workspace = true
+critical-section.workspace = true
+nb.workspace = true
+xteink-buttons = { path = "../crates/xteink-buttons" }
+xteink-power = { path = "../crates/xteink-power" }
+xteink-display = { path = "../crates/xteink-display" }
+
+[[bin]]
+name = "xteink-reader"
+path = "src/main.rs"

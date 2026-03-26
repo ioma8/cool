@@ -32,19 +32,30 @@ Rust `no_std` e-reader firmware for the Xteink X4 device (ESP32-C3 + SSD1677 e-i
 | Down | GPIO2 | ADC | 0-1120 |
 | Power | GPIO3 | Digital | Active LOW |
 
+## Workspace
+
+```
+.
+├── crates/
+│   ├── xteink-buttons/  # ADC threshold mapping and button-state logic
+│   ├── xteink-display/  # SSD1677 framebuffer and generic embedded-hal driver
+│   └── xteink-power/    # Wakeup classification and idle-timeout policy
+├── docs/                # Hardware behavior documentation
+└── firmware/            # ESP32-C3 application crate using esp-hal
+```
+
 ## Architecture
 
 ```
-src/
-├── main.rs      # Entry point, init, main loop, button handling
-├── display.rs   # SSD1677 e-ink driver (SPI, rotation, text rendering)
-└── hal.rs       # Button ADC detection, wakeup reason detection
+firmware/src/
+└── main.rs      # Entry point, wiring of esp-hal peripherals to workspace crates
 ```
 
-The display driver is a precise port of the C `EInkDisplay.cpp` from the original SDK, with:
-- Command/data SPI transactions matching Arduino timing
-- Framebuffer with 90° CCW coordinate transformation
-- Full/fast refresh modes
+Custom logic now lives in dedicated crates:
+
+- `xteink-display` contains the SSD1677 driver and framebuffer logic
+- `xteink-buttons` contains ADC-to-button mapping and button state handling
+- `xteink-power` contains wakeup classification and awake-timeout policy
 
 ## Building
 
