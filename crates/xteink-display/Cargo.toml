@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 embedded-hal.workspace = true
+xteink-epub = { path = "../xteink-epub" }
 
 [build-dependencies]
 fontdue = "0.9"

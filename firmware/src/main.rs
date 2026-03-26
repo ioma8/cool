@@ -96,12 +96,15 @@ fn main() -> ! {
         delay,
     );
 
-    esp_println::println!("Initializing E-ink display...");
-    display.init();
-    display.clear(0xFF);
-    display.draw_text(4, 4, BUTTON_LABEL_HEADER);
-    display.refresh_full();
-    esp_println::println!("Display initialized and content shown");
+    esp_println::println!("Initializing E-ink display with embedded EPUB demo...");
+    if let Err(err) = xteink_display::show_embedded_epub_demo(&mut display) {
+        esp_println::println!("EPUB demo render failed: {:?}", err);
+        display.init();
+        display.clear(0xFF);
+        display.draw_text(4, 4, BUTTON_LABEL_HEADER);
+        display.refresh_full();
+    }
+    esp_println::println!("Display initialized and EPUB content shown");
 
     let mut adc_config = AdcConfig::new();
     let mut adc_pin1 = adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
