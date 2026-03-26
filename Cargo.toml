@@ -1,0 +1,24 @@
+[package]
+name = "xteink-reader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
+esp-backtrace = { version = "0.18", features = ["esp32c3", "panic-handler", "println"] }
+esp-println = { version = "0.16", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32c3"] }
+embedded-hal = "1.0"
+critical-section = "1.2"
+
+[features]
+default = []
+
+[profile.dev]
+opt-level = "s"
+debug = true
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
