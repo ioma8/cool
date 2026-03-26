@@ -20,9 +20,10 @@
 - Public API:
   - `pub trait EpubSource { fn len(&self) -> usize; fn read_at(&self, offset: u64, dst: &mut [u8]) -> Result<usize, EpubError>; }`
   - `pub struct Epub<'a, S: EpubSource> { source: S, manifest: EpubManifest, spine: SpinedOrder, ... }`
-  - `pub struct EpubReader<'a, S: EpubSource> { source: &'a S, cursor: ReaderCursor, state: ParseState, ... }` (or equivalent)
-  - `pub fn EpubReader::open(source: S) -> Result<Self, EpubError>`
-  - `pub fn next_block(&mut self, out: &mut EpubEventSink) -> Result<Option<EpubEvent<'a>>, EpubError>`
+  - `pub fn Epub::open(source: S, buffers: ReaderBuffers<'a>) -> Result<Self, EpubError>`
+  - `pub struct EpubReader<'a, S: EpubSource> { epub: Epub<'a, S>, cursor: SpineCursor, state: ParseState }` (or equivalent)
+  - `pub fn Epub::reader(&'a self, buffers: ReaderBuffers<'a>) -> EpubReader<'a, S>`
+  - `pub fn next_event(&mut self, state: &mut ReadState) -> Result<Option<EpubEvent<'a>>, EpubError>`
 - Output model:
   - `EpubEvent<'a>` variants:
     - `Text(&'a str)`
@@ -30,8 +31,16 @@
     - `HeadingStart(u8)`, `HeadingEnd`
     - `LineBreak`
     - `Image { src: &'a str, alt: Option<&'a str> }`
-    - `TableStart`, `TableEnd`, `UnsupportedTag`
-- Source and decompression buffers are caller-supplied to keep parser heap-agnostic.
+    - `UnsupportedTag`
+- `ReaderBuffers<'a>` is a caller-supplied set of scratch buffers:
+  - `zip_dir: &'a mut [u8]` for central-directory/entry scan
+  - `inflate: &'a mut [u8]` for DEFLATE output per entry
+  - `xml: &'a mut [u8]` for XML text staging where needed
+
+### Source contracts
+- `EpubSource::read_at` may return short reads if fewer bytes are available.
+- `0` length read means EOF.
+- The trait is deterministic: if `offset + dst.len() <= len`, implementations should attempt to fill the request (or return a hard error for I/O faults).
 
 ## 4. Parsing architecture
 - **ZIP layer**
@@ -49,7 +58,7 @@
 - Default parser operation uses no heap allocation.
 - Internal parsing uses caller-provided scratch buffers for deflate output and parser workspaces.
 - XML parsing and EPUB traversal operate on borrowed slices when valid (`&str` tied to scratch buffer lifetime).
-- Explicit `EpubError::OutOfSpace` if a caller-provided buffer is too small.
+- `EpubError::OutOfSpace` is returned if any supplied buffer is too small for required data.
 
 ## 6. Dependencies and no_std plan
 - Use `quick-xml` for XML parsing.
@@ -61,16 +70,28 @@
 - `EpubError` enum: `Zip`, `Xml`, `Utf8`, `Compression`, `Io`, `OutOfSpace`, `InvalidFormat`, `Unsupported`.
 - Errors always carry recoverable context where possible.
 
-## 8. Test-driven workflow
+## 8. EPUB path and text normalization
+- `container.xml` and `content.opf` follow EPUB relative-path rules.
+- `Image.src` should be emitted as **package-relative path** resolved from:
+  - package root from `container.xml` (`rootfile@full-path`) and OPF base path, with `../` normalization and percent-decoding where safe.
+- Text normalization:
+  - Entities must be decoded (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`, numeric entities).
+  - Collapse consecutive whitespace from parsed XHTML text runs into a single space outside `<pre>`.
+  - Unknown namespaces are ignored; unknown tags emit `UnsupportedTag` and continue with children.
+  - `<br>` emits `LineBreak`.
+
+## 9. Test-driven workflow
 - Add tests for each behavior before implementation:
   1. Container discovery and entry lookup against `test/epubs` samples.
   2. OPF parsing yields expected manifest/spine order.
   3. XHTML events preserve paragraph/heading/line-break/image markers.
   4. Non-text media-only EPUB path handles gracefully.
   5. Compressed/uncompressed entries both parse.
+  6. Namespace, missing `content.opf`, missing `container.xml`, and bad item/path combinations produce explicit errors.
 - Use `#[test]` fixtures by including sample epubs through crate tests.
+- For this phase, tables are out-of-scope; renderers should rely on `UnsupportedTag` for table structures.
 
-## 9. Acceptance criteria
+## 10. Acceptance criteria
 - `cargo check` succeeds for workspace with crate included.
 - New crate API can list and iterate spine items as stream events with low allocations.
 - Parser can extract readable ordered content from at least one EPUB in `test/epubs` and emit the expected basic markup-preserving events.
