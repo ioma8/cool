@@ -19,11 +19,10 @@
 - New crate path: `crates/xteink-epub/`
 - Public API:
   - `pub trait EpubSource { fn len(&self) -> usize; fn read_at(&self, offset: u64, dst: &mut [u8]) -> Result<usize, EpubError>; }`
-  - `pub struct Epub<'a, S: EpubSource> { source: S, manifest: EpubManifest, spine: SpinedOrder, ... }`
-  - `pub fn Epub::open(source: S, buffers: ReaderBuffers<'a>) -> Result<Self, EpubError>`
-  - `pub struct EpubReader<'a, S: EpubSource> { epub: Epub<'a, S>, cursor: SpineCursor, state: ParseState }` (or equivalent)
-  - `pub fn Epub::reader(&'a self, buffers: ReaderBuffers<'a>) -> EpubReader<'a, S>`
-  - `pub fn next_event(&mut self, state: &mut ReadState) -> Result<Option<EpubEvent<'a>>, EpubError>`
+  - `pub struct Epub<S: EpubSource> { source: S, manifest: EpubManifest, spine: Spine, ... }`
+  - `pub fn Epub::open(source: S) -> Result<Self, EpubError>`
+  - `pub struct ReaderBuffers<'a> { zip_cd: &'a mut [u8], inflate: &'a mut [u8], xml: &'a mut [u8] }`
+  - `pub fn next_event<'a>(&'a mut self, workspace: &'a mut ReaderBuffers<'_>) -> Result<Option<EpubEvent<'a>>, EpubError>`
 - Output model:
   - `EpubEvent<'a>` variants:
     - `Text(&'a str)`
@@ -32,6 +31,9 @@
     - `LineBreak`
     - `Image { src: &'a str, alt: Option<&'a str> }`
     - `UnsupportedTag`
+- Event lifetime rule: returned `EpubEvent<'a>` borrows from `workspace` memory and is invalidated by the next `next_event` call.
+- Non-reentrancy rule: only one active event/cursor exists; caller must consume or clone event content before calling `next_event` again.
+- `ReaderBuffers` must be alive for the full iterator lifetime and lives no longer than `Epub` if you need borrowed events across calls. For immediate processing flows, one call per event is expected.
 - `ReaderBuffers<'a>` is a caller-supplied set of scratch buffers:
   - `zip_dir: &'a mut [u8]` for central-directory/entry scan
   - `inflate: &'a mut [u8]` for DEFLATE output per entry
@@ -63,7 +65,10 @@
 ## 6. Dependencies and no_std plan
 - Use `quick-xml` for XML parsing.
 - Use `zlib-rs` for Deflate decompression of ZIP entries.
-- Keep dependencies `default-features = false` with `no_std` compatible features.
+- Keep dependencies without `std`:
+  - `quick-xml = { version = "0.31", default-features = false, features = ["encoding"] }`
+  - `zlib-rs = { version = "0.4", default-features = false, features = ["decompress"] }`
+  - If either crate requires `alloc` on this target, the crate will switch to `alloc`-enabled mode explicitly in feature flags, but not `std`.
 - Use `core` only in library by default; tests may enable `alloc`/`std`.
 
 ## 7. Error model
@@ -74,11 +79,22 @@
 - `container.xml` and `content.opf` follow EPUB relative-path rules.
 - `Image.src` should be emitted as **package-relative path** resolved from:
   - package root from `container.xml` (`rootfile@full-path`) and OPF base path, with `../` normalization and percent-decoding where safe.
+- Deterministic resolution order:
+  1. Strip fragment/query from XHTML `src`/`href` before path resolution.
+  2. Percent-decode once into ASCII/UTF-8 bytes.
+  3. Resolve against package root and OPF base path using pure lexical `.` and `..`.
+  4. Normalize path separators to `/`.
 - Text normalization:
   - Entities must be decoded (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`, numeric entities).
   - Collapse consecutive whitespace from parsed XHTML text runs into a single space outside `<pre>`.
   - Unknown namespaces are ignored; unknown tags emit `UnsupportedTag` and continue with children.
   - `<br>` emits `LineBreak`.
+
+## 9. Test-driven workflow
+- Explicit non-goals:
+  - No ZIP64, no DRM/encryption, no signature verification.
+  - No CSS cascade / computed-style rendering.
+  - No support for `canvas`, script execution, or font embedding.
 
 ## 9. Test-driven workflow
 - Add tests for each behavior before implementation:
