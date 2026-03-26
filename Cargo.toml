@@ -3,6 +3,7 @@ members = [
     "crates/xteink-buttons",
     "crates/xteink-power",
     "crates/xteink-display",
+    "crates/xteink-epub",
     "firmware",
 ]
 resolver = "2"

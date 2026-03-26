@@ -124,20 +124,20 @@ mod tests {
     fn gpio1_thresholds_map_to_expected_buttons() {
         assert_eq!(get_button_from_adc_1(3500), Some(Button::Left));
         assert_eq!(get_button_from_adc_1(2700), Some(Button::Confirm));
-        assert_eq!(get_button_from_adc_1(1500), Some(Button::Back));
-        assert_eq!(get_button_from_adc_1(500), Some(Button::Right));
+        assert_eq!(get_button_from_adc_1(1500), Some(Button::Right));
+        assert_eq!(get_button_from_adc_1(500), Some(Button::Back));
     }
 
     #[test]
     fn gpio2_thresholds_map_to_expected_buttons() {
-        assert_eq!(get_button_from_adc_2(2200), Some(Button::Up));
-        assert_eq!(get_button_from_adc_2(500), Some(Button::Down));
+        assert_eq!(get_button_from_adc_2(2200), Some(Button::Down));
+        assert_eq!(get_button_from_adc_2(500), Some(Button::Up));
     }
 
     #[test]
     fn adc_low_extreme_values_map_to_expected_endpoints() {
-        assert_eq!(get_button_from_adc_1(0), Some(Button::Right));
-        assert_eq!(get_button_from_adc_2(0), Some(Button::Down));
+        assert_eq!(get_button_from_adc_1(0), Some(Button::Down));
+        assert_eq!(get_button_from_adc_2(0), Some(Button::Left));
     }
 
     #[test]

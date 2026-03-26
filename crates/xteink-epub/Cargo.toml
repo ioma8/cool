@@ -1,0 +1,10 @@
+[package]
+name = "xteink-epub"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+miniz_oxide = { version = "0.8", default-features = false }
+
+[lib]
+path = "src/lib.rs"
