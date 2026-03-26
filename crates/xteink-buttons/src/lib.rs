@@ -1,8 +1,22 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
-pub const ADC_NO_BUTTON: u16 = 3800;
-const ADC_RANGES_1: [u16; 5] = [ADC_NO_BUTTON, 3100, 2090, 750, 0];
-const ADC_RANGES_2: [u16; 3] = [ADC_NO_BUTTON, 1120, 0];
+#[cfg(test)]
+extern crate std;
+
+pub const ADC_MAX: u16 = 4095;
+pub const ADC_NO_BUTTON: i32 = 3800;
+
+// Recorded on real devices (same ladder method as legacy C firmware):
+// BACK CONF LEFT RGHT   UP DOWN
+// 3597 2760 1530    6 2300    6
+// 3470 2666 1480    6 2222    5
+// 3470 2655 1470    3 2205    3
+// Averages:
+// BACK CONF LEFT RGHT   UP DOWN
+// 3512 2694 1493    5 2242    5
+// Midpoint bands are used below to keep the mapping tolerant across devices.
+const ADC_RANGES_1: [i32; 5] = [ADC_NO_BUTTON, 3100, 2090, 750, -1];
+const ADC_RANGES_2: [i32; 3] = [ADC_NO_BUTTON, 1120, -1];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -76,40 +90,29 @@ impl ButtonState {
 }
 
 pub fn get_button_from_adc_1(adc_value: u16) -> Option<Button> {
-    if adc_value > ADC_NO_BUTTON {
-        return None;
-    }
-
-    for i in 0..4 {
-        if ADC_RANGES_1[i + 1] < adc_value && adc_value <= ADC_RANGES_1[i] {
-            return match i {
-                0 => Some(Button::Back),
-                1 => Some(Button::Confirm),
-                2 => Some(Button::Left),
-                3 => Some(Button::Right),
-                _ => None,
-            };
-        }
-    }
-
-    None
+    let value = adc_value as i32;
+    map_from_ranges(&ADC_RANGES_1, value)
 }
 
 pub fn get_button_from_adc_2(adc_value: u16) -> Option<Button> {
-    if adc_value > ADC_NO_BUTTON {
-        return None;
-    }
+    let value = adc_value as i32;
+    map_from_ranges(&ADC_RANGES_2, value)
+}
 
-    for i in 0..2 {
-        if ADC_RANGES_2[i + 1] < adc_value && adc_value <= ADC_RANGES_2[i] {
-            return match i {
-                0 => Some(Button::Up),
-                1 => Some(Button::Down),
+fn map_from_ranges(ranges: &[i32], value: i32) -> Option<Button> {
+    for i in 0..(ranges.len() - 1) {
+        if ranges[i + 1] < value && value <= ranges[i] {
+            return match (ranges.len(), i) {
+                (5, 0) => Some(Button::Left),
+                (5, 1) => Some(Button::Confirm),
+                (5, 2) => Some(Button::Right),
+                (5, 3) => Some(Button::Back),
+                (3, 0) => Some(Button::Down),
+                (3, 1) => Some(Button::Up),
                 _ => None,
             };
         }
     }
-
     None
 }
 
@@ -119,9 +122,9 @@ mod tests {
 
     #[test]
     fn gpio1_thresholds_map_to_expected_buttons() {
-        assert_eq!(get_button_from_adc_1(3500), Some(Button::Back));
+        assert_eq!(get_button_from_adc_1(3500), Some(Button::Left));
         assert_eq!(get_button_from_adc_1(2700), Some(Button::Confirm));
-        assert_eq!(get_button_from_adc_1(1500), Some(Button::Left));
+        assert_eq!(get_button_from_adc_1(1500), Some(Button::Back));
         assert_eq!(get_button_from_adc_1(500), Some(Button::Right));
     }
 
@@ -129,6 +132,12 @@ mod tests {
     fn gpio2_thresholds_map_to_expected_buttons() {
         assert_eq!(get_button_from_adc_2(2200), Some(Button::Up));
         assert_eq!(get_button_from_adc_2(500), Some(Button::Down));
+    }
+
+    #[test]
+    fn adc_low_extreme_values_map_to_expected_endpoints() {
+        assert_eq!(get_button_from_adc_1(0), Some(Button::Right));
+        assert_eq!(get_button_from_adc_2(0), Some(Button::Down));
     }
 
     #[test]
@@ -144,7 +153,13 @@ mod tests {
 
     #[test]
     fn no_button_thresholds_return_none() {
-        assert_eq!(get_button_from_adc_1(4000), None);
-        assert_eq!(get_button_from_adc_2(3900), None);
+        assert_eq!(get_button_from_adc_1(4095), None);
+        assert_eq!(get_button_from_adc_2(4095), None);
+    }
+
+    #[test]
+    fn high_adc_band_is_not_a_front_button_press() {
+        assert_eq!(get_button_from_adc_1(3866), None);
+        assert_eq!(get_button_from_adc_2(3866), None);
     }
 }
