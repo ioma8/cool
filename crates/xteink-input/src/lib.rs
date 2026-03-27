@@ -18,7 +18,7 @@ pub struct InputManager {
 }
 
 impl InputManager {
-    pub const DEBOUNCE_DELAY_MS: u32 = 1;
+    pub const DEBOUNCE_DELAY_MS: u32 = 0;
 
     pub fn new() -> Self {
         Self {
@@ -42,9 +42,7 @@ impl InputManager {
         self.released_events = ButtonState::default();
 
         if state.state != self.last_state.state {
-            if (state.state & self.last_state.state) == 0 {
-                self.pending_since_ms = now_ms;
-            }
+            self.pending_since_ms = now_ms;
             self.last_state = state;
             self.pending_state = state;
         }

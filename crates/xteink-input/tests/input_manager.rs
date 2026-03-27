@@ -6,22 +6,11 @@ fn debounce_emits_press_and_release_edges() {
     let mut input = InputManager::new();
 
     input.update(ButtonState::default().with_button(RawButton::Left), 0);
-    input.update(
-        ButtonState::default().with_button(RawButton::Left),
-        InputManager::debounce_delay_ms() - 1,
-    );
-    assert!(!input.was_pressed(RawButton::Left));
-    assert!(!input.was_released(RawButton::Left));
-
-    input.update(
-        ButtonState::default().with_button(RawButton::Left),
-        InputManager::debounce_delay_ms() + 1,
-    );
     assert!(input.was_pressed(RawButton::Left));
     assert!(input.is_pressed(RawButton::Left));
+    assert!(!input.was_released(RawButton::Left));
 
     input.update(ButtonState::default(), InputManager::debounce_delay_ms() + 2);
-    input.update(ButtonState::default(), InputManager::debounce_delay_ms() * 2 + 3);
     assert!(input.was_released(RawButton::Left));
     assert!(!input.is_pressed(RawButton::Left));
 }

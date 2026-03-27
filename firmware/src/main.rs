@@ -477,7 +477,6 @@ fn main() -> ! {
             }
         }
 
-        loop_delay.delay_millis(1);
     }
 }
 
