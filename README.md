@@ -37,9 +37,14 @@ Rust `no_std` e-reader firmware for the Xteink X4 device (ESP32-C3 + SSD1677 e-i
 ```
 .
 ├── crates/
+│   ├── xteink-browser/  # Paged browser state machine for SD directory navigation
 │   ├── xteink-buttons/  # ADC threshold mapping and button-state logic
-│   ├── xteink-display/  # SSD1677 framebuffer and generic embedded-hal driver
-│   └── xteink-power/    # Wakeup classification and idle-timeout policy
+│   ├── xteink-display/  # SSD1677 framebuffer, text layout, render helpers
+│   ├── xteink-epub/     # EPUB and ZIP parsing for embedded use
+│   ├── xteink-fs/       # SD filesystem access and reader/browser orchestration
+│   ├── xteink-input/    # Debouncing and button event tracking
+│   ├── xteink-power/    # Wakeup classification and idle-timeout policy
+│   └── xteink-sdspi/    # SD-over-SPI transport and protocol layer
 ├── docs/                # Hardware behavior documentation
 └── firmware/            # ESP32-C3 application crate using esp-hal
 ```
@@ -53,9 +58,13 @@ firmware/src/
 
 Custom logic now lives in dedicated crates:
 
-- `xteink-display` contains the SSD1677 driver and framebuffer logic
-- `xteink-buttons` contains ADC-to-button mapping and button state handling
-- `xteink-power` contains wakeup classification and awake-timeout policy
+- `xteink-display` drives the e-ink panel and rendering pipeline
+- `xteink-fs` and `xteink-sdspi` provide SD-backed browsing and file access
+- `xteink-epub` parses EPUB content for on-device rendering
+- `xteink-buttons` and `xteink-input` handle raw input mapping and button events
+- `xteink-browser` and `xteink-power` provide UI navigation and sleep policy
+
+For a short architecture summary, see `docs/PROJECT_OVERVIEW.md`.
 
 ## Building
 
