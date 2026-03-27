@@ -12,6 +12,7 @@ embedded-hal.workspace = true
 critical-section.workspace = true
 nb.workspace = true
 embassy-embedded-hal = "0.5"
+embassy-futures = "0.1"
 embassy-time = "0.4"
 embassy-sync = "0.7"
 embedded-hal-bus = "0.3"

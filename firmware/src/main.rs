@@ -9,7 +9,7 @@ use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex, raw::NoopRawMutex};
 use embassy_sync::channel::{Channel, Receiver, Sender};
-use embassy_time::Timer;
+use embassy_futures::yield_now;
 use esp_backtrace as _;
 use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
@@ -227,7 +227,7 @@ async fn main(spawner: Spawner) -> ! {
         );
         service_display_refresh(&mut display, &mut pending_display_refresh);
         loop {
-            Timer::after_millis(1000).await;
+            yield_now().await;
         }
     };
 
@@ -245,7 +245,7 @@ async fn main(spawner: Spawner) -> ! {
             );
             service_display_refresh(&mut display, &mut pending_display_refresh);
             loop {
-                Timer::after_millis(1000).await;
+                yield_now().await;
             }
         }
     };
@@ -307,6 +307,7 @@ async fn input_task(
     power_button: Input<'static>,
 ) {
     let mut last_raw_state = ButtonState::default();
+    let delay = Delay::new();
     let mut debug_frame: u32 = 0;
 
     loop {
@@ -319,7 +320,7 @@ async fn input_task(
 
         for _ in 0..BUTTON_SCAN_ATTEMPTS {
             adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
-            Timer::after_micros(u64::from(BUTTON_SCAN_DELAY_US)).await;
+            delay.delay_micros(BUTTON_SCAN_DELAY_US);
             adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
             let sample_pin1 = get_button_from_adc_1(adc1_value);
             let sample_pin2 = get_button_from_adc_2(adc2_value);
@@ -332,7 +333,8 @@ async fn input_task(
                 break;
             }
 
-            Timer::after_micros(u64::from(BUTTON_SCAN_DELAY_US)).await;
+            delay.delay_micros(BUTTON_SCAN_DELAY_US);
+            yield_now().await;
         }
 
         if let Some(raw_button) = decoded_pin1 {
