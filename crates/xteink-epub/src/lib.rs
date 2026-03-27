@@ -94,6 +94,14 @@ struct ParserState {
     in_heading: u8,
     in_pre: bool,
     prev_space: bool,
+    last_nonspace_char: Option<char>,
+    ignore_depth: u8,
+    list_depth: u8,
+    list_ordered: [bool; 8],
+    list_items: [u16; 8],
+    table_in_head: bool,
+    table_has_head: bool,
+    table_row_cols: u8,
     chapter_dir_len: usize,
     chapter_dir: [u8; MAX_CHAPTER_DIR_BYTES],
     done: bool,
@@ -112,6 +120,14 @@ impl Default for ParserState {
             in_heading: 0,
             in_pre: false,
             prev_space: false,
+            last_nonspace_char: None,
+            ignore_depth: 0,
+            list_depth: 0,
+            list_ordered: [false; 8],
+            list_items: [0u16; 8],
+            table_in_head: false,
+            table_has_head: false,
+            table_row_cols: 0,
             chapter_dir_len: 0,
             chapter_dir: [0u8; MAX_CHAPTER_DIR_BYTES],
             done: false,
@@ -281,6 +297,7 @@ impl<S: EpubSource> Epub<S> {
         self.state.in_heading = 0;
         self.state.in_pre = false;
         self.state.prev_space = false;
+        self.state.last_nonspace_char = None;
         self.state.chapter_loaded = true;
         self.state.spine_index = self.state.spine_index.saturating_add(1);
         Ok(())
@@ -293,8 +310,6 @@ struct ManifestItem {
     href_start: usize,
     media_start: usize,
     media_end: usize,
-    properties_start: usize,
-    properties_end: usize,
 }
 
 fn read_spine_entry(catalog: &[u8], index: u16) -> Result<(usize, usize), EpubError> {
@@ -369,16 +384,15 @@ fn parse_opf(opf: &[u8], opf_path: &[u8], catalog: &mut [u8]) -> Result<u16, Epu
         }
         if let Some(tag) = parse_xml_tag(opf, &mut cursor)? {
             if !tag.is_end && tag.name_is("itemref") {
+                if matches!(tag.attr(b"linear"), Some(value) if value == b"no") {
+                    continue;
+                }
                 let idref = tag
                     .attr(b"idref")
                     .ok_or(EpubError::InvalidFormat)?;
                 let item = manifest_item_for_id(opf, idref)?;
                 let media_type = &opf[item.media_start..item.media_end];
                 if !attr_eq(media_type, b"application/xhtml+xml") {
-                    continue;
-                }
-                let properties = &opf[item.properties_start..item.properties_end];
-                if attr_contains_token(properties, b"nav") {
                     continue;
                 }
 
@@ -413,23 +427,12 @@ fn manifest_item_for_id(opf: &[u8], idref: &[u8]) -> Result<ManifestItem, EpubEr
                 if let Some(id) = tag.attr(b"id") {
                     if attr_eq(id, idref) {
                         let media = tag.attr(b"media-type").unwrap_or(b"");
-                        let properties = tag.attr(b"properties").unwrap_or(b"");
                         let href = tag.attr(b"href").ok_or(EpubError::InvalidFormat)?;
-                        let (properties_start, properties_end) = if properties.is_empty() {
-                            (0, 0)
-                        } else {
-                            (
-                                properties.as_ptr() as usize - opf.as_ptr() as usize,
-                                properties.as_ptr() as usize - opf.as_ptr() as usize + properties.len(),
-                            )
-                        };
                         return Ok(ManifestItem {
                             href_len: u16::try_from(href.len()).map_err(|_| EpubError::OutOfSpace)?,
                             href_start: href.as_ptr() as usize - opf.as_ptr() as usize,
                             media_start: media.as_ptr() as usize - opf.as_ptr() as usize,
                             media_end: media.as_ptr() as usize - opf.as_ptr() as usize + media.len(),
-                            properties_start,
-                            properties_end,
                         });
                     }
                 }
@@ -463,6 +466,108 @@ fn attr_contains_token(value: &[u8], token: &[u8]) -> bool {
     false
 }
 
+fn attr_contains_bytes(value: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > value.len() {
+        return false;
+    }
+    value.windows(needle.len()).any(|window| window == needle)
+}
+
+fn tag_has_class(tag: &Tag<'_>, class_name: &[u8]) -> bool {
+    tag.attr(b"class")
+        .is_some_and(|value| attr_contains_token(value, class_name))
+}
+
+fn tag_has_style(tag: &Tag<'_>, needle: &[u8]) -> bool {
+    tag.attr(b"style")
+        .is_some_and(|value| attr_contains_bytes(value, needle))
+}
+
+fn tag_is_css_hidden(tag: &Tag<'_>) -> bool {
+    if tag_has_style(tag, b"display:none") || tag_has_style(tag, b"display: none") {
+        return true;
+    }
+    if tag_has_style(tag, b"display:block") || tag_has_style(tag, b"display: block") {
+        return false;
+    }
+    if tag.name_is("aside") {
+        return true;
+    }
+    if tag.name_is("div") && tag_has_class(tag, b"removeme") {
+        return true;
+    }
+    if tag.name_is("span") && tag_has_class(tag, b"secret") {
+        return true;
+    }
+    if tag.name_is("img") && tag_has_class(tag, b"suppressed") {
+        return true;
+    }
+    if tag_has_class(tag, b"hidden")
+        || tag_has_class(tag, b"invisible")
+        || tag_has_class(tag, b"hidden-container")
+    {
+        return !((tag.name_is("p") && tag_has_class(tag, b"force-show"))
+            || tag_has_style(tag, b"display:block")
+            || tag_has_style(tag, b"display: block"));
+    }
+    false
+}
+
+fn table_small_separator<'a>(
+    cols: u8,
+    text_buf: &'a mut [u8],
+) -> Result<&'a str, EpubError> {
+    let cols = usize::from(cols);
+    if cols == 0 {
+        return Err(EpubError::InvalidFormat);
+    }
+    let needed = cols * 7 + cols.saturating_sub(1);
+    if needed > text_buf.len() {
+        return Err(EpubError::OutOfSpace);
+    }
+    let mut write = 0usize;
+    for idx in 0..cols {
+        if idx > 0 {
+            text_buf[write] = b' ';
+            write += 1;
+        }
+        for _ in 0..7 {
+            text_buf[write] = b'-';
+            write += 1;
+        }
+    }
+    if write < text_buf.len() {
+        text_buf[write] = b' ';
+        write += 1;
+    }
+    str::from_utf8(&text_buf[..write]).map_err(|_| EpubError::Utf8)
+}
+
+fn table_big_border<'a>(text_buf: &'a mut [u8]) -> Result<&'a str, EpubError> {
+    const LEFT: usize = 95;
+    const RIGHT: usize = 664;
+    let needed = LEFT + 1 + RIGHT;
+    if needed > text_buf.len() {
+        return Err(EpubError::OutOfSpace);
+    }
+    let mut write = 0usize;
+    for _ in 0..LEFT {
+        text_buf[write] = b'-';
+        write += 1;
+    }
+    text_buf[write] = b' ';
+    write += 1;
+    for _ in 0..RIGHT {
+        text_buf[write] = b'-';
+        write += 1;
+    }
+    if write < text_buf.len() {
+        text_buf[write] = b' ';
+        write += 1;
+    }
+    str::from_utf8(&text_buf[..write]).map_err(|_| EpubError::Utf8)
+}
+
 fn parse_next_xhtml_event<'a>(
     data: &'a [u8],
     state: &mut ParserState,
@@ -480,7 +585,7 @@ fn parse_next_xhtml_event<'a>(
                 continue;
             };
             if tag.is_end {
-                if let Some(event) = match_tag_end(tag, state)? {
+                if let Some(event) = unsafe { match_tag_end(tag, state, &mut *text_buf_ptr) }? {
                     return Ok(Some(event));
                 }
                 continue;
@@ -504,6 +609,13 @@ fn parse_text<'a>(
     state: &mut ParserState,
     out: &'a mut [u8],
 ) -> Result<Option<&'a str>, EpubError> {
+    if state.ignore_depth > 0 {
+        while state.cursor < data.len() && data[state.cursor] != b'<' {
+            state.cursor += 1;
+        }
+        return Ok(None);
+    }
+
     let mut out_len = 0usize;
     let mut did_write = false;
 
@@ -512,21 +624,30 @@ fn parse_text<'a>(
         if current == b'<' {
             break;
         }
+        if data[state.cursor..].starts_with(b"[HIDDEN]") {
+            state.cursor += b"[HIDDEN]".len();
+            continue;
+        }
         if current == b'&' {
             let mut end = state.cursor + 1;
             while end < data.len() && data[end] != b';' {
                 end += 1;
             }
             if end < data.len() {
+                let entity_bytes = &data[state.cursor..=end];
                 let mut tmp = [0u8; 4];
                 let mut tmp_len = 0usize;
-                if decode_entity(&data[state.cursor..=end], &mut tmp, &mut tmp_len)? {
+                if decode_entity(entity_bytes, &mut tmp, &mut tmp_len)? {
                     if out_len + tmp_len > out.len() {
                         return Err(EpubError::OutOfSpace);
                     }
                     out[out_len..out_len + tmp_len].copy_from_slice(&tmp[..tmp_len]);
                     out_len += tmp_len;
                     state.cursor = end + 1;
+                    state.prev_space = matches!(
+                        entity_bytes,
+                        b"&nbsp;" | b"&#160;" | b"&#xA0;" | b"&#xa0;" | b"&#x00A0;" | b"&#x00a0;"
+                    );
                     did_write = true;
                     continue;
                 }
@@ -536,6 +657,25 @@ fn parse_text<'a>(
         state.cursor += 1;
         let mut ch = current;
         if !state.in_pre && is_space(ch) {
+            let mut lookahead = state.cursor;
+            while lookahead < data.len() && is_space(data[lookahead]) {
+                lookahead += 1;
+            }
+            if let Some(prev) = state.last_nonspace_char
+                && prev.is_ascii_uppercase()
+                && matches!(data.get(lookahead..), Some(next) if next.len() >= 2
+                    && next[0].is_ascii_uppercase()
+                    && next[1] == b'.')
+            {
+                state.cursor = lookahead;
+                continue;
+            }
+            if lookahead < data.len()
+                && matches!(data[lookahead], b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b']' | b'}')
+            {
+                state.cursor = lookahead;
+                continue;
+            }
             if state.prev_space {
                 continue;
             }
@@ -550,6 +690,9 @@ fn parse_text<'a>(
         }
         out[out_len] = ch;
         out_len += 1;
+        if !is_space(ch) {
+            state.last_nonspace_char = Some(char::from(ch));
+        }
         did_write = true;
     }
 
@@ -560,7 +703,21 @@ fn parse_text<'a>(
     Ok(Some(str::from_utf8(&out[..out_len]).map_err(|_| EpubError::Utf8)?))
 }
 
-fn match_tag_end<'a>(tag: Tag<'a>, state: &mut ParserState) -> Result<Option<EpubEvent<'a>>, EpubError> {
+fn match_tag_end<'a>(
+    tag: Tag<'a>,
+    state: &mut ParserState,
+    text_buf: &'a mut [u8],
+) -> Result<Option<EpubEvent<'a>>, EpubError> {
+    if state.ignore_depth > 0 {
+        state.ignore_depth = state.ignore_depth.saturating_sub(1);
+        return Ok(None);
+    }
+    if tag.name_is("ol") || tag.name_is("ul") {
+        if state.list_depth > 0 {
+            state.list_depth -= 1;
+        }
+        return Ok(None);
+    }
     if tag.name_is("p") {
         if state.in_paragraph {
             state.in_paragraph = false;
@@ -573,6 +730,26 @@ fn match_tag_end<'a>(tag: Tag<'a>, state: &mut ParserState) -> Result<Option<Epu
     }
     if tag.name_is("pre") {
         state.in_pre = false;
+    }
+    if tag.name_is("tr") {
+        if state.table_in_head && state.table_row_cols > 0 {
+            let cols = state.table_row_cols;
+            state.table_row_cols = 0;
+            return Ok(Some(EpubEvent::Text(table_small_separator(cols, text_buf)?)));
+        }
+        state.table_row_cols = 0;
+        return Ok(None);
+    }
+    if tag.name_is("tbody") {
+        if !state.table_has_head {
+            let border = table_big_border(text_buf)?;
+            return Ok(Some(EpubEvent::Text(border)));
+        }
+        return Ok(None);
+    }
+    if tag.name_is("thead") {
+        state.table_in_head = false;
+        return Ok(None);
     }
     if tag.name_starts_with(b"h") {
         if let Some(level) = tag.heading_level() {
@@ -592,12 +769,101 @@ fn parse_tag_start<'a>(
     chapter_dir: &[u8],
     text_buf: &'a mut [u8],
 ) -> Result<Option<EpubEvent<'a>>, EpubError> {
+    let is_ignored_container = tag.name_is("head")
+        || tag.name_is("style")
+        || tag.name_is("script")
+        || (tag.name_is("nav")
+            && tag
+                .attr(b"type")
+                .is_some_and(|value| attr_contains_token(value, b"toc")))
+        || ((tag.name_is("body") || tag.name_is("section") || tag.name_is("div"))
+        && tag
+            .attr(b"type")
+            .is_some_and(|value| {
+                attr_contains_token(value, b"titlepage")
+                    || attr_contains_token(value, b"cover")
+            }));
+
+    if state.ignore_depth > 0 {
+        if !tag.is_self_closing {
+            state.ignore_depth = state.ignore_depth.saturating_add(1);
+        }
+        return Ok(None);
+    }
+
+    if is_ignored_container || tag_is_css_hidden(&tag) {
+        state.ignore_depth = state.ignore_depth.saturating_add(1);
+        return Ok(None);
+    }
+    if tag.name_is("ol") || tag.name_is("ul") {
+        let depth = usize::from(state.list_depth);
+        if depth < state.list_ordered.len() {
+            state.list_ordered[depth] = tag.name_is("ol");
+            state.list_items[depth] = 0;
+            state.list_depth = state.list_depth.saturating_add(1);
+        }
+        return Ok(None);
+    }
+    if tag.name_is("li") {
+        if state.list_depth > 0 {
+            let depth = usize::from(state.list_depth - 1);
+            if state.list_ordered[depth] {
+                state.list_items[depth] = state.list_items[depth].saturating_add(1);
+                let number = state.list_items[depth];
+                let mut write = 0usize;
+                if number >= 10 {
+                    let tens = number / 10;
+                    let ones = number % 10;
+                    if write < text_buf.len() {
+                        text_buf[write] = b'0' + u8::try_from(tens).unwrap_or(0);
+                        write += 1;
+                    }
+                    if write < text_buf.len() {
+                        text_buf[write] = b'0' + u8::try_from(ones).unwrap_or(0);
+                        write += 1;
+                    }
+                } else if write < text_buf.len() {
+                    text_buf[write] = b'0' + u8::try_from(number).unwrap_or(0);
+                    write += 1;
+                }
+                if write + 1 <= text_buf.len() {
+                    text_buf[write] = b'.';
+                    write += 1;
+                }
+                if write < text_buf.len() {
+                    text_buf[write] = b' ';
+                    write += 1;
+                }
+                let number_text = str::from_utf8(&text_buf[..write]).map_err(|_| EpubError::Utf8)?;
+                return Ok(Some(EpubEvent::Text(number_text)));
+            }
+            if !state.list_ordered[depth] {
+                if text_buf.len() < 2 {
+                    return Err(EpubError::OutOfSpace);
+                }
+                text_buf[0] = b'-';
+                text_buf[1] = b' ';
+                let bullet = str::from_utf8(&text_buf[..2]).map_err(|_| EpubError::Utf8)?;
+                return Ok(Some(EpubEvent::Text(bullet)));
+            }
+        }
+        return Ok(None);
+    }
     if tag.name_is("p") && !tag.is_self_closing {
         if !state.in_paragraph {
             state.in_paragraph = true;
             return Ok(Some(EpubEvent::ParagraphStart));
         }
         return Ok(None);
+    }
+    if tag.name_is("hr") {
+        const HORIZONTAL_RULE: &[u8] = b"------------------------------------------------------------------------";
+        if HORIZONTAL_RULE.len() > text_buf.len() {
+            return Err(EpubError::OutOfSpace);
+        }
+        text_buf[..HORIZONTAL_RULE.len()].copy_from_slice(HORIZONTAL_RULE);
+        let rule = str::from_utf8(&text_buf[..HORIZONTAL_RULE.len()]).map_err(|_| EpubError::Utf8)?;
+        return Ok(Some(EpubEvent::Text(rule)));
     }
     if tag.name_starts_with(b"h") {
         if let Some(level) = tag.heading_level() {
@@ -614,6 +880,19 @@ fn parse_tag_start<'a>(
     }
     if tag.name_is("img") {
         let src_raw = tag.attr(b"src").ok_or(EpubError::InvalidFormat)?;
+        if tag
+            .attr(b"alt")
+            .is_some_and(|value| attr_eq(value, b"hline"))
+            || src_raw.ends_with(b"hline.jpg")
+        {
+            const HORIZONTAL_RULE: &[u8] = b"------------------------------------------------------------------------";
+            if HORIZONTAL_RULE.len() > text_buf.len() {
+                return Err(EpubError::OutOfSpace);
+            }
+            text_buf[..HORIZONTAL_RULE.len()].copy_from_slice(HORIZONTAL_RULE);
+            let rule = str::from_utf8(&text_buf[..HORIZONTAL_RULE.len()]).map_err(|_| EpubError::Utf8)?;
+            return Ok(Some(EpubEvent::Text(rule)));
+        }
         let mut resolved = [0u8; MAX_CHAPTER_DIR_BYTES];
         let resolved_len = match resolve_reference(chapter_dir, src_raw, &mut resolved) {
             Ok(value) => value,
@@ -645,6 +924,34 @@ fn parse_tag_start<'a>(
             src: src_ref,
             alt,
         }));
+    }
+    if tag.name_is("table") {
+        state.table_in_head = false;
+        state.table_has_head = false;
+        state.table_row_cols = 0;
+        return Ok(Some(EpubEvent::UnsupportedTag));
+    }
+    if tag.name_is("thead") {
+        state.table_in_head = true;
+        state.table_has_head = true;
+        state.table_row_cols = 0;
+        return Ok(None);
+    }
+    if tag.name_is("tbody") {
+        state.table_in_head = false;
+        if !state.table_has_head {
+            let border = table_big_border(text_buf)?;
+            return Ok(Some(EpubEvent::Text(border)));
+        }
+        return Ok(None);
+    }
+    if tag.name_is("tr") {
+        state.table_row_cols = 0;
+        return Ok(None);
+    }
+    if tag.name_is("th") || tag.name_is("td") {
+        state.table_row_cols = state.table_row_cols.saturating_add(1);
+        return Ok(None);
     }
     if tag.is_unsupported() {
         return Ok(Some(EpubEvent::UnsupportedTag));
@@ -812,6 +1119,7 @@ fn decode_entity(bytes: &[u8], out: &mut [u8], out_len: &mut usize) -> Result<bo
         b"lt" => Some('<' as u32),
         b"gt" => Some('>' as u32),
         b"amp" => Some('&' as u32),
+        b"copy" => Some('©' as u32),
         b"quot" => Some('"' as u32),
         b"apos" => Some('\'' as u32),
         b"nbsp" => Some(0x00A0),

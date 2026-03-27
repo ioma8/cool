@@ -1,0 +1,5 @@
+Parser splits inline initial fragments across tags	proven
+Text flattener over-inserts boundaries around inline markup	proven
+Parser/entity coverage is still incomplete for common named entities	disproven
+List marker rendering lacked trailing spaces	proven
+Table separator rendering lacked trailing spaces	proven

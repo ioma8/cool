@@ -1,9 +1,11 @@
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use xteink_epub::{
     Epub, EpubArchive, EpubError, EpubEvent, EpubSource, ReaderBuffers, MAX_ARCHIVE_ENTRIES,
     MAX_ARCHIVE_NAME_CAPACITY,
 };
+
+mod reference_text;
 
 #[derive(Clone)]
 struct MemorySource {
@@ -127,27 +129,6 @@ fn load_fixture(name: &str) -> Vec<u8> {
     std::fs::read(path).expect("fixture should be readable")
 }
 
-fn fixture_names() -> Vec<String> {
-    let mut names = fs::read_dir(fixtures_dir())
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let is_epub = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
-            if is_epub {
-                entry.file_name().into_string().ok()
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names
-}
-
 fn collect_events(data: Vec<u8>, scratch: &mut Scratch) -> Result<Vec<OwnedEvent>, EpubError> {
     let source = MemorySource::new(data);
     let mut epub = Epub::open(source)?;
@@ -192,6 +173,74 @@ fn collect_level1_headings(events: &[OwnedEvent]) -> Vec<String> {
     }
 
     headings
+}
+
+fn readable_text_from_events(events: &[OwnedEvent]) -> String {
+    let mut out = String::new();
+    let mut pending_space = false;
+    let mut pending_initial = false;
+
+    for event in events {
+        match event {
+            OwnedEvent::Text(text) => {
+                if text.is_empty() {
+                    continue;
+                }
+
+                let trimmed = text.trim_start();
+                let starts_initial_fragment = matches!(
+                    trimmed.as_bytes().get(0..2),
+                    Some([first, b'.']) if first.is_ascii_uppercase()
+                );
+                let is_single_initial = trimmed.len() == 1 && trimmed.as_bytes()[0].is_ascii_uppercase();
+                let ends_with_initial = text
+                    .split_whitespace()
+                    .last()
+                    .is_some_and(|token| token.len() == 1 && token.as_bytes()[0].is_ascii_uppercase());
+
+                let needs_text_boundary = if out.is_empty() {
+                    false
+                } else {
+                    let prev = out.chars().rev().find(|ch| !ch.is_whitespace());
+                    let first = text.chars().find(|ch| !ch.is_whitespace());
+                    matches!(prev, Some(ch) if ch.is_alphanumeric() || matches!(ch, '.' | '!' | '?' | ':' | ';' | ',' | ')' | ']' | '}'))
+                        && matches!(first, Some(ch) if ch.is_alphanumeric() || matches!(ch, '‘' | '“' | '(' | '[' | '{'))
+                };
+
+                let should_join_initial = pending_initial
+                    && (is_single_initial || starts_initial_fragment || trimmed.starts_with('.'));
+
+                if (pending_space || (needs_text_boundary && !should_join_initial))
+                    && !out.ends_with(' ')
+                    && !out.is_empty()
+                {
+                    out.push(' ');
+                }
+
+                out.push_str(text);
+                pending_space = false;
+                pending_initial = ends_with_initial || should_join_initial;
+            }
+            OwnedEvent::ParagraphStart
+            | OwnedEvent::ParagraphEnd
+            | OwnedEvent::HeadingStart(_)
+            | OwnedEvent::HeadingEnd
+            | OwnedEvent::LineBreak => {
+                pending_space = !out.is_empty();
+                pending_initial = false;
+            }
+            OwnedEvent::UnsupportedTag | OwnedEvent::Image { .. } => {}
+        }
+    }
+
+    out
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    text.replace('Â', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn assert_contains_all(haystack: &str, needles: &[&str]) {
@@ -359,17 +408,24 @@ fn out_of_space_is_reported() {
 }
 
 #[test]
-fn every_epub_fixture_parses_successfully() {
-    let names = fixture_names();
-    assert!(!names.is_empty(), "expected epub fixtures in test/epubs");
+fn every_epub_fixture_matches_reference_text_prefix() {
+    assert!(
+        !reference_text::EPUB_REFERENCE_CASES.is_empty(),
+        "expected pandoc-handled epub fixtures"
+    );
 
-    for name in names {
+    for (name, expected) in reference_text::EPUB_REFERENCE_CASES {
+        let name = *name;
+
         let mut scratch = Scratch::large_for_smoke();
-        let events = collect_events(load_fixture(&name), &mut scratch)
+        let events = collect_events(load_fixture(name), &mut scratch)
             .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+
+        let actual = normalize_whitespace(&readable_text_from_events(&events));
+
         assert!(
-            !events.is_empty(),
-            "expected at least one event from fixture {name}"
+            actual.starts_with(expected),
+            "fixture {name} did not match reference text prefix\nactual: {actual}\nexpected: {expected}"
         );
     }
 }
