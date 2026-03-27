@@ -1,0 +1,10 @@
+[package]
+name = "xteink-input"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xteink-buttons = { path = "../xteink-buttons" }
+
+[lib]
+path = "src/lib.rs"

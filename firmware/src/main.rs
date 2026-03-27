@@ -21,6 +21,7 @@ use heapless::String;
 use xteink_browser::{Input as BrowserInput, PagedAction, PagedBrowser};
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
 use xteink_buttons::{Button as RawButton, get_button_from_adc_1, get_button_from_adc_2};
+use xteink_input::InputManager;
 use xteink_power::{ResetReason, WakeCause, classify_wakeup_reason};
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
@@ -226,7 +227,8 @@ fn main() -> ! {
     esp_println::println!("Browser render complete");
 
     let loop_delay = Delay::new();
-    let mut last_button: Option<RawButton> = None;
+    let mut input_manager = InputManager::new();
+    let mut now_ms = 0u32;
     let mut adc_config = AdcConfig::new();
     peripherals.GPIO1.rtcio_pullup(false);
     peripherals.GPIO1.rtcio_pulldown(true);
@@ -243,27 +245,41 @@ fn main() -> ! {
     );
 
     loop {
-        let mut button = None;
+        let mut raw_state = xteink_buttons::ButtonState::default();
         let adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
         loop_delay.delay_millis(1);
         let adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
 
         if let Some(raw_button) = get_button_from_adc_1(adc1_value) {
-            button = Some(raw_button);
+            raw_state = raw_state.with_button(raw_button);
         } else if let Some(raw_button) = get_button_from_adc_2(adc2_value) {
-            button = Some(raw_button);
+            raw_state = raw_state.with_button(raw_button);
         }
 
         if power_button.is_low() {
-            button = Some(RawButton::Power);
+            raw_state = raw_state.with_button(RawButton::Power);
         }
 
-        let pressed = if button != last_button {
-            last_button = button;
-            button
+        input_manager.update(raw_state, now_ms);
+        let pressed = if input_manager.was_pressed(RawButton::Confirm) {
+            Some(RawButton::Confirm)
+        } else if input_manager.was_pressed(RawButton::Back) {
+            Some(RawButton::Back)
+        } else if input_manager.was_pressed(RawButton::Left) {
+            Some(RawButton::Left)
+        } else if input_manager.was_pressed(RawButton::Right) {
+            Some(RawButton::Right)
+        } else if input_manager.was_pressed(RawButton::Up) {
+            Some(RawButton::Up)
+        } else if input_manager.was_pressed(RawButton::Down) {
+            Some(RawButton::Down)
+        } else if input_manager.was_pressed(RawButton::Power) {
+            Some(RawButton::Power)
         } else {
             None
         };
+
+        now_ms = now_ms.saturating_add(1);
 
         if screen_mode == ScreenMode::Browse {
             if let Some(button) = pressed {
