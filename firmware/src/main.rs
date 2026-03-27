@@ -122,6 +122,7 @@ impl PendingDisplayRefresh {
 const ADC_ATTEN_BITS_12DB: u8 = 0x03;
 const BUTTON_SCAN_ATTEMPTS: usize = 6;
 const BUTTON_SCAN_DELAY_US: u32 = 150;
+const RELEASE_STREAK_TO_REARM_PRESS: u8 = 2;
 
 #[inline]
 fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
@@ -307,6 +308,8 @@ async fn input_task(
     power_button: Input<'static>,
 ) {
     let mut last_raw_state = ButtonState::default();
+    let mut pressed_lock: Option<RawButton> = None;
+    let mut no_button_streak: u8 = RELEASE_STREAK_TO_REARM_PRESS;
     let delay = Delay::new();
     let mut debug_frame: u32 = 0;
 
@@ -363,7 +366,20 @@ async fn input_task(
         let pressed = pressed_button_from_state(last_raw_state, raw_state);
         last_raw_state = raw_state;
         if let Some(button) = pressed {
-            let _ = sender.send(button).await;
+            if pressed_lock.is_none() && no_button_streak >= RELEASE_STREAK_TO_REARM_PRESS {
+                let _ = sender.send(button).await;
+                pressed_lock = Some(button);
+                no_button_streak = 0;
+            }
+        }
+
+        if raw_state.state == 0 {
+            no_button_streak = no_button_streak.saturating_add(1);
+            if no_button_streak >= RELEASE_STREAK_TO_REARM_PRESS {
+                pressed_lock = None;
+            }
+        } else {
+            no_button_streak = 0;
         }
 
         yield_now().await;
