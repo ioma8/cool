@@ -568,10 +568,10 @@ fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
 }
 
 fn pressed_button(input_manager: &InputManager) -> Option<RawButton> {
-    if input_manager.was_pressed(RawButton::Confirm) {
-        Some(RawButton::Confirm)
-    } else if input_manager.was_pressed(RawButton::Back) {
+    if input_manager.was_pressed(RawButton::Back) {
         Some(RawButton::Back)
+    } else if input_manager.was_pressed(RawButton::Confirm) {
+        Some(RawButton::Confirm)
     } else if input_manager.was_pressed(RawButton::Left) {
         Some(RawButton::Left)
     } else if input_manager.was_pressed(RawButton::Right) {
