@@ -697,7 +697,6 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeSpi {
         writes: Vec<Vec<u8>>,
-        flushes: usize,
     }
 
     impl embedded_hal::spi::ErrorType for FakeSpi {
