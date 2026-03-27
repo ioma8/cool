@@ -42,6 +42,8 @@ enum BrowserRefresh {
 }
 
 const ADC_ATTEN_BITS_12DB: u8 = 0x03;
+const BUTTON_SCAN_ATTEMPTS: usize = 6;
+const BUTTON_SCAN_DELAY_US: u32 = 150;
 
 #[inline]
 fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
@@ -195,21 +197,28 @@ fn main() -> ! {
 
     loop {
         let mut raw_state = ButtonState::default();
-        let mut adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
-        loop_delay.delay_micros(250);
-        let mut adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
+        let mut adc1_value = 0u16;
+        let mut adc2_value = 0u16;
+        let mut decoded_pin1 = None;
+        let mut decoded_pin2 = None;
+        let mut power_button_pressed = false;
 
-        let mut decoded_pin1 = get_button_from_adc_1(adc1_value);
-        let mut decoded_pin2 = get_button_from_adc_2(adc2_value);
-        let power_button_pressed = power_button.is_low();
-
-        if decoded_pin1.is_none() && decoded_pin2.is_none() && !power_button_pressed {
-            loop_delay.delay_micros(250);
+        for _ in 0..BUTTON_SCAN_ATTEMPTS {
             adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
-            loop_delay.delay_micros(250);
+            loop_delay.delay_micros(BUTTON_SCAN_DELAY_US);
             adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
-            decoded_pin1 = get_button_from_adc_1(adc1_value);
-            decoded_pin2 = get_button_from_adc_2(adc2_value);
+            let sample_pin1 = get_button_from_adc_1(adc1_value);
+            let sample_pin2 = get_button_from_adc_2(adc2_value);
+            let sample_power = power_button.is_low();
+
+            if sample_pin1.is_some() || sample_pin2.is_some() || sample_power {
+                decoded_pin1 = sample_pin1;
+                decoded_pin2 = sample_pin2;
+                power_button_pressed = sample_power;
+                break;
+            }
+
+            loop_delay.delay_micros(BUTTON_SCAN_DELAY_US);
         }
 
         if let Some(raw_button) = decoded_pin1 {
