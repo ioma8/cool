@@ -5,23 +5,6 @@ extern crate std;
 
 pub use xteink_buttons::{Button, ButtonState};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrowseCommand {
-    None,
-    OpenSelected,
-    GoUp,
-}
-
-pub fn browse_command_from_buttons(state: ButtonState, at_root: bool) -> BrowseCommand {
-    if state.is_pressed(Button::Confirm) {
-        return BrowseCommand::OpenSelected;
-    }
-    if state.is_pressed(Button::Back) && !at_root {
-        return BrowseCommand::GoUp;
-    }
-    BrowseCommand::None
-}
-
 #[derive(Debug, Clone)]
 pub struct InputManager {
     current_state: ButtonState,
@@ -119,58 +102,5 @@ impl InputManager {
 impl Default for InputManager {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ButtonNavigator;
-
-impl ButtonNavigator {
-    pub fn next_index(current_index: usize, total_items: usize) -> usize {
-        if total_items == 0 {
-            return 0;
-        }
-        (current_index + 1) % total_items
-    }
-
-    pub fn previous_index(current_index: usize, total_items: usize) -> usize {
-        if total_items == 0 {
-            return 0;
-        }
-        (current_index + total_items - 1) % total_items
-    }
-
-    pub fn next_page_index(current_index: usize, total_items: usize, items_per_page: usize) -> usize {
-        if total_items == 0 || items_per_page == 0 {
-            return 0;
-        }
-        if total_items <= items_per_page {
-            return Self::next_index(current_index, total_items);
-        }
-
-        let last_page_index = (total_items - 1) / items_per_page;
-        let current_page_index = current_index / items_per_page;
-        if current_page_index < last_page_index {
-            (current_page_index + 1) * items_per_page
-        } else {
-            0
-        }
-    }
-
-    pub fn previous_page_index(current_index: usize, total_items: usize, items_per_page: usize) -> usize {
-        if total_items == 0 || items_per_page == 0 {
-            return 0;
-        }
-        if total_items <= items_per_page {
-            return Self::previous_index(current_index, total_items);
-        }
-
-        let last_page_index = (total_items - 1) / items_per_page;
-        let current_page_index = current_index / items_per_page;
-        if current_page_index > 0 {
-            (current_page_index - 1) * items_per_page
-        } else {
-            last_page_index * items_per_page
-        }
     }
 }

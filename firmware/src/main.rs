@@ -11,18 +11,17 @@ use esp_hal::{
     delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPinWithResistors},
     main,
-    rtc_cntl::{SocResetReason, reset_reason, wakeup_cause},
     spi::master::{Config as SpiConfig, Spi},
     peripherals::APB_SARADC,
-    system::{Cpu, SleepSource},
     time::Rate,
 };
 use heapless::String;
 use xteink_browser::{Input as BrowserInput, PagedAction, PagedBrowser};
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
-use xteink_buttons::{Button as RawButton, get_button_from_adc_1, get_button_from_adc_2};
+use xteink_buttons::{
+    Button as RawButton, ButtonState, get_button_from_adc_1, get_button_from_adc_2,
+};
 use xteink_input::InputManager;
-use xteink_power::{ResetReason, WakeCause, classify_wakeup_reason};
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
 
@@ -49,38 +48,6 @@ enum BrowserRefresh {
 }
 
 const ADC_ATTEN_BITS_12DB: u8 = 0x03;
-
-trait BrowserScreenDisplay {
-    fn clear(&mut self, color: u8);
-    fn draw_text(&mut self, x: u16, y: u16, text: &str);
-    fn refresh_fast(&mut self);
-    fn refresh_full(&mut self);
-}
-
-impl<SPI, DC, RST, BUSY, DELAY> BrowserScreenDisplay for SSD1677Display<SPI, DC, RST, BUSY, DELAY>
-where
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
-{
-    fn clear(&mut self, color: u8) {
-        SSD1677Display::clear(self, color);
-    }
-
-    fn draw_text(&mut self, x: u16, y: u16, text: &str) {
-        SSD1677Display::draw_text(self, x, y, text);
-    }
-
-    fn refresh_fast(&mut self) {
-        SSD1677Display::refresh_fast(self);
-    }
-
-    fn refresh_full(&mut self) {
-        SSD1677Display::refresh_full(self);
-    }
-}
 
 #[inline]
 fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
@@ -133,18 +100,6 @@ fn main() -> ! {
     esp_println::println!("Xteink X4 Rust MVP - Booting...");
     esp_println::println!("USB Connected: {}", usb_connected);
     esp_println::println!("================================");
-
-    let reason = reset_reason(Cpu::ProCpu);
-    let wake_reason = wakeup_cause();
-    esp_println::println!("Reset reason: {:?}", reason);
-    esp_println::println!("Wake cause: {:?}", wake_reason);
-
-    let wakeup_reason = classify_wakeup_reason(
-        map_wake_cause(wake_reason),
-        map_reset_reason(reason),
-        usb_connected,
-    );
-    esp_println::println!("Wakeup reason: {:?}", wakeup_reason);
 
     let display_spi_config = SpiConfig::default()
         .with_frequency(Rate::from_mhz(40))
@@ -245,7 +200,7 @@ fn main() -> ! {
     );
 
     loop {
-        let mut raw_state = xteink_buttons::ButtonState::default();
+        let mut raw_state = ButtonState::default();
         let adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
         loop_delay.delay_millis(1);
         let adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
@@ -261,23 +216,7 @@ fn main() -> ! {
         }
 
         input_manager.update(raw_state, now_ms);
-        let pressed = if input_manager.was_pressed(RawButton::Confirm) {
-            Some(RawButton::Confirm)
-        } else if input_manager.was_pressed(RawButton::Back) {
-            Some(RawButton::Back)
-        } else if input_manager.was_pressed(RawButton::Left) {
-            Some(RawButton::Left)
-        } else if input_manager.was_pressed(RawButton::Right) {
-            Some(RawButton::Right)
-        } else if input_manager.was_pressed(RawButton::Up) {
-            Some(RawButton::Up)
-        } else if input_manager.was_pressed(RawButton::Down) {
-            Some(RawButton::Down)
-        } else if input_manager.was_pressed(RawButton::Power) {
-            Some(RawButton::Power)
-        } else {
-            None
-        };
+        let pressed = pressed_button(&input_manager);
 
         now_ms = now_ms.saturating_add(1);
 
@@ -554,14 +493,18 @@ fn browser_page_size() -> usize {
     visible.clamp(1, sd_ffi::MAX_ENTRIES)
 }
 
-fn render_browser_screen<D>(
-    display: &mut D,
+fn render_browser_screen<SPI, DC, RST, BUSY, DELAY>(
+    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     title: &str,
     entries: &[ListedEntry],
     selected: Option<usize>,
     refresh: BrowserRefresh,
 ) where
-    D: BrowserScreenDisplay,
+    SPI: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
 {
     display.clear(0xFF);
     display.draw_text(4, 4, title);
@@ -613,23 +556,22 @@ fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
     display.refresh_full();
 }
 
-fn map_wake_cause(source: SleepSource) -> WakeCause {
-    match source {
-        SleepSource::Undefined => WakeCause::Undefined,
-        SleepSource::Gpio => WakeCause::Gpio,
-        _ => WakeCause::Other,
+fn pressed_button(input_manager: &InputManager) -> Option<RawButton> {
+    if input_manager.was_pressed(RawButton::Confirm) {
+        Some(RawButton::Confirm)
+    } else if input_manager.was_pressed(RawButton::Back) {
+        Some(RawButton::Back)
+    } else if input_manager.was_pressed(RawButton::Left) {
+        Some(RawButton::Left)
+    } else if input_manager.was_pressed(RawButton::Right) {
+        Some(RawButton::Right)
+    } else if input_manager.was_pressed(RawButton::Up) {
+        Some(RawButton::Up)
+    } else if input_manager.was_pressed(RawButton::Down) {
+        Some(RawButton::Down)
+    } else if input_manager.was_pressed(RawButton::Power) {
+        Some(RawButton::Power)
+    } else {
+        None
     }
-}
-
-fn map_reset_reason(reason: Option<SocResetReason>) -> Option<ResetReason> {
-    match reason {
-        Some(SocResetReason::ChipPowerOn) => Some(ResetReason::ChipPowerOn),
-        Some(SocResetReason::CoreDeepSleep) => Some(ResetReason::CoreDeepSleep),
-        Some(_) => Some(ResetReason::Other),
-        None => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
 }

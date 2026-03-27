@@ -1,7 +1,5 @@
 use xteink_buttons::Button as RawButton;
-use xteink_input::{
-    browse_command_from_buttons, ButtonNavigator, ButtonState, BrowseCommand, InputManager,
-};
+use xteink_input::{ButtonState, InputManager};
 
 #[test]
 fn debounce_emits_press_and_release_edges() {
@@ -53,24 +51,6 @@ fn input_manager_handles_multiple_raw_buttons() {
     assert!(manager.is_pressed(RawButton::Back));
     assert!(manager.is_pressed(RawButton::Power));
     assert_eq!(manager.state(), ButtonState::default().with_button(RawButton::Back).with_button(RawButton::Power));
-}
-
-#[test]
-fn button_navigator_pages_by_screenfuls_and_wraps() {
-    assert_eq!(ButtonNavigator::next_page_index(0, 10, 4), 4);
-    assert_eq!(ButtonNavigator::next_page_index(8, 10, 4), 0);
-    assert_eq!(ButtonNavigator::previous_page_index(4, 10, 4), 0);
-    assert_eq!(ButtonNavigator::previous_page_index(0, 10, 4), 8);
-}
-
-#[test]
-fn browse_mode_confirm_opens_selected_and_back_goes_up() {
-    let confirm = ButtonState::default().with_button(RawButton::Confirm);
-    assert_eq!(browse_command_from_buttons(confirm, false), BrowseCommand::OpenSelected);
-
-    let back = ButtonState::default().with_button(RawButton::Back);
-    assert_eq!(browse_command_from_buttons(back, false), BrowseCommand::GoUp);
-    assert_eq!(browse_command_from_buttons(back, true), BrowseCommand::None);
 }
 
 #[test]
