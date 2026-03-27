@@ -22,14 +22,16 @@ Rust `no_std` e-reader firmware for the Xteink X4 device (ESP32-C3 + SSD1677 e-i
 
 ## Button Mapping
 
-| Button | Pin | Method | ADC Range |
+The firmware uses calibrated raw ADC thresholds from `xteink-buttons`. The front/side button ADC reads are taken with 12 dB attenuation, so these values are board-specific raw readings rather than normalized voltages.
+
+| Button | Pin | Method | Raw ADC Range |
 |--------|-----|--------|-----------|
-| Back | GPIO1 | ADC | 3100-3800 |
-| Confirm | GPIO1 | ADC | 2090-3100 |
-| Left | GPIO1 | ADC | 750-2090 |
-| Right | GPIO1 | ADC | 0-750 |
-| Up | GPIO2 | ADC | 1120-3800 |
-| Down | GPIO2 | ADC | 0-1120 |
+| Back | GPIO1 | ADC | `10360 < value <= 11480` |
+| Confirm | GPIO1 | ADC | `11540 <= value <= 11740` or `9880 < value <= 10360` |
+| Left | GPIO1 | ADC | `8480 < value <= 9880` |
+| Right | GPIO1 | ADC | `value <= 8480` |
+| Up | GPIO2 | ADC | `17280 < value <= 19380` |
+| Down | GPIO2 | ADC | `value <= 17280` |
 | Power | GPIO3 | Digital | Active LOW |
 
 ## Workspace
