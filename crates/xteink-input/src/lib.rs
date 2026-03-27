@@ -5,8 +5,6 @@ extern crate std;
 
 pub use xteink_buttons::{Button, ButtonState};
 
-pub type RawInputState = ButtonState;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowseCommand {
     None,
@@ -121,51 +119,6 @@ impl InputManager {
 impl Default for InputManager {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MappedInputManager {
-    input: InputManager,
-}
-
-impl MappedInputManager {
-    pub fn new() -> Self {
-        Self {
-            input: InputManager::new(),
-        }
-    }
-
-    pub fn update(&mut self, raw: RawInputState, now_ms: u32) {
-        self.input.update(raw, now_ms);
-    }
-
-    pub fn is_pressed(&self, button: Button) -> bool {
-        self.input.is_pressed(button)
-    }
-
-    pub fn was_pressed(&self, button: Button) -> bool {
-        self.input.was_pressed(button)
-    }
-
-    pub fn was_released(&self, button: Button) -> bool {
-        self.input.was_released(button)
-    }
-
-    pub fn was_any_pressed(&self) -> bool {
-        self.input.was_any_pressed()
-    }
-
-    pub fn was_any_released(&self) -> bool {
-        self.input.was_any_released()
-    }
-
-    pub fn held_time(&self, now_ms: u32) -> u32 {
-        self.input.held_time(now_ms)
-    }
-
-    pub fn state(&self) -> ButtonState {
-        self.input.state()
     }
 }
 

@@ -1,7 +1,6 @@
 use xteink_buttons::Button as RawButton;
 use xteink_input::{
     browse_command_from_buttons, ButtonNavigator, ButtonState, BrowseCommand, InputManager,
-    MappedInputManager,
 };
 
 #[test]
@@ -75,21 +74,21 @@ fn browse_mode_confirm_opens_selected_and_back_goes_up() {
 }
 
 #[test]
-fn mapped_manager_is_identity_for_raw_inputs() {
-    let mut mapped = MappedInputManager::new();
-    mapped.update(
+fn direct_manager_with_multiple_buttons_is_stable() {
+    let mut input = InputManager::new();
+    input.update(
         ButtonState::default()
             .with_button(RawButton::Up)
             .with_button(RawButton::Down),
         InputManager::debounce_delay_ms() + 1,
     );
-    mapped.update(
+    input.update(
         ButtonState::default()
             .with_button(RawButton::Up)
             .with_button(RawButton::Down),
         InputManager::debounce_delay_ms() * 2 + 2,
     );
 
-    assert!(mapped.is_pressed(RawButton::Up));
-    assert!(mapped.is_pressed(RawButton::Down));
+    assert!(input.is_pressed(RawButton::Up));
+    assert!(input.is_pressed(RawButton::Down));
 }
