@@ -292,27 +292,19 @@ where
                     on_text_chunk(chunk)?;
                 }
                 EpubEvent::LineBreak => {
-                    if !text.is_empty() {
-                        on_text_chunk(text.as_str())?;
-                        text.clear();
-                    }
-                    on_text_chunk("\n")?;
                     if render_enabled {
                         cursor_y = self.flush_text_buffer(&mut text, cursor_y);
                         cursor_y = cursor_y.saturating_add(line_height);
                     }
+                    on_text_chunk("\n")?;
                 }
                 EpubEvent::ParagraphStart | EpubEvent::HeadingStart(_) => {}
                 EpubEvent::ParagraphEnd | EpubEvent::HeadingEnd => {
-                    if !text.is_empty() {
-                        on_text_chunk(text.as_str())?;
-                        text.clear();
-                    }
-                    on_text_chunk("\n")?;
                     if render_enabled {
                         cursor_y = self.flush_text_buffer(&mut text, cursor_y);
-                        cursor_y = cursor_y.saturating_add(line_height);
+                        cursor_y = cursor_y.saturating_add(line_height / 2);
                     }
+                    on_text_chunk("\n")?;
                 }
                 EpubEvent::Image { alt, .. } => {
                     if let Some(alt) = alt {
@@ -320,9 +312,11 @@ where
                             text.push(alt);
                         }
                         on_text_chunk(alt)?;
-                        on_text_chunk("\n")?;
                         if render_enabled {
                             cursor_y = self.flush_text_buffer(&mut text, cursor_y);
+                        }
+                        on_text_chunk("\n")?;
+                        if render_enabled {
                             cursor_y = cursor_y.saturating_add(line_height);
                         }
                     }
