@@ -4,28 +4,28 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-esp-hal.workspace = true
-esp-backtrace.workspace = true
-esp-println.workspace = true
-esp-bootloader-esp-idf.workspace = true
+embassy-executor = { version = "0.9", default-features = false }
+embassy-sync = "0.7"
+embassy-time = "0.4"
+embassy-futures = "0.1"
+embassy-embedded-hal = "0.5"
+esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy"] }
+esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
+esp-backtrace = { version = "0.18", features = ["esp32c3", "panic-handler", "println"] }
+esp-println = { version = "0.16", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32c3"] }
+esp32c3 = "0.31.0"
 embedded-hal.workspace = true
 critical-section.workspace = true
 nb.workspace = true
-embassy-embedded-hal = "0.5"
-embassy-futures = "0.1"
-embassy-time = "0.4"
-embassy-sync = "0.7"
-embedded-hal-bus = "0.3"
-esp32c3 = "0.31.0"
 heapless = { version = "0.8", default-features = false }
 xteink-buttons = { path = "../crates/xteink-buttons" }
 xteink-input = { path = "../crates/xteink-input" }
 xteink-browser = { path = "../crates/xteink-browser" }
 xteink-epub = { path = "../crates/xteink-epub" }
-xteink-fs = { path = "../crates/xteink-fs" }
+xteink-fs = { path = "../crates/xteink-fs", features = ["embedded"] }
 xteink-display = { path = "../crates/xteink-display" }
-embassy-executor = { version = "0.9", default-features = false }
-esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy"] }
+embedded-hal-bus = "0.3"
 
 [[bin]]
 name = "xteink-reader"

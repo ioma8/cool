@@ -459,7 +459,7 @@ where
         line_height: u16,
         text: &str,
     ) -> Result<bool, xteink_epub::EpubError> {
-        let mut finish_line = |display: &mut Self,
+        let finish_line = |display: &mut Self,
                                line: &mut WrappedLine<CACHED_LINE_LEN>,
                                cursor_y: &mut u16,
                                current_page: &mut usize|
@@ -482,7 +482,7 @@ where
             Ok(false)
         };
 
-        let mut finish_vertical_gap = |display: &mut Self,
+        let finish_vertical_gap = |display: &mut Self,
                                        cursor_y: &mut u16,
                                        current_page: &mut usize|
          -> Result<bool, xteink_epub::EpubError> {
