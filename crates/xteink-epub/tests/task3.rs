@@ -1,6 +1,9 @@
 use std::{fs, path::PathBuf};
 
-use xteink_epub::{Epub, EpubError, EpubEvent, EpubSource, ReaderBuffers};
+use xteink_epub::{
+    Epub, EpubArchive, EpubError, EpubEvent, EpubSource, ReaderBuffers, MAX_ARCHIVE_ENTRIES,
+    MAX_ARCHIVE_NAME_CAPACITY,
+};
 
 #[derive(Clone)]
 struct MemorySource {
@@ -40,6 +43,7 @@ struct Scratch {
     xml: Vec<u8>,
     catalog: Vec<u8>,
     path_buf: Vec<u8>,
+    archive: EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
 
 impl Scratch {
@@ -50,6 +54,7 @@ impl Scratch {
             xml: vec![0; xml],
             catalog: vec![0; catalog],
             path_buf: vec![0; path_buf],
+            archive: EpubArchive::new(),
         }
     }
 
@@ -60,6 +65,7 @@ impl Scratch {
             xml: self.xml.as_mut_slice(),
             catalog: self.catalog.as_mut_slice(),
             path_buf: self.path_buf.as_mut_slice(),
+            archive: &mut self.archive,
         }
     }
 

@@ -9,8 +9,8 @@ use miniz_oxide::inflate::{decompress_slice_iter_to_slice, TINFLStatus};
 pub use zip::{CompressionMethod, EpubArchive, EpubEntryMetadata, Error as ZipError};
 
 pub const MAX_CHAPTER_DIR_BYTES: usize = 256;
-const MAX_ARCHIVE_ENTRIES: usize = 512;
-const MAX_ARCHIVE_NAME_CAPACITY: usize = 16 * 1024;
+pub const MAX_ARCHIVE_ENTRIES: usize = 512;
+pub const MAX_ARCHIVE_NAME_CAPACITY: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub enum EpubError {
@@ -63,6 +63,7 @@ pub struct ReaderBuffers<'a> {
     pub xml: &'a mut [u8],
     pub catalog: &'a mut [u8],
     pub path_buf: &'a mut [u8],
+    pub archive: &'a mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
 
 #[derive(Debug)]
@@ -140,12 +141,14 @@ impl<S: EpubSource> Epub<S> {
             xml,
             catalog,
             path_buf,
+            archive,
         } = workspace;
         let inflate_ptr = inflate as *mut [u8];
         let xml_ptr = xml as *mut [u8];
         let catalog_ptr = catalog as *mut [u8];
         let path_buf_ptr = path_buf as *mut [u8];
         let zip_cd_ptr = zip_cd as *mut [u8];
+        let archive_ptr = archive as *mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>;
 
         if self.state.done {
             return Ok(None);
@@ -158,6 +161,7 @@ impl<S: EpubSource> Epub<S> {
                 unsafe { &mut *inflate_ptr },
                 unsafe { &mut *zip_cd_ptr },
                 unsafe { &mut *path_buf_ptr },
+                unsafe { &mut *archive_ptr },
             )?;
             self.state.catalog_ready = true;
         }
@@ -178,6 +182,7 @@ impl<S: EpubSource> Epub<S> {
                     unsafe { &mut *inflate_ptr },
                     unsafe { &mut *zip_cd_ptr },
                     unsafe { &mut *path_buf_ptr },
+                    unsafe { &mut *archive_ptr },
                 )?;
             }
 
@@ -215,8 +220,8 @@ impl<S: EpubSource> Epub<S> {
         inflate: &mut [u8],
         zip_cd: &mut [u8],
         _path_buf: &mut [u8],
+        archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
-        let mut archive = EpubArchive::<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>::new();
         archive.parse(&self.source)?;
 
         let container_entry = archive
@@ -251,12 +256,12 @@ impl<S: EpubSource> Epub<S> {
         inflate: &mut [u8],
         zip_cd: &mut [u8],
         _path_buf: &mut [u8],
+        archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
         let index = self.state.spine_index;
         let (entry_start, entry_len) = read_spine_entry(catalog, index)?;
         let chapter_path = &catalog[entry_start..entry_start + entry_len];
 
-        let mut archive = EpubArchive::<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>::new();
         archive.parse(&self.source)?;
         let entry = archive
             .entry_by_name_bytes(chapter_path)

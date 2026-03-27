@@ -6,6 +6,8 @@ const EOCD_FIXED_SIZE: usize = 22;
 const CENTRAL_DIR_FILE_HEADER_SIZE: usize = 46;
 const LOCAL_FILE_HEADER_SIZE: usize = 30;
 const MAX_EOCD_LOOKBACK: usize = EOCD_FIXED_SIZE + 0xFFFF;
+const EOCD_SCAN_CHUNK: usize = 1024;
+const EOCD_SIGNATURE_LEN: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct MemorySource<'a> {
@@ -277,34 +279,66 @@ fn find_eocd<S: ZipSource>(source: &S, file_size: u64) -> Result<EndOfCentralDir
     };
 
     let scan_start = file_size.saturating_sub(search_size as u64);
-    let mut scan_window = [0u8; MAX_EOCD_LOOKBACK];
-    let search = &mut scan_window[..search_size];
-    read_exact_at(source, scan_start, search)?;
 
-    if search.len() < EOCD_FIXED_SIZE {
-        return Err(Error::InvalidArchive("source shorter than EOCD minimum"));
-    }
+    let mut chunk = [0u8; EOCD_SCAN_CHUNK];
+    let mut carry = [0u8; EOCD_SIGNATURE_LEN - 1];
+    let mut carry_len = 0usize;
+    let mut cursor = scan_start;
+    let mut window = [0u8; EOCD_SCAN_CHUNK + EOCD_SIGNATURE_LEN - 1];
 
-    for pos in (0..=search.len() - EOCD_FIXED_SIZE).rev() {
-        if u32_from(&search[pos..pos + 4]) != EOCD_SIGNATURE {
-            continue;
+    while cursor < file_size {
+        let remaining = file_size - cursor;
+        let read_size = (remaining as usize).min(EOCD_SCAN_CHUNK);
+        read_exact_at(source, cursor, &mut chunk[..read_size])?;
+
+        let window_len = carry_len + read_size;
+        window[..carry_len].copy_from_slice(&carry[..carry_len]);
+        window[carry_len..window_len].copy_from_slice(&chunk[..read_size]);
+
+        let window_base = cursor
+            .checked_sub(u64::try_from(carry_len).map_err(|_| Error::ArithmeticOverflow)?)
+            .ok_or(Error::ArithmeticOverflow)?;
+
+        if window_len >= EOCD_FIXED_SIZE {
+            for pos in 0..=(window_len - EOCD_FIXED_SIZE) {
+                if u32_from(&window[pos..pos + 4]) != EOCD_SIGNATURE {
+                    continue;
+                }
+
+                let comment_len = u16_from(&window[pos + 20..pos + 22]);
+                let record_length = EOCD_FIXED_SIZE + usize::from(comment_len);
+                let absolute = window_base + pos as u64;
+                if absolute < scan_start {
+                    continue;
+                }
+
+                if let Some(value) = absolute.checked_add(record_length as u64) {
+                    if value != file_size {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+
+                return Ok(EndOfCentralDirectory {
+                    disk_number: u16_from(&window[pos + 4..pos + 6]),
+                    cd_entries_on_disk: u16_from(&window[pos + 8..pos + 10]),
+                    cd_entries_total: u16_from(&window[pos + 10..pos + 12]),
+                    cd_size: u32_from(&window[pos + 12..pos + 16]),
+                    cd_offset: u32_from(&window[pos + 16..pos + 20]),
+                    comment_length: comment_len,
+                });
+            }
         }
 
-        let comment_len = u16_from(&search[pos + 20..pos + 22]);
-        let absolute = scan_start + pos as u64;
-        let record_length = EOCD_FIXED_SIZE + usize::from(comment_len);
-        if absolute.checked_add(record_length as u64) != Some(file_size) {
-            continue;
-        }
+        let carry_keep = core::cmp::min(EOCD_SIGNATURE_LEN - 1, window_len);
+        let carry_start = window_len - carry_keep;
+        carry[..carry_keep].copy_from_slice(&window[carry_start..window_len]);
+        carry_len = carry_keep;
 
-        return Ok(EndOfCentralDirectory {
-            disk_number: u16_from(&search[pos + 4..pos + 6]),
-            cd_entries_on_disk: u16_from(&search[pos + 8..pos + 10]),
-            cd_entries_total: u16_from(&search[pos + 10..pos + 12]),
-            cd_size: u32_from(&search[pos + 12..pos + 16]),
-            cd_offset: u32_from(&search[pos + 16..pos + 20]),
-            comment_length: comment_len,
-        });
+        cursor = cursor
+            .checked_add(read_size as u64)
+            .ok_or(Error::ArithmeticOverflow)?;
     }
 
     Err(Error::EocdNotFound)

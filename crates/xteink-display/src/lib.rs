@@ -5,7 +5,15 @@ use embedded_hal::{
     digital::{InputPin, OutputPin},
     spi::SpiDevice,
 };
-use xteink_epub::{Epub, EpubEvent, EpubSource, ReaderBuffers};
+use xteink_epub::{
+    Epub,
+    EpubArchive,
+    EpubEvent,
+    EpubSource,
+    ReaderBuffers,
+    MAX_ARCHIVE_ENTRIES,
+    MAX_ARCHIVE_NAME_CAPACITY,
+};
 
 pub mod bookerly;
 
@@ -41,6 +49,36 @@ const CTRL1_BYPASS_RED: u8 = 0x40;
 const DATA_ENTRY_X_INC_Y_DEC: u8 = 0x01;
 const TEMP_SENSOR_INTERNAL: u8 = 0x80;
 const DISPLAY_BUSY_TIMEOUT_MS: u16 = 250;
+const EPUB_WORKSPACE_ZIP_CD: usize = 16 * 1024;
+const EPUB_WORKSPACE_INFLATE: usize = 32 * 1024;
+const EPUB_WORKSPACE_XML: usize = 4 * 1024;
+const EPUB_WORKSPACE_CATALOG: usize = 4 * 1024;
+const EPUB_WORKSPACE_PATH_BUF: usize = 512;
+const TEXT_LEN: usize = 2048;
+
+struct EpubRenderWorkspace {
+    zip_cd: [u8; EPUB_WORKSPACE_ZIP_CD],
+    inflate: [u8; EPUB_WORKSPACE_INFLATE],
+    xml: [u8; EPUB_WORKSPACE_XML],
+    catalog: [u8; EPUB_WORKSPACE_CATALOG],
+    path_buf: [u8; EPUB_WORKSPACE_PATH_BUF],
+    archive: EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
+}
+
+impl EpubRenderWorkspace {
+    const fn new() -> Self {
+        Self {
+            zip_cd: [0u8; EPUB_WORKSPACE_ZIP_CD],
+            inflate: [0u8; EPUB_WORKSPACE_INFLATE],
+            xml: [0u8; EPUB_WORKSPACE_XML],
+            catalog: [0u8; EPUB_WORKSPACE_CATALOG],
+            path_buf: [0u8; EPUB_WORKSPACE_PATH_BUF],
+            archive: EpubArchive::new(),
+        }
+    }
+}
+
+static mut EPUB_RENDER_WORKSPACE: EpubRenderWorkspace = EpubRenderWorkspace::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshMode {
@@ -207,19 +245,8 @@ where
         source: S,
         target_page: usize,
     ) -> Result<usize, xteink_epub::EpubError> {
-        const ZIP_CD_LEN: usize = 16 * 1024;
-        const INFLATE_LEN: usize = 32 * 1024;
-        const XML_LEN: usize = 4 * 1024;
-        const CATALOG_LEN: usize = 4 * 1024;
-        const PATH_LEN: usize = 512;
-        const TEXT_LEN: usize = 2048;
-
         let mut epub = Epub::open(source)?;
-        let mut zip_cd = [0u8; ZIP_CD_LEN];
-        let mut inflate = [0u8; INFLATE_LEN];
-        let mut xml = [0u8; XML_LEN];
-        let mut catalog = [0u8; CATALOG_LEN];
-        let mut path_buf = [0u8; PATH_LEN];
+        let workspace_ptr = core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE);
         let mut text = TextBuffer::<TEXT_LEN>::new();
         let mut cursor_y = 0u16;
         let mut current_page = 0usize;
@@ -229,11 +256,12 @@ where
 
         loop {
             let event = epub.next_event(ReaderBuffers {
-                zip_cd: &mut zip_cd,
-                inflate: &mut inflate,
-                xml: &mut xml,
-                catalog: &mut catalog,
-                path_buf: &mut path_buf,
+                zip_cd: unsafe { &mut (*workspace_ptr).zip_cd },
+                inflate: unsafe { &mut (*workspace_ptr).inflate },
+                xml: unsafe { &mut (*workspace_ptr).xml },
+                catalog: unsafe { &mut (*workspace_ptr).catalog },
+                path_buf: unsafe { &mut (*workspace_ptr).path_buf },
+                archive: unsafe { &mut (*workspace_ptr).archive },
             })?;
 
             let Some(event) = event else {
