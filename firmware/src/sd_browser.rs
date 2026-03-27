@@ -1,0 +1,87 @@
+use embedded_hal::spi::SpiDevice;
+use heapless::Vec;
+use xteink_display::SSD1677Display;
+use xteink_epub::EpubError;
+
+use crate::{
+    sd_ffi::{self, DirectoryPageInfo, FsError, SdFilesystem},
+    sd_path::join_child_path,
+};
+
+pub const MAX_ENTRIES: usize = sd_ffi::MAX_ENTRIES;
+pub use crate::sd_ffi::ListedEntry;
+
+#[derive(Debug)]
+pub struct DirectoryPage {
+    pub entries: Vec<ListedEntry, MAX_ENTRIES>,
+    pub info: DirectoryPageInfo,
+}
+
+pub fn load_directory_page<SD: SdFilesystem>(
+    fs: &SD,
+    current_path: &str,
+    page_start: usize,
+    page_size: usize,
+) -> Result<DirectoryPage, FsError> {
+    let mut entries: Vec<ListedEntry, MAX_ENTRIES> = Vec::new();
+    let info = fs.list_directory_page(current_path, page_start, page_size, &mut entries)?;
+    Ok(DirectoryPage { entries, info })
+}
+
+pub fn render_epub_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
+    fs: &SD,
+    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    current_path: &str,
+    entry: &ListedEntry,
+) -> Result<(), EpubError>
+where
+    SD: SdFilesystem,
+    SPI: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    render_epub_page_from_entry(fs, display, current_path, entry, 0, false).map(|_| ())
+}
+
+pub fn render_epub_page_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
+    fs: &SD,
+    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    current_path: &str,
+    entry: &ListedEntry,
+    page_index: usize,
+    fast_refresh: bool,
+) -> Result<usize, EpubError>
+where
+    SD: SdFilesystem,
+    SPI: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    let path = join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
+    esp_println::println!("EPUB open start: {}", path.as_str());
+    let source = fs.open_epub_source(path.as_str()).map_err(|_| EpubError::Io)?;
+    esp_println::println!("EPUB source opened: {}", path.as_str());
+
+    esp_println::println!(
+        "EPUB render page start: {} target_page={} fast_refresh={}",
+        path.as_str(),
+        page_index,
+        fast_refresh
+    );
+    let rendered_page = display.render_epub_page(source, page_index)?;
+    esp_println::println!(
+        "EPUB render page complete: {} rendered_page={}",
+        path.as_str(),
+        rendered_page
+    );
+    if fast_refresh {
+        display.refresh_fast();
+    } else {
+        display.refresh_full();
+    }
+    Ok(rendered_page)
+}

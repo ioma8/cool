@@ -9,6 +9,8 @@ use miniz_oxide::inflate::{decompress_slice_iter_to_slice, TINFLStatus};
 pub use zip::{CompressionMethod, EpubArchive, EpubEntryMetadata, Error as ZipError};
 
 pub const MAX_CHAPTER_DIR_BYTES: usize = 256;
+const MAX_ARCHIVE_ENTRIES: usize = 512;
+const MAX_ARCHIVE_NAME_CAPACITY: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub enum EpubError {
@@ -214,7 +216,7 @@ impl<S: EpubSource> Epub<S> {
         zip_cd: &mut [u8],
         _path_buf: &mut [u8],
     ) -> Result<(), EpubError> {
-        let mut archive = EpubArchive::<64, 8192>::new();
+        let mut archive = EpubArchive::<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>::new();
         archive.parse(&self.source)?;
 
         let container_entry = archive
@@ -254,7 +256,7 @@ impl<S: EpubSource> Epub<S> {
         let (entry_start, entry_len) = read_spine_entry(catalog, index)?;
         let chapter_path = &catalog[entry_start..entry_start + entry_len];
 
-        let mut archive = EpubArchive::<64, 8192>::new();
+        let mut archive = EpubArchive::<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>::new();
         archive.parse(&self.source)?;
         let entry = archive
             .entry_by_name_bytes(chapter_path)

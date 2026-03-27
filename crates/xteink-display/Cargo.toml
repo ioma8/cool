@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 embedded-hal.workspace = true
+heapless = { version = "0.8", default-features = false }
 xteink-epub = { path = "../xteink-epub" }
 
 [build-dependencies]

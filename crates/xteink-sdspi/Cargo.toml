@@ -1,0 +1,12 @@
+[package]
+name = "xteink-sdspi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+embedded-hal.workspace = true
+embedded-sdmmc = { version = "0.9.0", default-features = false }
+
+[dev-dependencies]
+embedded-hal.workspace = true
+

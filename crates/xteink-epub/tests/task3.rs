@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use xteink_epub::{Epub, EpubError, EpubEvent, EpubSource, ReaderBuffers};
 
@@ -74,6 +74,12 @@ impl Default for Scratch {
     }
 }
 
+impl Scratch {
+    fn large_for_smoke() -> Self {
+        Self::new(131072, 1_048_576, 65536, 131072, 2048)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum OwnedEvent {
     Text(String),
@@ -113,6 +119,27 @@ fn fixtures_dir() -> PathBuf {
 fn load_fixture(name: &str) -> Vec<u8> {
     let path = fixtures_dir().join(name);
     std::fs::read(path).expect("fixture should be readable")
+}
+
+fn fixture_names() -> Vec<String> {
+    let mut names = fs::read_dir(fixtures_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let is_epub = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"));
+            if is_epub {
+                entry.file_name().into_string().ok()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 fn collect_events(data: Vec<u8>, scratch: &mut Scratch) -> Result<Vec<OwnedEvent>, EpubError> {
@@ -323,4 +350,20 @@ fn out_of_space_is_reported() {
         matches!(result, Err(EpubError::OutOfSpace)),
         "expected tiny buffers to cause OutOfSpace"
     );
+}
+
+#[test]
+fn every_epub_fixture_parses_successfully() {
+    let names = fixture_names();
+    assert!(!names.is_empty(), "expected epub fixtures in test/epubs");
+
+    for name in names {
+        let mut scratch = Scratch::large_for_smoke();
+        let events = collect_events(load_fixture(&name), &mut scratch)
+            .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+        assert!(
+            !events.is_empty(),
+            "expected at least one event from fixture {name}"
+        );
+    }
 }

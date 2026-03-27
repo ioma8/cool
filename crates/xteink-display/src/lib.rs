@@ -3,7 +3,7 @@
 use embedded_hal::{
     delay::DelayNs,
     digital::{InputPin, OutputPin},
-    spi::SpiBus,
+    spi::SpiDevice,
 };
 use xteink_epub::{Epub, EpubEvent, EpubSource, ReaderBuffers};
 
@@ -48,17 +48,15 @@ pub enum RefreshMode {
     Fast,
 }
 
-pub struct SSD1677Display<SPI, CS, DC, RST, BUSY, DELAY>
+pub struct SSD1677Display<SPI, DC, RST, BUSY, DELAY>
 where
-    SPI: SpiBus,
-    CS: OutputPin,
+    SPI: SpiDevice,
     DC: OutputPin,
     RST: OutputPin,
     BUSY: InputPin,
     DELAY: DelayNs,
 {
     spi: SPI,
-    cs: CS,
     dc: DC,
     rst: RST,
     busy: BUSY,
@@ -67,19 +65,17 @@ where
     is_screen_on: bool,
 }
 
-impl<SPI, CS, DC, RST, BUSY, DELAY> SSD1677Display<SPI, CS, DC, RST, BUSY, DELAY>
+impl<SPI, DC, RST, BUSY, DELAY> SSD1677Display<SPI, DC, RST, BUSY, DELAY>
 where
-    SPI: SpiBus,
-    CS: OutputPin,
+    SPI: SpiDevice,
     DC: OutputPin,
     RST: OutputPin,
     BUSY: InputPin,
     DELAY: DelayNs,
 {
-    pub fn new(spi: SPI, cs: CS, dc: DC, rst: RST, busy: BUSY, delay: DELAY) -> Self {
+    pub fn new(spi: SPI, dc: DC, rst: RST, busy: BUSY, delay: DELAY) -> Self {
         Self {
             spi,
-            cs,
             dc,
             rst,
             busy,
@@ -189,6 +185,22 @@ where
     }
 
     pub fn render_embedded_epub_first_screen(&mut self) -> Result<(), xteink_epub::EpubError> {
+        self.render_epub_first_screen(EmbeddedEpub)
+    }
+
+    pub fn render_epub_first_screen<S: EpubSource>(
+        &mut self,
+        source: S,
+    ) -> Result<(), xteink_epub::EpubError> {
+        let _ = self.render_epub_page(source, 0)?;
+        Ok(())
+    }
+
+    pub fn render_epub_page<S: EpubSource>(
+        &mut self,
+        source: S,
+        target_page: usize,
+    ) -> Result<usize, xteink_epub::EpubError> {
         const ZIP_CD_LEN: usize = 16 * 1024;
         const INFLATE_LEN: usize = 32 * 1024;
         const XML_LEN: usize = 4 * 1024;
@@ -196,7 +208,7 @@ where
         const PATH_LEN: usize = 512;
         const TEXT_LEN: usize = 2048;
 
-        let mut epub = Epub::open(EmbeddedEpub)?;
+        let mut epub = Epub::open(source)?;
         let mut zip_cd = [0u8; ZIP_CD_LEN];
         let mut inflate = [0u8; INFLATE_LEN];
         let mut xml = [0u8; XML_LEN];
@@ -204,7 +216,10 @@ where
         let mut path_buf = [0u8; PATH_LEN];
         let mut text = TextBuffer::<TEXT_LEN>::new();
         let mut cursor_y = 0u16;
+        let mut current_page = 0usize;
         let line_height = bookerly::BOOKERLY.line_height_px();
+
+        self.clear(0xFF);
 
         loop {
             let event = epub.next_event(ReaderBuffers {
@@ -239,12 +254,18 @@ where
             }
 
             if cursor_y >= DISPLAY_HEIGHT {
-                break;
+                if current_page >= target_page {
+                    break;
+                }
+                current_page = current_page.saturating_add(1);
+                cursor_y = 0;
+                text.clear();
+                self.clear(0xFF);
             }
         }
 
         let _ = self.flush_text_buffer(&mut text, cursor_y);
-        Ok(())
+        Ok(current_page)
     }
 
     fn draw_glyph(&mut self, glyph: &bookerly::Glyph, x: i32, y: i32) {
@@ -458,10 +479,7 @@ where
         for _ in 0..10 {
             core::hint::spin_loop();
         }
-        let _ = self.cs.set_low();
         let _ = self.spi.write(&[cmd]);
-        let _ = self.spi.flush();
-        let _ = self.cs.set_high();
     }
 
     fn send_data_byte(&mut self, data: u8) {
@@ -469,10 +487,7 @@ where
         for _ in 0..10 {
             core::hint::spin_loop();
         }
-        let _ = self.cs.set_low();
         let _ = self.spi.write(&[data]);
-        let _ = self.spi.flush();
-        let _ = self.cs.set_high();
     }
 
     fn write_framebuffer(&mut self) {
@@ -480,15 +495,12 @@ where
         for _ in 0..10 {
             core::hint::spin_loop();
         }
-        let _ = self.cs.set_low();
         let mut offset = 0;
         while offset < BUFFER_SIZE {
             let end = (offset + 4096).min(BUFFER_SIZE);
             let _ = self.spi.write(&self.framebuffer[offset..end]);
             offset = end;
         }
-        let _ = self.spi.flush();
-        let _ = self.cs.set_high();
     }
 }
 
@@ -509,10 +521,9 @@ pub fn show_embedded_epub_demo<D: DemoDisplay>(display: &mut D) -> Result<(), D:
     Ok(())
 }
 
-impl<SPI, CS, DC, RST, BUSY, DELAY> DemoDisplay for SSD1677Display<SPI, CS, DC, RST, BUSY, DELAY>
+impl<SPI, DC, RST, BUSY, DELAY> DemoDisplay for SSD1677Display<SPI, DC, RST, BUSY, DELAY>
 where
-    SPI: SpiBus,
-    CS: OutputPin,
+    SPI: SpiDevice,
     DC: OutputPin,
     RST: OutputPin,
     BUSY: InputPin,
@@ -656,7 +667,32 @@ extern crate std;
 mod tests {
     use super::*;
     use core::convert::Infallible;
+    use embedded_hal::spi::Operation;
     use std::{vec, vec::Vec};
+    use xteink_epub::{EpubError, EpubSource};
+
+    const PAGINATION_EPUB_BYTES: &[u8] =
+        include_bytes!("../../../test/epubs/test_kerning_ligature.epub");
+
+    struct SliceSource<'a> {
+        bytes: &'a [u8],
+    }
+
+    impl<'a> EpubSource for SliceSource<'a> {
+        fn len(&self) -> usize {
+            self.bytes.len()
+        }
+
+        fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, EpubError> {
+            let offset = usize::try_from(offset).map_err(|_| EpubError::InvalidFormat)?;
+            if offset >= self.bytes.len() || buffer.is_empty() {
+                return Ok(0);
+            }
+            let len = (self.bytes.len() - offset).min(buffer.len());
+            buffer[..len].copy_from_slice(&self.bytes[offset..offset + len]);
+            Ok(len)
+        }
+    }
 
     #[derive(Debug, Default)]
     struct FakeSpi {
@@ -668,33 +704,32 @@ mod tests {
         type Error = Infallible;
     }
 
-    impl SpiBus for FakeSpi {
-        fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-            for word in words {
-                *word = 0;
+    impl SpiDevice for FakeSpi {
+        fn transaction(
+            &mut self,
+            operations: &mut [Operation<'_, u8>],
+        ) -> Result<(), Self::Error> {
+            for operation in operations {
+                match operation {
+                    Operation::Read(words) => {
+                        for word in words.iter_mut() {
+                            *word = 0;
+                        }
+                    }
+                    Operation::Write(words) => {
+                        self.writes.push(words.to_vec());
+                    }
+                    Operation::Transfer(read, write) => {
+                        let len = read.len().min(write.len());
+                        read[..len].copy_from_slice(&write[..len]);
+                        self.writes.push(write.to_vec());
+                    }
+                    Operation::TransferInPlace(words) => {
+                        self.writes.push(words.to_vec());
+                    }
+                    Operation::DelayNs(_) => {}
+                }
             }
-            Ok(())
-        }
-
-        fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
-            self.writes.push(words.to_vec());
-            Ok(())
-        }
-
-        fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
-            let len = read.len().min(write.len());
-            read[..len].copy_from_slice(&write[..len]);
-            self.writes.push(write.to_vec());
-            Ok(())
-        }
-
-        fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-            self.writes.push(words.to_vec());
-            Ok(())
-        }
-
-        fn flush(&mut self) -> Result<(), Self::Error> {
-            self.flushes += 1;
             Ok(())
         }
     }
@@ -834,6 +869,18 @@ mod tests {
         display.clear(0xFF);
         display.render_embedded_epub_first_screen().unwrap();
 
+        assert!(display.framebuffer().iter().any(|&byte| byte != 0xFF));
+    }
+
+    #[test]
+    fn render_epub_page_can_target_later_pages() {
+        let mut display = new_display();
+
+        let rendered_page = display
+            .render_epub_page(SliceSource { bytes: PAGINATION_EPUB_BYTES }, 1)
+            .unwrap();
+
+        assert!(rendered_page <= 1);
         assert!(display.framebuffer().iter().any(|&byte| byte != 0xFF));
     }
 
@@ -991,11 +1038,10 @@ mod tests {
     }
 
     fn new_display()
-    -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay>
+    -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay>
     {
         SSD1677Display::new(
             FakeSpi::default(),
-            FakeOutputPin::default(),
             FakeOutputPin::default(),
             FakeOutputPin::default(),
             FakeInputPin::default(),
@@ -1010,7 +1056,7 @@ mod tests {
     }
 
     fn band_has_ink(
-        display: &SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay>,
+        display: &SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay>,
         y_start: u16,
         y_end: u16,
     ) -> bool {
