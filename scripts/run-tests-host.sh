@@ -12,6 +12,7 @@ CRATES=(
   xteink-display
   xteink-input
   xteink-browser
+  xteink-fs
   xteink-epub
   xteink-sdspi
 )

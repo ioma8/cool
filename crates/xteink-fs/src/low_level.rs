@@ -120,6 +120,9 @@ type SdCard<'bus, SPI, DELAY> = SdSpiCard<
 type SdVolumes<'bus, SPI, DELAY> =
     VolumeManager<SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>;
 
+type SdRawFile<'bus, SPI, DELAY> =
+    File<'bus, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>;
+
 pub struct SdApp<'bus, SPI, DELAY>
 where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
@@ -129,8 +132,19 @@ where
     raw_volume: RawVolume,
 }
 
+pub trait SdFsFile {
+    fn len(&self) -> usize;
+    fn seek_from_start(&mut self, offset: u32) -> Result<(), FsError>;
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, FsError>;
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, FsError>;
+    fn flush(&mut self) -> Result<(), FsError>;
+}
+
 pub trait SdFilesystem {
     type EpubSource<'a>: EpubSource + 'a
+    where
+        Self: 'a;
+    type File<'a>: SdFsFile + 'a
     where
         Self: 'a;
 
@@ -143,6 +157,9 @@ pub trait SdFilesystem {
     ) -> Result<DirectoryPageInfo, FsError>;
 
     fn open_epub_source<'a>(&'a self, path: &str) -> Result<Self::EpubSource<'a>, FsError>;
+    fn open_cache_file_read<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError>;
+    fn open_cache_file_write<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError>;
+    fn ensure_directory(&self, path: &str) -> Result<(), FsError>;
 }
 
 impl<'bus, SPI, DELAY> SdApp<'bus, SPI, DELAY>
@@ -212,13 +229,11 @@ where
         Ok(raw_directory)
     }
 
-    fn open_file_at_path<'fs>(
+    fn open_file_at_path_with_mode<'fs>(
         &'fs self,
         path: &str,
-    ) -> Result<
-        File<'fs, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
-        FsError,
-    > {
+        mode: Mode,
+    ) -> Result<SdRawFile<'bus, SPI, DELAY>, FsError> {
         let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
         esp_println::println!("SD open_file_at_path start: {}", path.as_str());
         let (parent_path, file_name) = split_parent_path(path.as_str())?;
@@ -231,7 +246,7 @@ where
         let raw_directory = self.open_directory_at_path(parent_path)?;
         let file = self
             .volume_mgr
-            .open_file_in_dir(raw_directory, file_name, Mode::ReadOnly)
+            .open_file_in_dir(raw_directory, file_name, mode)
             .map_err(|err| {
                 esp_println::println!(
                     "SD open_file_at_path open_file_in_dir failed: {} -> {:?}",
@@ -243,6 +258,49 @@ where
         esp_println::println!("SD open_file_at_path complete: {}", path.as_str());
         Ok(file.to_file(&self.volume_mgr))
     }
+
+    fn open_file_at_path<'fs>(
+        &'fs self,
+        path: &str,
+    ) -> Result<SdRawFile<'bus, SPI, DELAY>, FsError> {
+        self.open_file_at_path_with_mode(path, Mode::ReadOnly)
+    }
+
+    pub fn ensure_directory_internal(&self, path: &str) -> Result<(), FsError> {
+        let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
+        if path.as_str() == "/" {
+            return Ok(());
+        }
+        let mut current = self
+            .volume_mgr
+            .open_root_dir(self.raw_volume)
+            .map_err(|_| FsError::OpenFailed(error_message("open root")))?;
+        for component in path_components(path.as_str()) {
+            match self.volume_mgr.open_dir(current, component) {
+                Ok(next) => {
+                    current = next;
+                }
+                Err(open_err) => {
+                    if !matches!(
+                        open_err,
+                        embedded_sdmmc::Error::NotFound
+                    ) {
+                        return Err(FsError::OpenFailed(error_string(&open_err)));
+                    }
+                    self.volume_mgr
+                        .make_dir_in_dir(current, component)
+                        .map_err(|err| {
+                            FsError::OpenFailed(error_string(&err))
+                        })?;
+                    current = self
+                        .volume_mgr
+                        .open_dir(current, component)
+                        .map_err(|err| FsError::OpenFailed(error_string(&err)))?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<'bus, SPI, DELAY> SdFilesystem for SdApp<'bus, SPI, DELAY>
@@ -251,6 +309,7 @@ where
     DELAY: DelayNs,
 {
     type EpubSource<'a> = SdEpubSource<'a, 'bus, SPI, DELAY> where Self: 'a;
+    type File<'a> = SdRawFile<'bus, SPI, DELAY> where Self: 'a;
 
     fn list_directory_page(
         &self,
@@ -315,6 +374,45 @@ where
     fn open_epub_source<'b>(&'b self, path: &str) -> Result<Self::EpubSource<'b>, FsError> {
         let file = self.open_file_at_path(path)?;
         Ok(SdEpubSource { file })
+    }
+
+    fn open_cache_file_read<'b>(&'b self, path: &str) -> Result<Self::File<'b>, FsError> {
+        self.open_file_at_path(path)
+    }
+
+    fn open_cache_file_write<'b>(&'b self, path: &str) -> Result<Self::File<'b>, FsError> {
+        self.open_file_at_path_with_mode(path, Mode::ReadWriteCreateOrTruncate)
+    }
+
+    fn ensure_directory(&self, path: &str) -> Result<(), FsError> {
+        self.ensure_directory_internal(path)
+    }
+}
+
+impl<'fs, 'bus, SPI, DELAY> SdFsFile for SdRawFile<'fs, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+where
+    SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
+    DELAY: DelayNs,
+{
+    fn len(&self) -> usize {
+        self.length() as usize
+    }
+
+    fn seek_from_start(&mut self, offset: u32) -> Result<(), FsError> {
+        File::seek_from_start(self, offset).map_err(|err| FsError::OpenFailed(error_string(&err)))
+    }
+
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, FsError> {
+        File::read(self, buffer).map_err(|err| FsError::OpenFailed(error_string(&err)))
+    }
+
+    fn write(&mut self, buffer: &[u8]) -> Result<usize, FsError> {
+        File::write(self, buffer).map_err(|err| FsError::OpenFailed(error_string(&err)))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> Result<(), FsError> {
+        File::flush(self).map_err(|err| FsError::OpenFailed(error_string(&err)))
     }
 }
 

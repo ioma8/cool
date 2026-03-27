@@ -650,15 +650,19 @@ fn run_next_ui_work<SD, SPI, DC, RST, BUSY, DELAY>(
                     },
                     EntryKind::Epub => {
                         *reader_entry = Some(entry.clone());
-                        *reader_page = 0;
                         match render_epub_from_entry(sd, display, current_path.as_str(), reader_entry.as_ref().unwrap()) {
-                            Ok(EpubRefreshMode::Full) => {
-                                pending_display_refresh.request(BrowserRefresh::Full);
-                                *screen_mode = ScreenMode::Reading;
-                            }
-                            Ok(EpubRefreshMode::Fast) => {
-                                pending_display_refresh.request(BrowserRefresh::Fast);
-                                *screen_mode = ScreenMode::Reading;
+                            Ok(result) => {
+                                *reader_page = result.rendered_page;
+                                match result.refresh {
+                                    EpubRefreshMode::Full => {
+                                        pending_display_refresh.request(BrowserRefresh::Full);
+                                        *screen_mode = ScreenMode::Reading;
+                                    }
+                                    EpubRefreshMode::Fast => {
+                                        pending_display_refresh.request(BrowserRefresh::Fast);
+                                        *screen_mode = ScreenMode::Reading;
+                                    }
+                                }
                             }
                             Err(err) => {
                                 esp_println::println!("EPUB render failed: {:?}", err);

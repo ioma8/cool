@@ -262,7 +262,6 @@ impl<S: EpubSource> Epub<S> {
         let (entry_start, entry_len) = read_spine_entry(catalog, index)?;
         let chapter_path = &catalog[entry_start..entry_start + entry_len];
 
-        archive.parse(&self.source)?;
         let entry = archive
             .entry_by_name_bytes(chapter_path)
             .ok_or(EpubError::InvalidFormat)?;
