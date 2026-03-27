@@ -93,10 +93,7 @@ impl Drop for EpubRenderWorkspaceGuard {
 }
 
 fn lock_epub_render_workspace() -> (&'static mut EpubRenderWorkspace, EpubRenderWorkspaceGuard) {
-    while EPUB_RENDER_WORKSPACE_LOCK
-        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
+    while EPUB_RENDER_WORKSPACE_LOCK.swap(true, Ordering::Acquire) {
         core::hint::spin_loop();
     }
     // SAFETY: access is protected by the global spin lock above.
