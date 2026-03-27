@@ -8,10 +8,11 @@ pub use xteink_buttons::{Button, ButtonState};
 #[derive(Debug, Clone)]
 pub struct InputManager {
     current_state: ButtonState,
-    last_state: ButtonState,
+    pending_state: ButtonState,
+    pending_since_ms: u32,
     pressed_events: ButtonState,
     released_events: ButtonState,
-    last_debounce_time: u32,
+    last_state: ButtonState,
     button_press_start: u32,
     button_press_finish: u32,
 }
@@ -22,10 +23,11 @@ impl InputManager {
     pub fn new() -> Self {
         Self {
             current_state: ButtonState::default(),
-            last_state: ButtonState::default(),
+            pending_state: ButtonState::default(),
+            pending_since_ms: 0,
             pressed_events: ButtonState::default(),
             released_events: ButtonState::default(),
-            last_debounce_time: 0,
+            last_state: ButtonState::default(),
             button_press_start: 0,
             button_press_finish: 0,
         }
@@ -40,18 +42,20 @@ impl InputManager {
         self.released_events = ButtonState::default();
 
         if state.state != self.last_state.state {
+            if (state.state & self.last_state.state) == 0 {
+                self.pending_since_ms = now_ms;
+            }
             self.last_state = state;
-            self.last_debounce_time = now_ms;
+            self.pending_state = state;
         }
 
-        if now_ms.saturating_sub(self.last_debounce_time) > Self::DEBOUNCE_DELAY_MS
-            && state.state != self.current_state.state
-        {
+        let stable = now_ms.saturating_sub(self.pending_since_ms) >= Self::DEBOUNCE_DELAY_MS;
+        if stable && self.pending_state.state != self.current_state.state {
             self.pressed_events = ButtonState {
-                state: state.state & !self.current_state.state,
+                state: self.pending_state.state & !self.current_state.state,
             };
             self.released_events = ButtonState {
-                state: self.current_state.state & !state.state,
+                state: self.current_state.state & !self.pending_state.state,
             };
 
             if self.pressed_events.any_pressed() && !self.current_state.any_pressed() {
@@ -62,7 +66,7 @@ impl InputManager {
                 self.button_press_finish = now_ms;
             }
 
-            self.current_state = state;
+            self.current_state = self.pending_state;
         }
     }
 

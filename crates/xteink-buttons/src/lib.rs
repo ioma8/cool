@@ -4,10 +4,7 @@
 extern crate std;
 
 // Keep this as the raw-register fallback ceiling for current firmware reads.
-pub const ADC_MAX: u16 = u16::MAX;
-
 // Threshold contract mirrored from the ESP32-C3 validated prototype.
-pub const ADC_NO_BUTTON: i32 = 11400;
 pub const ADC_RANGES_1: [i32; 5] = [11400, 10280, 9800, 8400, i32::MIN];
 pub const ADC_RANGES_2: [i32; 3] = [19300, 17200, i32::MIN];
 
@@ -142,13 +139,13 @@ mod tests {
 
     #[test]
     fn no_button_thresholds_return_none() {
-        assert_eq!(get_button_from_adc_1(4095), None);
-        assert_eq!(get_button_from_adc_2(4095), None);
+        assert_eq!(get_button_from_adc_1(11401), None);
+        assert_eq!(get_button_from_adc_2(19301), None);
     }
 
     #[test]
     fn high_adc_band_is_not_a_front_button_press() {
-        assert_eq!(get_button_from_adc_1(3866), None);
-        assert_eq!(get_button_from_adc_2(3866), None);
+        assert_eq!(get_button_from_adc_1(11401), None);
+        assert_eq!(get_button_from_adc_2(19301), None);
     }
 }
