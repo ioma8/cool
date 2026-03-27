@@ -90,10 +90,15 @@ mod tests {
 
     #[test]
     fn acquire_sequence_matches_sd_spi_boot_flow() {
+        let mut bytes = vec![0xFF; 57];
+        bytes[16] = 0x01; // CMD0 -> idle
+        bytes[24] = 0x05; // CMD8 -> illegal response bit set
+        bytes[32] = 0x01; // CMD55 -> in idle
+        bytes[40] = 0x01; // CMD41 -> in idle
+        bytes[48] = 0x01; // CMD55 -> in idle
+        bytes[56] = 0x00; // CMD41 -> ready
         let spi = MockSpi {
-            rx: VecDeque::from(vec![
-                0xFF; 10 + 6 + 1 + 6 + 1 + 4 + 6 + 1 + 4 + 6 + 1 + 4
-            ]),
+            rx: VecDeque::from(bytes),
             ..Default::default()
         };
         let card = SdSpiCard::new(
@@ -101,7 +106,7 @@ mod tests {
             MockPin::default(),
             MockPin::default(),
             MockDelay,
-            SdSpiOptions::default(),
+            SdSpiOptions { use_crc: false },
         );
 
         let result = card.begin();
@@ -117,7 +122,7 @@ mod tests {
     #[test]
     fn single_block_read_uses_cmd17_and_returns_512_bytes() {
         let mut rx = VecDeque::new();
-        rx.extend([0xFF; 6]);
+        rx.extend([0xFF; 7]);
         rx.push_back(0x00);
         rx.push_back(0xFF);
         rx.push_back(0xFE);
@@ -135,7 +140,7 @@ mod tests {
             MockPin::default(),
             MockPin::default(),
             MockDelay,
-            SdSpiOptions::default(),
+            SdSpiOptions { use_crc: false },
         );
         unsafe {
             card.mark_card_as_init(CardType::SDHC);
