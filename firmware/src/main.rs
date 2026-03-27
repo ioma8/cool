@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::cell::RefCell;
+use core::{
+    cell::RefCell,
+    mem::MaybeUninit,
+};
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex, raw::NoopRawMutex};
@@ -58,6 +61,11 @@ const BUTTON_EVENT_CHANNEL_CAPACITY: usize = 8;
 
 static BUTTON_EVENT_CHANNEL: Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY> =
     Channel::new();
+static APP_DIRECTORY_PAGE: MaybeUninit<xteink_fs::DirectoryPage> = MaybeUninit::uninit();
+
+fn app_directory_page() -> &'static mut xteink_fs::DirectoryPage {
+    unsafe { APP_DIRECTORY_PAGE.assume_init_mut() }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingDisplayRefresh {
@@ -215,12 +223,19 @@ async fn main(spawner: Spawner) -> ! {
             }
         }
     };
+    unsafe {
+        APP_DIRECTORY_PAGE.write(page);
+    }
 
     let mut browser = PagedBrowser::new(page_size);
     let screen_mode = ScreenMode::Browse;
     let reader_entry: Option<ListedEntry> = None;
     let reader_page = 0usize;
-    browser.set_page(page.info.page_start, page.entries.len(), 0);
+    browser.set_page(
+        app_directory_page().info.page_start,
+        app_directory_page().entries.len(),
+        0,
+    );
 
     let sender = BUTTON_EVENT_CHANNEL.sender();
     let receiver = BUTTON_EVENT_CHANNEL.receiver();
@@ -248,7 +263,6 @@ async fn main(spawner: Spawner) -> ! {
         sd,
         init_display,
         page_size,
-        page,
         browser,
         current_path,
         screen_mode,
@@ -334,7 +348,6 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
     sd: SD,
     mut display: SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     page_size: usize,
-    mut page: xteink_fs::DirectoryPage,
     mut browser: PagedBrowser,
     mut current_path: String<256>,
     mut screen_mode: ScreenMode,
@@ -355,31 +368,36 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
     DELAY: embedded_hal::delay::DelayNs,
 {
     let mut pending_display_refresh = PendingDisplayRefresh::None;
-    render_browser_screen(
-        &mut display,
-        current_path.as_str(),
-        &page.entries,
-        browser.selected_index(page.entries.len()),
-        BrowserRefresh::Full,
-        &mut pending_display_refresh,
-    );
+    {
+        let page = app_directory_page();
+        render_browser_screen(
+            &mut display,
+            current_path.as_str(),
+            &page.entries,
+            browser.selected_index(page.entries.len()),
+            BrowserRefresh::Full,
+            &mut pending_display_refresh,
+        );
+    }
 
     loop {
         let button = receiver.receive().await;
-        let selected_index = if page.entries.is_empty() {
-            None
-        } else {
-            browser.selected_index(page.entries.len())
+        let selected_index = {
+            let page = app_directory_page();
+            let selected = if page.entries.is_empty() {
+                None
+            } else {
+                browser.selected_index(page.entries.len())
+            };
+            selected
         };
 
-        if let Some(item) =
-            map_button_to_ui_work(button, screen_mode, &page.entries, selected_index)
-        {
+        let page_entries = app_directory_page().entries.as_slice();
+        if let Some(item) = map_button_to_ui_work(button, screen_mode, page_entries, selected_index) {
             run_next_ui_work(
                 &sd,
                 &mut display,
                 page_size,
-                &mut page,
                 &mut browser,
                 &mut current_path,
                 &mut screen_mode,
@@ -430,7 +448,6 @@ fn run_next_ui_work<SD, SPI, DC, RST, BUSY, DELAY>(
     sd: &SD,
     display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     page_size: usize,
-    page: &mut xteink_fs::DirectoryPage,
     browser: &mut PagedBrowser,
     current_path: &mut String<256>,
     screen_mode: &mut ScreenMode,
@@ -446,6 +463,7 @@ fn run_next_ui_work<SD, SPI, DC, RST, BUSY, DELAY>(
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
+    let page = app_directory_page();
     match item {
         UiWorkItem::BrowseMoveLeft => {
             if let Some(selected) = browser.selected_index(page.entries.len()) {
