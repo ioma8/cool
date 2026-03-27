@@ -20,9 +20,6 @@ use esp_hal::{
 use heapless::String;
 use xteink_browser::{Input as BrowserInput, PagedAction, PagedBrowser};
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
-use xteink_input::{
-    Button, ButtonMapping, MappedInputManager, RawInputState,
-};
 use xteink_buttons::{Button as RawButton, get_button_from_adc_1, get_button_from_adc_2};
 use xteink_power::{ResetReason, WakeCause, classify_wakeup_reason};
 
@@ -229,8 +226,7 @@ fn main() -> ! {
     esp_println::println!("Browser render complete");
 
     let loop_delay = Delay::new();
-    let mut input = MappedInputManager::new(ButtonMapping::default());
-    let mut now_ms = 0u32;
+    let mut last_button: Option<RawButton> = None;
     let mut adc_config = AdcConfig::new();
     peripherals.GPIO1.rtcio_pullup(false);
     peripherals.GPIO1.rtcio_pulldown(true);
@@ -247,205 +243,236 @@ fn main() -> ! {
     );
 
     loop {
-        now_ms = now_ms.wrapping_add(1);
-        let mut raw_state = RawInputState::new();
+        let mut button = None;
         let adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
         loop_delay.delay_millis(1);
         let adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
 
-        if let Some(button) = get_button_from_adc_1(adc1_value) {
-            raw_state = raw_state.with_button(button);
-        }
-
-        if let Some(button) = get_button_from_adc_2(adc2_value) {
-            raw_state = raw_state.with_button(button);
+        if let Some(raw_button) = get_button_from_adc_1(adc1_value) {
+            button = Some(raw_button);
+        } else if let Some(raw_button) = get_button_from_adc_2(adc2_value) {
+            button = Some(raw_button);
         }
 
         if power_button.is_low() {
-            raw_state = raw_state.with_button(RawButton::Power);
+            button = Some(RawButton::Power);
         }
 
-        input.update(raw_state, now_ms);
+        let pressed = if button != last_button {
+            last_button = button;
+            button
+        } else {
+            None
+        };
 
-        if screen_mode == ScreenMode::Browse && input.was_any_pressed() {
-            if input.was_pressed(Button::Confirm) {
-                if let Some(entry) = page.entries.get(browser.selected_index(page.entries.len()).unwrap_or(0)) {
-                    match entry.kind {
-                        xteink_browser::EntryKind::Directory => {
-                            match join_child_path(current_path.as_str(), entry.fs_name.as_str()) {
-                                Ok(next_path) => {
-                                    current_path = next_path;
-                                    browser = PagedBrowser::new(page_size);
-                                    match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
-                                        Ok(next_page) => {
-                                            page = next_page;
-                                            browser.set_page(page.info.page_start, page.entries.len(), 0);
-                                            render_browser_screen(
-                                                &mut display,
-                                                current_path.as_str(),
-                                                &page.entries,
-                                                browser.selected_index(page.entries.len()),
-                                                BrowserRefresh::Full,
-                                            );
+        if screen_mode == ScreenMode::Browse {
+            if let Some(button) = pressed {
+                match button {
+                    RawButton::Confirm => {
+                        if let Some(entry) = page
+                            .entries
+                            .get(browser.selected_index(page.entries.len()).unwrap_or(0))
+                        {
+                            match entry.kind {
+                                xteink_browser::EntryKind::Directory => {
+                                    match join_child_path(current_path.as_str(), entry.fs_name.as_str()) {
+                                        Ok(next_path) => {
+                                            current_path = next_path;
+                                            browser = PagedBrowser::new(page_size);
+                                            match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
+                                                Ok(next_page) => {
+                                                    page = next_page;
+                                                    browser.set_page(
+                                                        page.info.page_start,
+                                                        page.entries.len(),
+                                                        0,
+                                                    );
+                                                    render_browser_screen(
+                                                        &mut display,
+                                                        current_path.as_str(),
+                                                        &page.entries,
+                                                        browser.selected_index(page.entries.len()),
+                                                        BrowserRefresh::Full,
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    esp_println::println!(
+                                                        "Directory listing failed: {:?}",
+                                                        err
+                                                    );
+                                                    render_error_screen(
+                                                        &mut display,
+                                                        "Directory listing error",
+                                                    );
+                                                }
+                                            }
                                         }
-                                        Err(err) => {
-                                            esp_println::println!("Directory listing failed: {:?}", err);
-                                            render_error_screen(&mut display, "Directory listing error");
+                                        Err(_) => {
+                                            esp_println::println!("Enter directory failed");
+                                            render_error_screen(&mut display, "Failed to open directory");
                                         }
                                     }
                                 }
-                                Err(_) => {
-                                    esp_println::println!("Enter directory failed");
-                                    render_error_screen(&mut display, "Failed to open directory");
+                                xteink_browser::EntryKind::Epub => {
+                                    reader_entry = Some(entry.clone());
+                                    reader_page = 0;
+                                    if let Err(err) =
+                                        render_epub_from_entry(&sd, &mut display, current_path.as_str(), entry)
+                                    {
+                                        esp_println::println!("EPUB render failed: {:?}", err);
+                                        render_error_screen(&mut display, "EPUB render error");
+                                    } else {
+                                        screen_mode = ScreenMode::Reading;
+                                    }
                                 }
-                            }
-                        }
-                        xteink_browser::EntryKind::Epub => {
-                            reader_entry = Some(entry.clone());
-                            reader_page = 0;
-                            if let Err(err) = render_epub_from_entry(
-                                &sd,
-                                &mut display,
-                                current_path.as_str(),
-                                entry,
-                            ) {
-                                esp_println::println!("EPUB render failed: {:?}", err);
-                                render_error_screen(&mut display, "EPUB render error");
-                            } else {
-                                screen_mode = ScreenMode::Reading;
-                            }
-                        }
-                        xteink_browser::EntryKind::Other => {
-                            render_browser_screen(
-                                &mut display,
-                                current_path.as_str(),
-                                &page.entries,
-                                browser.selected_index(page.entries.len()),
-                                BrowserRefresh::Fast,
-                            );
-                        }
-                    }
-                } else if input.was_pressed(Button::Back) {
-                    if current_path.as_str() != "/" {
-                        if let Some(parent) = current_path.as_str().rsplit_once('/') {
-                            let mut next_path: String<256> = String::new();
-                            let _ = next_path.push_str(if parent.0.is_empty() { "/" } else { parent.0 });
-                            current_path = next_path;
-                            browser = PagedBrowser::new(page_size);
-                            match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
-                                Ok(next_page) => {
-                                    page = next_page;
-                                    browser.set_page(page.info.page_start, page.entries.len(), 0);
+                                xteink_browser::EntryKind::Other => {
                                     render_browser_screen(
                                         &mut display,
                                         current_path.as_str(),
                                         &page.entries,
                                         browser.selected_index(page.entries.len()),
-                                        BrowserRefresh::Full,
+                                        BrowserRefresh::Fast,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    RawButton::Back => {
+                        if current_path.as_str() != "/" {
+                            if let Some(parent) = current_path.as_str().rsplit_once('/') {
+                                let mut next_path: String<256> = String::new();
+                                let _ = next_path
+                                    .push_str(if parent.0.is_empty() { "/" } else { parent.0 });
+                                current_path = next_path;
+                                browser = PagedBrowser::new(page_size);
+                                match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
+                                    Ok(next_page) => {
+                                        page = next_page;
+                                        browser.set_page(page.info.page_start, page.entries.len(), 0);
+                                        render_browser_screen(
+                                            &mut display,
+                                            current_path.as_str(),
+                                            &page.entries,
+                                            browser.selected_index(page.entries.len()),
+                                            BrowserRefresh::Full,
+                                        );
+                                    }
+                                    Err(err) => {
+                                        esp_println::println!("Directory listing failed: {:?}", err);
+                                        render_error_screen(&mut display, "Directory listing error");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    RawButton::Left | RawButton::Up => {
+                        if let Some(selected) = browser.selected_index(page.entries.len()) {
+                            match browser.handle(
+                                BrowserInput::Left,
+                                page.entries.len(),
+                                page.info.has_prev,
+                                page.info.has_next,
+                            ) {
+                                PagedAction::None => {}
+                                PagedAction::Redraw => {
+                                    render_browser_screen(
+                                        &mut display,
+                                        current_path.as_str(),
+                                        &page.entries,
+                                        Some(selected),
+                                        BrowserRefresh::Fast,
+                                    );
+                                }
+                                PagedAction::LoadPage {
+                                    page_start,
+                                    selected,
+                                } => {
+                                    match load_directory_page(
+                                        &sd,
+                                        current_path.as_str(),
+                                        page_start,
+                                        page_size,
+                                    ) {
+                                        Ok(next_page) => {
+                                            page = next_page;
+                                            browser.set_page(
+                                                page.info.page_start,
+                                                page.entries.len(),
+                                                selected,
+                                            );
+                                            render_browser_screen(
+                                                &mut display,
+                                                current_path.as_str(),
+                                                &page.entries,
+                                                browser.selected_index(page.entries.len()),
+                                                BrowserRefresh::Fast,
+                                            );
+                                        }
+                                        Err(err) => {
+                                            esp_println::println!(
+                                                "Directory listing failed: {:?}",
+                                                err
+                                            );
+                                            render_error_screen(&mut display, "Directory listing error");
+                                        }
+                                    }
+                                }
+                                PagedAction::OpenSelected(_) => {}
+                            }
+                        }
+                    }
+                    RawButton::Right | RawButton::Down => {
+                        match browser.handle(
+                            BrowserInput::Right,
+                            page.entries.len(),
+                            page.info.has_prev,
+                            page.info.has_next,
+                        ) {
+                            PagedAction::None => {}
+                            PagedAction::Redraw => {
+                                render_browser_screen(
+                                    &mut display,
+                                    current_path.as_str(),
+                                    &page.entries,
+                                    browser.selected_index(page.entries.len()),
+                                    BrowserRefresh::Fast,
+                                );
+                            }
+                            PagedAction::LoadPage {
+                                page_start,
+                                selected,
+                            } => match load_directory_page(&sd, current_path.as_str(), page_start, page_size) {
+                                Ok(next_page) => {
+                                    page = next_page;
+                                    browser.set_page(page.info.page_start, page.entries.len(), selected);
+                                    render_browser_screen(
+                                        &mut display,
+                                        current_path.as_str(),
+                                        &page.entries,
+                                        browser.selected_index(page.entries.len()),
+                                        BrowserRefresh::Fast,
                                     );
                                 }
                                 Err(err) => {
-                                    esp_println::println!("Directory listing failed: {:?}", err);
+                                    esp_println::println!(
+                                        "Directory listing failed: {:?}",
+                                        err
+                                    );
                                     render_error_screen(&mut display, "Directory listing error");
                                 }
-                            }
+                            },
+                            PagedAction::OpenSelected(_) => {}
                         }
                     }
-                } else if input.was_pressed(Button::Left) || input.was_pressed(Button::Up) {
-                    match browser.handle(
-                        BrowserInput::Left,
-                        page.entries.len(),
-                        page.info.has_prev,
-                        page.info.has_next,
-                    ) {
-                        PagedAction::None => {}
-                        PagedAction::Redraw => {
-                            render_browser_screen(
-                                &mut display,
-                                current_path.as_str(),
-                                &page.entries,
-                                browser.selected_index(page.entries.len()),
-                                BrowserRefresh::Fast,
-                            );
-                        }
-                        PagedAction::LoadPage {
-                            page_start,
-                            selected,
-                        } => match load_directory_page(&sd, current_path.as_str(), page_start, page_size) {
-                            Ok(next_page) => {
-                                page = next_page;
-                                browser.set_page(page.info.page_start, page.entries.len(), selected);
-                                render_browser_screen(
-                                    &mut display,
-                                    current_path.as_str(),
-                                    &page.entries,
-                                    browser.selected_index(page.entries.len()),
-                                    BrowserRefresh::Fast,
-                                );
-                            }
-                            Err(err) => {
-                                esp_println::println!(
-                                    "Directory listing failed: {:?}",
-                                    err
-                                );
-                                render_error_screen(&mut display, "Directory listing error");
-                            }
-                        },
-                        PagedAction::OpenSelected(_) => {}
-                    }
-                } else if input.was_pressed(Button::Right) || input.was_pressed(Button::Down) {
-                    match browser.handle(
-                        BrowserInput::Right,
-                        page.entries.len(),
-                        page.info.has_prev,
-                        page.info.has_next,
-                    ) {
-                        PagedAction::None => {}
-                        PagedAction::Redraw => {
-                            render_browser_screen(
-                                &mut display,
-                                current_path.as_str(),
-                                &page.entries,
-                                browser.selected_index(page.entries.len()),
-                                BrowserRefresh::Fast,
-                            );
-                        }
-                        PagedAction::LoadPage {
-                            page_start,
-                            selected,
-                        } => match load_directory_page(&sd, current_path.as_str(), page_start, page_size) {
-                            Ok(next_page) => {
-                                page = next_page;
-                                browser.set_page(page.info.page_start, page.entries.len(), selected);
-                                render_browser_screen(
-                                    &mut display,
-                                    current_path.as_str(),
-                                    &page.entries,
-                                    browser.selected_index(page.entries.len()),
-                                    BrowserRefresh::Fast,
-                                );
-                            }
-                            Err(err) => {
-                                esp_println::println!(
-                                    "Directory listing failed: {:?}",
-                                    err
-                                );
-                                render_error_screen(&mut display, "Directory listing error");
-                            }
-                        },
-                        PagedAction::OpenSelected(_) => {}
-                    }
+                    _ => {}
                 }
             }
-        } else if screen_mode == ScreenMode::Reading && input.was_any_pressed() {
-            let reader_input = if input.was_pressed(Button::Left) || input.was_pressed(Button::Up) {
-                Some(BrowserInput::Left)
-            } else if input.was_pressed(Button::Right) || input.was_pressed(Button::Down) {
-                Some(BrowserInput::Right)
-            } else if input.was_pressed(Button::Back) || input.was_pressed(Button::PageBack) || input.was_pressed(Button::PageForward) {
-                Some(BrowserInput::Down)
-            } else {
-                None
+        } else if screen_mode == ScreenMode::Reading && pressed.is_some() {
+            let reader_input = match pressed {
+                Some(RawButton::Left) | Some(RawButton::Up) => Some(BrowserInput::Left),
+                Some(RawButton::Right) | Some(RawButton::Down) => Some(BrowserInput::Right),
+                Some(RawButton::Back) => Some(BrowserInput::Down),
+                _ => None,
             };
 
             if let Some(input) = reader_input {
