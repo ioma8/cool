@@ -1,10 +1,11 @@
 use embedded_hal::spi::SpiDevice;
 use xteink_display::SSD1677Display;
 use xteink_epub::EpubError;
+use xteink_epub::EpubSource;
 
 use crate::{
     cache::{cache_paths_for_epub, parse_meta, serialize_meta, CacheMeta, CachePaths, CACHE_VERSION},
-    low_level::{self, DirectoryPageInfo, FsError, SdFilesystem},
+    low_level::{self, DirectoryPageInfo, FsError, SdFilesystem, SdFsFile},
     path::join_child_path,
 };
 

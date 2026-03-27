@@ -120,8 +120,8 @@ type SdCard<'bus, SPI, DELAY> = SdSpiCard<
 type SdVolumes<'bus, SPI, DELAY> =
     VolumeManager<SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>;
 
-type SdRawFile<'bus, SPI, DELAY> =
-    File<'bus, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>;
+type SdRawFile<'fs, 'bus, SPI, DELAY> =
+    File<'fs, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>;
 
 pub struct SdApp<'bus, SPI, DELAY>
 where
@@ -165,7 +165,7 @@ pub trait SdFilesystem {
 impl<'bus, SPI, DELAY> SdApp<'bus, SPI, DELAY>
 where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
-    DELAY: DelayNs,
+    DELAY: DelayNs + 'bus,
 {
     pub fn begin(
         spi_bus: &'bus Mutex<NoopRawMutex, RefCell<SPI>>,
@@ -233,7 +233,7 @@ where
         &'fs self,
         path: &str,
         mode: Mode,
-    ) -> Result<SdRawFile<'bus, SPI, DELAY>, FsError> {
+    ) -> Result<SdRawFile<'fs, 'bus, SPI, DELAY>, FsError> {
         let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
         esp_println::println!("SD open_file_at_path start: {}", path.as_str());
         let (parent_path, file_name) = split_parent_path(path.as_str())?;
@@ -262,7 +262,7 @@ where
     fn open_file_at_path<'fs>(
         &'fs self,
         path: &str,
-    ) -> Result<SdRawFile<'bus, SPI, DELAY>, FsError> {
+    ) -> Result<SdRawFile<'fs, 'bus, SPI, DELAY>, FsError> {
         self.open_file_at_path_with_mode(path, Mode::ReadOnly)
     }
 
@@ -306,10 +306,10 @@ where
 impl<'bus, SPI, DELAY> SdFilesystem for SdApp<'bus, SPI, DELAY>
 where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
-    DELAY: DelayNs,
+    DELAY: DelayNs + 'bus,
 {
     type EpubSource<'a> = SdEpubSource<'a, 'bus, SPI, DELAY> where Self: 'a;
-    type File<'a> = SdRawFile<'bus, SPI, DELAY> where Self: 'a;
+    type File<'a> = SdRawFile<'a, 'bus, SPI, DELAY> where Self: 'a;
 
     fn list_directory_page(
         &self,
@@ -389,10 +389,10 @@ where
     }
 }
 
-impl<'fs, 'bus, SPI, DELAY> SdFsFile for SdRawFile<'fs, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>
+impl<'fs, 'bus, SPI, DELAY> SdFsFile for SdRawFile<'fs, 'bus, SPI, DELAY>
 where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
-    DELAY: DelayNs,
+    DELAY: DelayNs + 'bus,
 {
     fn len(&self) -> usize {
         self.length() as usize
@@ -421,13 +421,13 @@ where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
     DELAY: DelayNs,
 {
-    file: File<'fs, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
+    file: SdRawFile<'fs, 'bus, SPI, DELAY>,
 }
 
 impl<'fs, 'bus, SPI, DELAY> EpubSource for SdEpubSource<'fs, 'bus, SPI, DELAY>
 where
     SPI: SpiBus + SetConfig<Config = esp_hal::spi::master::Config>,
-    DELAY: DelayNs,
+    DELAY: DelayNs + 'bus,
 {
     fn len(&self) -> usize {
         self.file.length() as usize
@@ -447,7 +447,7 @@ pub fn init_sd<'a, SPI, DELAY>(
 ) -> Result<SdApp<'a, SPI, DELAY>, FsError>
 where
     SPI: SpiBus + SetConfig<Config = esp_hal::spi::master::Config>,
-    DELAY: DelayNs,
+    DELAY: DelayNs + 'a,
 {
     SdApp::begin(spi_bus, base_config, delay)
 }

@@ -71,7 +71,7 @@ pub fn sanitize_cache_name(input: &str) -> String<NAME_CAPACITY> {
         }
         previous_sep = ch == b'_';
         let _ = out.push(char::from(ch));
-        if out.is_full() {
+        if out.len() == out.capacity() {
             break;
         }
     }
@@ -170,17 +170,13 @@ pub fn parse_meta(raw: &str) -> Option<CacheMeta> {
             continue;
         }
         if let Some(value) = line.strip_prefix("source_size=") {
-            let _ = value.parse::<u32>().map(|value| {
-                parsed.source_size = value;
-                seen[1] = true;
-            })?;
+            parsed.source_size = value.parse::<u32>().ok()?;
+            seen[1] = true;
             continue;
         }
         if let Some(value) = line.strip_prefix("content_length=") {
-            let _ = value.parse::<u32>().map(|value| {
-                parsed.content_length = value;
-                seen[2] = true;
-            })?;
+            parsed.content_length = value.parse::<u32>().ok()?;
+            seen[2] = true;
             continue;
         }
     }
