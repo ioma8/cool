@@ -5,6 +5,7 @@ use embedded_hal::{
     digital::{InputPin, OutputPin},
     spi::SpiDevice,
 };
+use core::sync::atomic::{AtomicBool, Ordering};
 use xteink_epub::{
     Epub,
     EpubArchive,
@@ -81,6 +82,27 @@ impl EpubRenderWorkspace {
 }
 
 static mut EPUB_RENDER_WORKSPACE: EpubRenderWorkspace = EpubRenderWorkspace::new();
+static EPUB_RENDER_WORKSPACE_LOCK: AtomicBool = AtomicBool::new(false);
+
+struct EpubRenderWorkspaceGuard;
+
+impl Drop for EpubRenderWorkspaceGuard {
+    fn drop(&mut self) {
+        EPUB_RENDER_WORKSPACE_LOCK.store(false, Ordering::Release);
+    }
+}
+
+fn lock_epub_render_workspace() -> (&'static mut EpubRenderWorkspace, EpubRenderWorkspaceGuard) {
+    while EPUB_RENDER_WORKSPACE_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    // SAFETY: access is protected by the global spin lock above.
+    let workspace = unsafe { &mut *core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) };
+    (workspace, EpubRenderWorkspaceGuard)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshMode {
@@ -261,7 +283,8 @@ where
         F: FnMut(&str) -> Result<(), xteink_epub::EpubError>,
     {
         let mut epub = Epub::open(source)?;
-        let workspace_ptr = core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE);
+        let (workspace, _workspace_guard) = lock_epub_render_workspace();
+        let workspace_ptr = core::ptr::addr_of_mut!(*workspace);
         let mut text = TextBuffer::<TEXT_LEN>::new();
         let mut cursor_y = 0u16;
         let mut current_page = 0usize;
