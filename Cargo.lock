@@ -1343,6 +1343,9 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "embedded-hal 1.0.0",
+ "esp-hal",
+ "esp-println",
+ "esp-rtos",
  "fontdue",
  "heapless 0.8.0",
  "xteink-epub",

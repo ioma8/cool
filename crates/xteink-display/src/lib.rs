@@ -6,6 +6,8 @@ use embedded_hal::{
     spi::SpiDevice,
 };
 use critical_section;
+#[cfg(target_arch = "riscv32")]
+use esp_rtos::CurrentThreadHandle;
 use xteink_epub::{
     Epub,
     EpubArchive,
@@ -43,7 +45,6 @@ const CMD_DISPLAY_UPDATE_CTRL2: u8 = 0x22;
 const CMD_MASTER_ACTIVATION: u8 = 0x20;
 const CMD_WRITE_TEMP: u8 = 0x1A;
 const CMD_DEEP_SLEEP: u8 = 0x10;
-const EMBEDDED_EPUB_BYTES: &[u8] = include_bytes!("../../../test/epubs/test_display_none.epub");
 
 const CTRL1_NORMAL: u8 = 0x00;
 const CTRL1_BYPASS_RED: u8 = 0x40;
@@ -58,6 +59,15 @@ const EPUB_WORKSPACE_PATH_BUF: usize = 512;
 const TEXT_LEN: usize = 2048;
 const CACHED_TEXT_CHUNK: usize = 1024;
 const CACHED_LINE_LEN: usize = 1024;
+const EPUB_RENDER_YIELD_INTERVAL: usize = 1;
+
+#[inline]
+fn cooperative_yield() {
+    #[cfg(target_arch = "riscv32")]
+    {
+        CurrentThreadHandle::get().delay(esp_hal::time::Duration::from_micros(0));
+    }
+}
 
 struct EpubRenderWorkspace {
     zip_cd: [u8; EPUB_WORKSPACE_ZIP_CD],
@@ -240,7 +250,14 @@ where
     }
 
     pub fn render_embedded_epub_first_screen(&mut self) -> Result<(), xteink_epub::EpubError> {
-        self.render_epub_first_screen(EmbeddedEpub)
+        self.clear(0xFF);
+        self.draw_wrapped_text(
+            16,
+            16,
+            "EPUB demo disabled.\nLoad books from storage instead.",
+            DISPLAY_HEIGHT.saturating_sub(16),
+        );
+        Ok(())
     }
 
     pub fn render_epub_first_screen<S: EpubSource>(
@@ -256,18 +273,20 @@ where
         source: S,
         target_page: usize,
     ) -> Result<usize, xteink_epub::EpubError> {
-        self.render_epub_page_with_text_sink(source, target_page, |_| Ok(()), false)
+        self.render_epub_page_with_text_sink_and_cancel(source, target_page, |_| Ok(()), false, || false)
     }
 
-    pub fn render_epub_page_with_text_sink<S: EpubSource, F>(
+    pub fn render_epub_page_with_text_sink_and_cancel<S: EpubSource, F, C>(
         &mut self,
         source: S,
         target_page: usize,
         mut on_text_chunk: F,
         parse_full_book: bool,
+        mut should_cancel: C,
     ) -> Result<usize, xteink_epub::EpubError>
     where
         F: FnMut(&str) -> Result<(), xteink_epub::EpubError>,
+        C: FnMut() -> bool,
     {
         with_epub_render_workspace(|workspace| {
             let workspace_ptr = core::ptr::addr_of_mut!(*workspace);
@@ -276,11 +295,28 @@ where
             let mut cursor_y = 0u16;
             let mut current_page = 0usize;
             let mut render_enabled = true;
+            let mut event_budget = 0usize;
+            let mut event_count = 0usize;
             let line_height = bookerly::BOOKERLY.line_height_px();
 
             self.clear(0xFF);
 
             loop {
+                if should_cancel() {
+                    return Err(xteink_epub::EpubError::Cancelled);
+                }
+
+                #[cfg(target_arch = "riscv32")]
+                if event_count % 64 == 0 {
+                    let _ = esp_println::println!(
+                        "EPUB render event begin: count={} page={} cursor_y={} enabled={}",
+                        event_count,
+                        current_page,
+                        cursor_y,
+                        render_enabled
+                    );
+                }
+
                 let event = epub.next_event(ReaderBuffers {
                     zip_cd: unsafe { &mut (*workspace_ptr).zip_cd },
                     inflate: unsafe { &mut (*workspace_ptr).inflate },
@@ -293,6 +329,7 @@ where
                 let Some(event) = event else {
                     break;
                 };
+                event_count = event_count.saturating_add(1);
 
                 match event {
                     EpubEvent::Text(chunk) => {
@@ -334,6 +371,26 @@ where
                     EpubEvent::UnsupportedTag => {}
                 }
 
+                event_budget = event_budget.saturating_add(1);
+                if event_budget >= EPUB_RENDER_YIELD_INTERVAL {
+                    event_budget = 0;
+                    cooperative_yield();
+                    if should_cancel() {
+                        return Err(xteink_epub::EpubError::Cancelled);
+                    }
+                }
+
+                #[cfg(target_arch = "riscv32")]
+                if event_count % 64 == 0 {
+                    let _ = esp_println::println!(
+                        "EPUB render event end: count={} page={} cursor_y={} enabled={}",
+                        event_count,
+                        current_page,
+                        cursor_y,
+                        render_enabled
+                    );
+                }
+
                 if cursor_y >= DISPLAY_HEIGHT {
                     if render_enabled && current_page >= target_page {
                         if parse_full_book {
@@ -364,6 +421,19 @@ where
         })
     }
 
+    pub fn render_epub_page_with_text_sink<S: EpubSource, F>(
+        &mut self,
+        source: S,
+        target_page: usize,
+        on_text_chunk: F,
+        parse_full_book: bool,
+    ) -> Result<usize, xteink_epub::EpubError>
+    where
+        F: FnMut(&str) -> Result<(), xteink_epub::EpubError>,
+    {
+        self.render_epub_page_with_text_sink_and_cancel(source, target_page, on_text_chunk, parse_full_book, || false)
+    }
+
     pub fn render_cached_text_page<R>(
         &mut self,
         read_text: &mut R,
@@ -372,19 +442,48 @@ where
     where
         R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
     {
+        self.render_cached_text_page_with_cancel(read_text, target_page, || false)
+    }
+
+    pub fn render_cached_text_page_with_cancel<R, C>(
+        &mut self,
+        read_text: &mut R,
+        target_page: usize,
+        mut should_cancel: C,
+    ) -> Result<usize, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+        C: FnMut() -> bool,
+    {
         let mut cursor_y = 0u16;
         let mut current_page = 0usize;
         let line_height = bookerly::BOOKERLY.line_height_px();
         let mut line = WrappedLine::<CACHED_LINE_LEN>::new();
         let mut read_buffer = [0u8; CACHED_TEXT_CHUNK];
         let mut done = false;
+        let mut chunk_count = 0usize;
 
         self.clear(0xFF);
 
         loop {
+            if should_cancel() {
+                return Err(xteink_epub::EpubError::Cancelled);
+            }
             let read_len = read_text(&mut read_buffer)?;
             if read_len == 0 {
                 break;
+            }
+            chunk_count = chunk_count.saturating_add(1);
+
+            #[cfg(target_arch = "riscv32")]
+            if chunk_count % 32 == 0 {
+                let _ = esp_println::println!(
+                    "EPUB cached render chunk: count={} page={} cursor_y={} done={}",
+                    chunk_count,
+                    current_page,
+                    cursor_y,
+                    done
+                );
             }
 
             let mut source = &read_buffer[..read_len];
@@ -423,6 +522,8 @@ where
             if done {
                 break;
             }
+
+            cooperative_yield();
         }
 
         if !done {
@@ -884,26 +985,6 @@ impl<const N: usize> TextBuffer<N> {
     }
 }
 
-struct EmbeddedEpub;
-
-impl EpubSource for EmbeddedEpub {
-    fn len(&self) -> usize {
-        EMBEDDED_EPUB_BYTES.len()
-    }
-
-    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, xteink_epub::EpubError> {
-        let offset = usize::try_from(offset).map_err(|_| xteink_epub::EpubError::InvalidFormat)?;
-        if offset >= EMBEDDED_EPUB_BYTES.len() {
-            return Ok(0);
-        }
-
-        let end = core::cmp::min(EMBEDDED_EPUB_BYTES.len(), offset + buffer.len());
-        let len = end - offset;
-        buffer[..len].copy_from_slice(&EMBEDDED_EPUB_BYTES[offset..end]);
-        Ok(len)
-    }
-}
-
 impl<const N: usize> WrappedLine<N> {
     const fn new() -> Self {
         Self {
@@ -949,6 +1030,39 @@ impl<const N: usize> WrappedLine<N> {
 
 #[cfg(test)]
 extern crate std;
+
+#[cfg(test)]
+mod host_critical_section {
+    use core::cell::RefCell;
+    use std::sync::{Mutex, MutexGuard};
+
+    use critical_section::{set_impl, Impl, RawRestoreState};
+
+    static GLOBAL_MUTEX: Mutex<()> = Mutex::new(());
+    std::thread_local!(static GLOBAL_GUARD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) });
+
+    struct HostCriticalSection;
+    set_impl!(HostCriticalSection);
+
+    unsafe impl Impl for HostCriticalSection {
+        unsafe fn acquire() -> RawRestoreState {
+            let guard = match GLOBAL_MUTEX.lock() {
+                Ok(guard) => guard,
+                Err(err) => err.into_inner(),
+            };
+            GLOBAL_GUARD.with(|slot| {
+                *slot.borrow_mut() = Some(guard);
+            });
+        }
+
+        unsafe fn release(_: RawRestoreState) {
+            GLOBAL_GUARD.with(|slot| {
+                let _guard = slot.borrow_mut().take();
+                drop(_guard);
+            });
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1149,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn render_embedded_epub_fixture_draws_some_text() {
+    fn render_demo_splash_draws_some_text() {
         let mut display = new_display();
 
         display.clear(0xFF);
@@ -1171,7 +1285,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_epub_demo_initializes_clears_renders_and_refreshes() {
+    fn demo_initializes_clears_renders_and_refreshes() {
         let mut display = DemoRecorder::default();
 
         show_embedded_epub_demo(&mut display).unwrap();

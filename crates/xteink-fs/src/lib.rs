@@ -18,7 +18,9 @@ mod path;
 pub use browser::{
     load_directory_page,
     render_epub_from_entry,
+    render_epub_from_entry_with_cancel,
     render_epub_page_from_entry,
+    render_epub_page_from_entry_with_cancel,
     DirectoryPage,
     ListedEntry,
     EpubRefreshMode,

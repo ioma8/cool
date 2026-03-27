@@ -9,6 +9,11 @@ heapless = { version = "0.8", default-features = false }
 critical-section = "1.2"
 xteink-epub = { path = "../xteink-epub" }
 
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
+esp-rtos = "0.2.0"
+esp-println = { version = "0.16", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
+
 [build-dependencies]
 fontdue = "0.9"
 

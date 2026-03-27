@@ -15,7 +15,7 @@ use crate::{hal, path::normalize_path};
 pub const MAX_ENTRIES: usize = 64;
 const LABEL_CAPACITY: usize = 96;
 const LFN_CAPACITY: usize = 256;
-const MAX_DIRS: usize = 8;
+const MAX_DIRS: usize = 16;
 const MAX_FILES: usize = 4;
 const MAX_VOLUMES: usize = 1;
 

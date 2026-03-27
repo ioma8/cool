@@ -21,6 +21,7 @@ pub enum EpubError {
     Compression,
     OutOfSpace,
     Unsupported,
+    Cancelled,
 }
 
 impl From<ZipError> for EpubError {

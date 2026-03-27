@@ -6,11 +6,12 @@ pub const CACHE_VERSION: u8 = 1;
 pub const META_FILE_NAME: &str = "meta.txt";
 pub const CONTENT_FILE_NAME: &str = "content.txt";
 pub const PROGRESS_FILE_NAME: &str = "progress.bin";
-pub const CACHE_ROOT_DIR: &str = "/.cool";
+pub const CACHE_ROOT_DIRS: [&str; 2] = ["/COOL", "/.cool"];
+const PRIMARY_CACHE_ROOT_DIR: &str = CACHE_ROOT_DIRS[0];
 
 const PATH_CAPACITY: usize = 220;
 const NAME_CAPACITY: usize = 64;
-const MAX_COMPONENT_LEN: usize = 64;
+const MAX_COMPONENT_LEN: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheMeta {
@@ -46,31 +47,17 @@ impl FnvHasher {
 
 pub fn sanitize_cache_name(input: &str) -> String<NAME_CAPACITY> {
     let mut out = String::new();
-    let mut previous_sep = false;
     let mut hasher = FnvHasher::new();
 
     for &byte in input.as_bytes() {
         hasher.write(byte.to_ascii_uppercase());
-        let mut ch = byte.to_ascii_uppercase();
-        let is_sep = matches!(ch, b'/' | b'\\');
-
-        if is_sep {
-            ch = b'_';
-        }
-
-        if !ch.is_ascii_alphanumeric()
-            && ch != b'.'
-            && ch != b'_'
-            && ch != b'-'
-        {
-            ch = b'_';
-        }
-
-        if previous_sep && ch == b'_' {
-            continue;
-        }
-        previous_sep = ch == b'_';
-        let _ = out.push(char::from(ch));
+        let ch = byte.to_ascii_uppercase();
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch
+        } else {
+            b'_'
+        };
+        let _ = out.push(char::from(mapped));
         if out.len() == out.capacity() {
             break;
         }
@@ -85,24 +72,34 @@ pub fn sanitize_cache_name(input: &str) -> String<NAME_CAPACITY> {
     }
 
     while out.len() > MAX_COMPONENT_LEN {
-        let hash = hasher.finish();
-        let limit = MAX_COMPONENT_LEN.saturating_sub(1 + 8);
-        if limit > 0 {
-            let prefix = &out.as_str()[..limit];
-            let mut next = String::<NAME_CAPACITY>::new();
-            let _ = next.push_str(prefix);
-            let _ = next.push('_');
-            let _ = write!(&mut next, "{hash:08X}");
-            out = next;
-        } else {
-            break;
-        }
+        out = short_cache_name(hasher.finish());
     }
 
     out
 }
 
+fn short_cache_name(hash: u32) -> String<NAME_CAPACITY> {
+    let mut out = String::<NAME_CAPACITY>::new();
+    let _ = out.push('B');
+    let _ = write!(&mut out, "{hash:07X}");
+    out
+}
+
 pub fn cache_paths_for_epub(source_path: &str, entry_name: &str) -> CachePaths {
+    cache_paths_for_epub_with_root(source_path, entry_name, PRIMARY_CACHE_ROOT_DIR)
+}
+
+pub fn cache_paths_for_epub_candidates(
+    source_path: &str,
+    entry_name: &str,
+) -> [CachePaths; 2] {
+    [
+        cache_paths_for_epub_with_root(source_path, entry_name, CACHE_ROOT_DIRS[0]),
+        cache_paths_for_epub_with_root(source_path, entry_name, CACHE_ROOT_DIRS[1]),
+    ]
+}
+
+fn cache_paths_for_epub_with_root(source_path: &str, entry_name: &str, root_dir: &str) -> CachePaths {
     let full_path = {
         let mut merged = String::<NAME_CAPACITY>::new();
         let _ = merged.push_str(source_path);
@@ -115,7 +112,7 @@ pub fn cache_paths_for_epub(source_path: &str, entry_name: &str) -> CachePaths {
 
     let name = sanitize_cache_name(full_path.as_str());
     let mut directory = String::<PATH_CAPACITY>::new();
-    let _ = directory.push_str(CACHE_ROOT_DIR);
+    let _ = directory.push_str(root_dir);
     let _ = directory.push('/');
     let _ = directory.push_str(name.as_str());
 
@@ -196,17 +193,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitize_cache_name_collapses_repeated_unsupported_chars() {
+    fn sanitize_cache_name_keeps_only_alnum_and_underscore() {
         let name = sanitize_cache_name("/MYBOOKS/WHEN_I WRITE/BOOK.EPU");
-        assert_eq!(name.as_str(), "MYBOOKS_WHEN_I_WRITE_BOOK.EPU");
+        assert_eq!(name.len(), 8);
+        assert!(name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'));
     }
 
     #[test]
     fn paths_are_rooted_under_cool_dir() {
         let paths = cache_paths_for_epub("/MYBOOKS", "PET.JA~1.EPU");
-        assert_eq!(paths.directory.as_str(), "/.cool/MYBOOKS_PET.JA~1.EPU");
-        assert_eq!(paths.meta.as_str(), "/.cool/MYBOOKS_PET.JA~1.EPU/meta.txt");
-        assert_eq!(paths.content.as_str(), "/.cool/MYBOOKS_PET.JA~1.EPU/content.txt");
+        let directory = paths.directory.as_str();
+        let meta = paths.meta.as_str();
+        let content = paths.content.as_str();
+
+        assert!(directory.starts_with("/COOL/"));
+        assert!(paths.directory.as_str().starts_with("/COOL/"));
+        assert_eq!(directory.split('/').nth(2).unwrap().len(), 8);
+        assert!(meta.starts_with(directory));
+        assert!(meta.ends_with("/meta.txt"));
+        assert!(content.starts_with(directory));
+        assert!(content.ends_with("/content.txt"));
     }
 
     #[test]
