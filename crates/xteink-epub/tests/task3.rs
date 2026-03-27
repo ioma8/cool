@@ -6,6 +6,7 @@ use xteink_epub::{
 };
 
 mod reference_text;
+mod reference_text_1024;
 
 #[derive(Clone)]
 struct MemorySource {
@@ -175,6 +176,51 @@ fn collect_level1_headings(events: &[OwnedEvent]) -> Vec<String> {
     headings
 }
 
+fn push_readable_segment(
+    out: &mut String,
+    text: &str,
+    pending_space: &mut bool,
+    pending_initial: &mut bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    let trimmed = text.trim_start();
+    let starts_initial_fragment = matches!(
+        trimmed.as_bytes().get(0..2),
+        Some([first, b'.']) if first.is_ascii_uppercase()
+    );
+    let is_single_initial = trimmed.len() == 1 && trimmed.as_bytes()[0].is_ascii_uppercase();
+    let ends_with_initial = text
+        .split_whitespace()
+        .last()
+        .is_some_and(|token| token.len() == 1 && token.as_bytes()[0].is_ascii_uppercase());
+
+    let needs_text_boundary = if out.is_empty() {
+        false
+    } else {
+        let prev = out.chars().rev().find(|ch| !ch.is_whitespace());
+        let first = text.chars().find(|ch| !ch.is_whitespace());
+        matches!(prev, Some(ch) if ch.is_alphanumeric() || matches!(ch, '.' | '!' | '?' | ':' | ';' | ',' | ')' | ']' | '}'))
+            && matches!(first, Some(ch) if ch.is_alphanumeric() || matches!(ch, '‘' | '“' | '(' | '[' | '{'))
+    };
+
+    let should_join_initial = *pending_initial
+        && (is_single_initial || starts_initial_fragment || trimmed.starts_with('.'));
+
+    if (*pending_space || (needs_text_boundary && !should_join_initial))
+        && !out.ends_with(' ')
+        && !out.is_empty()
+    {
+        out.push(' ');
+    }
+
+    out.push_str(text);
+    *pending_space = false;
+    *pending_initial = ends_with_initial || should_join_initial;
+}
+
 fn readable_text_from_events(events: &[OwnedEvent]) -> String {
     let mut out = String::new();
     let mut pending_space = false;
@@ -183,43 +229,7 @@ fn readable_text_from_events(events: &[OwnedEvent]) -> String {
     for event in events {
         match event {
             OwnedEvent::Text(text) => {
-                if text.is_empty() {
-                    continue;
-                }
-
-                let trimmed = text.trim_start();
-                let starts_initial_fragment = matches!(
-                    trimmed.as_bytes().get(0..2),
-                    Some([first, b'.']) if first.is_ascii_uppercase()
-                );
-                let is_single_initial = trimmed.len() == 1 && trimmed.as_bytes()[0].is_ascii_uppercase();
-                let ends_with_initial = text
-                    .split_whitespace()
-                    .last()
-                    .is_some_and(|token| token.len() == 1 && token.as_bytes()[0].is_ascii_uppercase());
-
-                let needs_text_boundary = if out.is_empty() {
-                    false
-                } else {
-                    let prev = out.chars().rev().find(|ch| !ch.is_whitespace());
-                    let first = text.chars().find(|ch| !ch.is_whitespace());
-                    matches!(prev, Some(ch) if ch.is_alphanumeric() || matches!(ch, '.' | '!' | '?' | ':' | ';' | ',' | ')' | ']' | '}'))
-                        && matches!(first, Some(ch) if ch.is_alphanumeric() || matches!(ch, '‘' | '“' | '(' | '[' | '{'))
-                };
-
-                let should_join_initial = pending_initial
-                    && (is_single_initial || starts_initial_fragment || trimmed.starts_with('.'));
-
-                if (pending_space || (needs_text_boundary && !should_join_initial))
-                    && !out.ends_with(' ')
-                    && !out.is_empty()
-                {
-                    out.push(' ');
-                }
-
-                out.push_str(text);
-                pending_space = false;
-                pending_initial = ends_with_initial || should_join_initial;
+                push_readable_segment(&mut out, text, &mut pending_space, &mut pending_initial);
             }
             OwnedEvent::ParagraphStart
             | OwnedEvent::ParagraphEnd
@@ -234,6 +244,10 @@ fn readable_text_from_events(events: &[OwnedEvent]) -> String {
     }
 
     out
+}
+
+fn prefix_chars(text: &str, len: usize) -> String {
+    text.chars().take(len).collect()
 }
 
 fn normalize_whitespace(text: &str) -> String {
@@ -426,6 +440,29 @@ fn every_epub_fixture_matches_reference_text_prefix() {
         assert!(
             actual.starts_with(expected),
             "fixture {name} did not match reference text prefix\nactual: {actual}\nexpected: {expected}"
+        );
+    }
+}
+
+#[test]
+fn every_epub_fixture_matches_reference_text_1024_prefix() {
+    assert!(
+        !reference_text_1024::EPUB_REFERENCE_CASES_1024.is_empty(),
+        "expected pandoc-handled epub fixtures"
+    );
+
+    for (name, expected) in reference_text_1024::EPUB_REFERENCE_CASES_1024 {
+        let name = *name;
+
+        let mut scratch = Scratch::large_for_smoke();
+        let events = collect_events(load_fixture(name), &mut scratch)
+            .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+
+        let actual = prefix_chars(&normalize_whitespace(&readable_text_from_events(&events)), 1024);
+
+        assert_eq!(
+            actual, *expected,
+            "fixture {name} did not match reference text 1024-char prefix"
         );
     }
 }
