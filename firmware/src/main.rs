@@ -180,6 +180,7 @@ fn main() -> ! {
     let mut input_manager = InputManager::new();
     let mut now_ms = 0u32;
     let mut adc_config = AdcConfig::new();
+    let mut debug_frame: u32 = 0;
     peripherals.GPIO1.rtcio_pullup(false);
     peripherals.GPIO1.rtcio_pulldown(true);
     peripherals.GPIO2.rtcio_pullup(false);
@@ -199,16 +200,32 @@ fn main() -> ! {
         let adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
         loop_delay.delay_millis(1);
         let adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
+        let power_button_pressed = power_button.is_low();
+        let decoded_pin1 = get_button_from_adc_1(adc1_value);
+        let decoded_pin2 = get_button_from_adc_2(adc2_value);
 
-        if let Some(raw_button) = get_button_from_adc_1(adc1_value) {
+        if let Some(raw_button) = decoded_pin1 {
             raw_state = raw_state.with_button(raw_button);
-        } else if let Some(raw_button) = get_button_from_adc_2(adc2_value) {
+        } else if let Some(raw_button) = decoded_pin2 {
             raw_state = raw_state.with_button(raw_button);
         }
 
-        if power_button.is_low() {
+        if power_button_pressed {
             raw_state = raw_state.with_button(RawButton::Power);
         }
+
+        if (debug_frame & 0x0F) == 0 {
+            esp_println::println!(
+                "adc1={} adc2={} pin1={:?} pin2={:?} power={} state={:08b}",
+                adc1_value,
+                adc2_value,
+                decoded_pin1,
+                decoded_pin2,
+                power_button_pressed,
+                raw_state.state,
+            );
+        }
+        debug_frame = debug_frame.wrapping_add(1);
 
         input_manager.update(raw_state, now_ms);
         let pressed = pressed_button(&input_manager);
