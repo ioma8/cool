@@ -311,20 +311,16 @@ async fn input_task(
     let mut pressed_lock: Option<RawButton> = None;
     let mut no_button_streak: u8 = RELEASE_STREAK_TO_REARM_PRESS;
     let delay = Delay::new();
-    let mut debug_frame: u32 = 0;
-
     loop {
         let mut raw_state = ButtonState::default();
-        let mut adc1_value = 0u16;
-        let mut adc2_value = 0u16;
         let mut decoded_pin1 = None;
         let mut decoded_pin2 = None;
         let mut power_button_pressed = false;
 
         for _ in 0..BUTTON_SCAN_ATTEMPTS {
-            adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
+            let adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
             delay.delay_micros(BUTTON_SCAN_DELAY_US);
-            adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
+            let adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
             let sample_pin1 = get_button_from_adc_1(adc1_value);
             let sample_pin2 = get_button_from_adc_2(adc2_value);
             let sample_power = power_button.is_low();
@@ -349,19 +345,6 @@ async fn input_task(
         if power_button_pressed {
             raw_state = raw_state.with_button(RawButton::Power);
         }
-
-        if (debug_frame & 0x0F) == 0 {
-            esp_println::println!(
-                "adc1={} adc2={} pin1={:?} pin2={:?} power={} state={:08b}",
-                adc1_value,
-                adc2_value,
-                decoded_pin1,
-                decoded_pin2,
-                power_button_pressed,
-                raw_state.state,
-            );
-        }
-        debug_frame = debug_frame.wrapping_add(1);
 
         let pressed = pressed_button_from_state(last_raw_state, raw_state);
         last_raw_state = raw_state;
