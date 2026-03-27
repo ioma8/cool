@@ -40,6 +40,7 @@ const CTRL1_NORMAL: u8 = 0x00;
 const CTRL1_BYPASS_RED: u8 = 0x40;
 const DATA_ENTRY_X_INC_Y_DEC: u8 = 0x01;
 const TEMP_SENSOR_INTERNAL: u8 = 0x80;
+const DISPLAY_BUSY_TIMEOUT_MS: u16 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefreshMode {
@@ -466,7 +467,7 @@ where
     }
 
     fn wait_while_busy(&mut self) {
-        for _ in 0..10_000 {
+        for _ in 0..DISPLAY_BUSY_TIMEOUT_MS {
             if !self.busy.is_high().unwrap_or(false) {
                 break;
             }
