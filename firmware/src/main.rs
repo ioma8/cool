@@ -3,19 +3,21 @@
 
 use core::cell::RefCell;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
-use embassy_sync::blocking_mutex::{Mutex, raw::NoopRawMutex};
+use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex, raw::NoopRawMutex};
+use embassy_sync::channel::{Channel, Receiver, Sender};
+use embassy_time::Timer;
 use esp_backtrace as _;
 use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
     clock::CpuClock,
     delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPinWithResistors},
-    main,
     spi::master::{Config as SpiConfig, Spi},
     peripherals::APB_SARADC,
     time::Rate,
 };
-use heapless::{String, Vec as HeaplessVec};
+use heapless::String;
 use xteink_fs::{
     init_sd, join_child_path, load_directory_page, render_epub_from_entry,
     render_epub_page_from_entry, EpubRefreshMode, ListedEntry, MAX_ENTRIES,
@@ -52,7 +54,10 @@ enum UiWorkItem {
     ReaderExit,
 }
 
-const UI_WORK_QUEUE_CAPACITY: usize = 8;
+const BUTTON_EVENT_CHANNEL_CAPACITY: usize = 8;
+
+static BUTTON_EVENT_CHANNEL: Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY> =
+    Channel::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingDisplayRefresh {
@@ -115,8 +120,8 @@ fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
     value
 }
 
-#[main]
-fn main() -> ! {
+#[esp_rtos::main]
+async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
     let boot_delay = Delay::new();
@@ -141,10 +146,10 @@ fn main() -> ! {
         .with_mode(esp_hal::spi::Mode::_0);
 
     let mut spi = Spi::new(peripherals.SPI2, display_spi_config)
-    .unwrap()
-    .with_sck(peripherals.GPIO8)
-    .with_mosi(peripherals.GPIO10)
-    .with_miso(peripherals.GPIO7);
+        .unwrap()
+        .with_sck(peripherals.GPIO8)
+        .with_mosi(peripherals.GPIO10)
+        .with_miso(peripherals.GPIO7);
 
     let display_cs = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
     let display_dc = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
@@ -164,7 +169,7 @@ fn main() -> ! {
     };
     let display_spi = SpiDeviceWithConfig::new(&spi_bus, display_cs, display_spi_config);
     let display_delay = Delay::new();
-    let mut display = SSD1677Display::new(
+    let display = SSD1677Display::new(
         display_spi,
         display_dc,
         display_rst,
@@ -176,23 +181,27 @@ fn main() -> ! {
     let mut current_path: String<256> = String::new();
     let _ = current_path.push('/');
     let page_size = browser_page_size();
-    let mut pending_display_refresh = PendingDisplayRefresh::None;
 
     let Some(sd) = sd else {
+        let mut display = display;
+        let mut pending_display_refresh = PendingDisplayRefresh::None;
         display.init();
         render_error_screen(
             &mut display,
             "SD init failed",
             &mut pending_display_refresh,
         );
+        service_display_refresh(&mut display, &mut pending_display_refresh);
         loop {
-            boot_delay.delay_millis(1000);
+            Timer::after_millis(1000).await;
         }
     };
 
-    let mut page = match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
+    let page = match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
         Ok(page) => page,
         Err(err) => {
+            let mut display = display;
+            let mut pending_display_refresh = PendingDisplayRefresh::None;
             esp_println::println!("Directory listing failed: {:?}", err);
             display.init();
             render_error_screen(
@@ -200,37 +209,23 @@ fn main() -> ! {
                 "Directory listing error",
                 &mut pending_display_refresh,
             );
+            service_display_refresh(&mut display, &mut pending_display_refresh);
             loop {
-                boot_delay.delay_millis(1000);
+                Timer::after_millis(1000).await;
             }
         }
     };
 
-    esp_println::println!("Display init start");
-    display.init();
-    esp_println::println!("Display init complete");
-
     let mut browser = PagedBrowser::new(page_size);
-    let mut screen_mode = ScreenMode::Browse;
-    let mut reader_entry: Option<ListedEntry> = None;
-    let mut reader_page = 0usize;
+    let screen_mode = ScreenMode::Browse;
+    let reader_entry: Option<ListedEntry> = None;
+    let reader_page = 0usize;
     browser.set_page(page.info.page_start, page.entries.len(), 0);
-    esp_println::println!("Browser render start, entries={}", page.entries.len());
-    render_browser_screen(
-        &mut display,
-        current_path.as_str(),
-        &page.entries,
-        browser.selected_index(page.entries.len()),
-        BrowserRefresh::Full,
-        &mut pending_display_refresh,
-    );
-    esp_println::println!("Browser render complete");
 
-    let loop_delay = Delay::new();
-    let mut last_raw_state = ButtonState::default();
-    let mut ui_work_queue: HeaplessVec<UiWorkItem, UI_WORK_QUEUE_CAPACITY> = HeaplessVec::new();
+    let sender = BUTTON_EVENT_CHANNEL.sender();
+    let receiver = BUTTON_EVENT_CHANNEL.receiver();
+
     let mut adc_config = AdcConfig::new();
-    let mut debug_frame: u32 = 0;
     peripherals.GPIO1.rtcio_pullup(false);
     peripherals.GPIO1.rtcio_pulldown(true);
     peripherals.GPIO2.rtcio_pullup(false);
@@ -240,10 +235,43 @@ fn main() -> ! {
     let _adc_pin1 = adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
     let _adc_pin2 = adc_config.enable_pin(peripherals.GPIO2, Attenuation::_11dB);
     let _adc = Adc::new(peripherals.ADC1, adc_config);
+    let _ = _adc;
     let power_button = Input::new(
         peripherals.GPIO3,
         InputConfig::default().with_pull(Pull::Down),
     );
+
+    let mut init_display = display;
+    init_display.init();
+    spawner.must_spawn(input_task(sender, power_button));
+    ui_task(
+        sd,
+        init_display,
+        page_size,
+        page,
+        browser,
+        current_path,
+        screen_mode,
+        reader_entry,
+        reader_page,
+        receiver,
+    )
+    .await;
+    loop {}
+}
+
+#[embassy_executor::task]
+async fn input_task(
+    sender: Sender<
+        'static,
+        CriticalSectionRawMutex,
+        RawButton,
+        BUTTON_EVENT_CHANNEL_CAPACITY,
+    >,
+    power_button: Input<'static>,
+) {
+    let mut last_raw_state = ButtonState::default();
+    let mut debug_frame: u32 = 0;
 
     loop {
         let mut raw_state = ButtonState::default();
@@ -255,7 +283,7 @@ fn main() -> ! {
 
         for _ in 0..BUTTON_SCAN_ATTEMPTS {
             adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
-            loop_delay.delay_micros(BUTTON_SCAN_DELAY_US);
+            Timer::after_micros(u64::from(BUTTON_SCAN_DELAY_US)).await;
             adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
             let sample_pin1 = get_button_from_adc_1(adc1_value);
             let sample_pin2 = get_button_from_adc_2(adc2_value);
@@ -268,7 +296,7 @@ fn main() -> ! {
                 break;
             }
 
-            loop_delay.delay_micros(BUTTON_SCAN_DELAY_US);
+            Timer::after_micros(u64::from(BUTTON_SCAN_DELAY_US)).await;
         }
 
         if let Some(raw_button) = decoded_pin1 {
@@ -296,32 +324,73 @@ fn main() -> ! {
 
         let pressed = pressed_button_from_state(last_raw_state, raw_state);
         last_raw_state = raw_state;
-
         if let Some(button) = pressed {
-            enqueue_ui_work(
-                button,
-                screen_mode,
-                &page.entries,
-                browser.selected_index(page.entries.len()),
-                &mut ui_work_queue,
+            let _ = sender.send(button).await;
+        }
+    }
+}
+
+async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
+    sd: SD,
+    mut display: SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    page_size: usize,
+    mut page: xteink_fs::DirectoryPage,
+    mut browser: PagedBrowser,
+    mut current_path: String<256>,
+    mut screen_mode: ScreenMode,
+    mut reader_entry: Option<ListedEntry>,
+    mut reader_page: usize,
+    receiver: Receiver<
+        'static,
+        CriticalSectionRawMutex,
+        RawButton,
+        BUTTON_EVENT_CHANNEL_CAPACITY,
+    >,
+) where
+    SD: xteink_fs::SdFilesystem,
+    SPI: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    let mut pending_display_refresh = PendingDisplayRefresh::None;
+    render_browser_screen(
+        &mut display,
+        current_path.as_str(),
+        &page.entries,
+        browser.selected_index(page.entries.len()),
+        BrowserRefresh::Full,
+        &mut pending_display_refresh,
+    );
+
+    loop {
+        let button = receiver.receive().await;
+        let selected_index = if page.entries.is_empty() {
+            None
+        } else {
+            browser.selected_index(page.entries.len())
+        };
+
+        if let Some(item) =
+            map_button_to_ui_work(button, screen_mode, &page.entries, selected_index)
+        {
+            run_next_ui_work(
+                &sd,
+                &mut display,
+                page_size,
+                &mut page,
+                &mut browser,
+                &mut current_path,
+                &mut screen_mode,
+                &mut reader_entry,
+                &mut reader_page,
+                item,
+                &mut pending_display_refresh,
             );
         }
 
         service_display_refresh(&mut display, &mut pending_display_refresh);
-        run_next_ui_work(
-            &sd,
-            &mut display,
-            page_size,
-            &mut page,
-            &mut browser,
-            &mut current_path,
-            &mut screen_mode,
-            &mut reader_entry,
-            &mut reader_page,
-            &mut ui_work_queue,
-            &mut pending_display_refresh,
-        );
-
     }
 }
 
@@ -332,14 +401,13 @@ fn browser_page_size() -> usize {
     visible.clamp(1, MAX_ENTRIES)
 }
 
-fn enqueue_ui_work(
+fn map_button_to_ui_work(
     button: RawButton,
     screen_mode: ScreenMode,
     page_entries: &[ListedEntry],
     selected_index: Option<usize>,
-    queue: &mut HeaplessVec<UiWorkItem, UI_WORK_QUEUE_CAPACITY>,
-) {
-    let item = match screen_mode {
+) -> Option<UiWorkItem> {
+    match screen_mode {
         ScreenMode::Browse => match button {
             RawButton::Left | RawButton::Up => Some(UiWorkItem::BrowseMoveLeft),
             RawButton::Right | RawButton::Down => Some(UiWorkItem::BrowseMoveRight),
@@ -355,13 +423,6 @@ fn enqueue_ui_work(
             RawButton::Back => Some(UiWorkItem::ReaderExit),
             _ => None,
         },
-    };
-
-    if let Some(work_item) = item {
-        if queue.is_full() {
-            let _ = queue.remove(0);
-        }
-        let _ = queue.push(work_item);
     }
 }
 
@@ -375,7 +436,7 @@ fn run_next_ui_work<SD, SPI, DC, RST, BUSY, DELAY>(
     screen_mode: &mut ScreenMode,
     reader_entry: &mut Option<ListedEntry>,
     reader_page: &mut usize,
-    work_queue: &mut HeaplessVec<UiWorkItem, UI_WORK_QUEUE_CAPACITY>,
+    item: UiWorkItem,
     pending_display_refresh: &mut PendingDisplayRefresh,
 ) where
     SD: xteink_fs::SdFilesystem,
@@ -385,11 +446,6 @@ fn run_next_ui_work<SD, SPI, DC, RST, BUSY, DELAY>(
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    if work_queue.is_empty() {
-        return;
-    }
-
-    let item = work_queue.remove(0);
     match item {
         UiWorkItem::BrowseMoveLeft => {
             if let Some(selected) = browser.selected_index(page.entries.len()) {
@@ -744,11 +800,7 @@ fn pressed_button_from_state(previous_state: ButtonState, current_state: ButtonS
         state: current_state.state & !previous_state.state,
     };
     if let Some(button) = new_press.first_pressed() {
-        return match button {
-            RawButton::Back => Some(RawButton::Confirm),
-            RawButton::Confirm => Some(RawButton::Back),
-            _ => Some(button),
-        };
+        return Some(button);
     }
     None
 }

@@ -12,6 +12,7 @@ embedded-hal.workspace = true
 critical-section.workspace = true
 nb.workspace = true
 embassy-embedded-hal = "0.5"
+embassy-time = "0.4"
 embassy-sync = "0.7"
 embedded-hal-bus = "0.3"
 esp32c3 = "0.31.0"
@@ -22,6 +23,8 @@ xteink-browser = { path = "../crates/xteink-browser" }
 xteink-epub = { path = "../crates/xteink-epub" }
 xteink-fs = { path = "../crates/xteink-fs" }
 xteink-display = { path = "../crates/xteink-display" }
+embassy-executor = { version = "0.9", default-features = false }
+esp-rtos = { version = "0.2.0", features = ["esp32c3", "embassy"] }
 
 [[bin]]
 name = "xteink-reader"
