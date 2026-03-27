@@ -1,2 +1,4 @@
 /target
 test/epubs/
+.DS_Store
+test/.DS_Store
