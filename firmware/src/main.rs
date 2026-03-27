@@ -455,10 +455,10 @@ fn map_button_to_ui_work(
         ScreenMode::Browse => match button {
             RawButton::Left | RawButton::Up => Some(UiWorkItem::BrowseMoveLeft),
             RawButton::Right | RawButton::Down => Some(UiWorkItem::BrowseMoveRight),
-            RawButton::Back => Some(UiWorkItem::BrowseBack),
-            RawButton::Confirm => selected_index
+            RawButton::Back => selected_index
                 .and_then(|index| page_entries.get(index))
                 .map(|entry| UiWorkItem::OpenEntry(entry.clone())),
+            RawButton::Confirm => Some(UiWorkItem::BrowseBack),
             _ => None,
         },
         ScreenMode::Reading => match button {
