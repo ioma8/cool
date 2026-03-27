@@ -5,7 +5,7 @@ use embedded_hal::{
     digital::{InputPin, OutputPin},
     spi::SpiDevice,
 };
-use core::sync::atomic::{AtomicBool, Ordering};
+use critical_section;
 use xteink_epub::{
     Epub,
     EpubArchive,
@@ -82,23 +82,13 @@ impl EpubRenderWorkspace {
 }
 
 static mut EPUB_RENDER_WORKSPACE: EpubRenderWorkspace = EpubRenderWorkspace::new();
-static EPUB_RENDER_WORKSPACE_LOCK: AtomicBool = AtomicBool::new(false);
 
-struct EpubRenderWorkspaceGuard;
-
-impl Drop for EpubRenderWorkspaceGuard {
-    fn drop(&mut self) {
-        EPUB_RENDER_WORKSPACE_LOCK.store(false, Ordering::Release);
-    }
-}
-
-fn lock_epub_render_workspace() -> (&'static mut EpubRenderWorkspace, EpubRenderWorkspaceGuard) {
-    while EPUB_RENDER_WORKSPACE_LOCK.swap(true, Ordering::Acquire) {
-        core::hint::spin_loop();
-    }
-    // SAFETY: access is protected by the global spin lock above.
-    let workspace = unsafe { &mut *core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) };
-    (workspace, EpubRenderWorkspaceGuard)
+fn with_epub_render_workspace<R>(f: impl FnOnce(&mut EpubRenderWorkspace) -> R) -> R {
+    critical_section::with(|_| {
+        // SAFETY: access is serialized by the critical section above.
+        let workspace = unsafe { &mut *core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) };
+        f(workspace)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,98 +269,99 @@ where
     where
         F: FnMut(&str) -> Result<(), xteink_epub::EpubError>,
     {
-        let mut epub = Epub::open(source)?;
-        let (workspace, _workspace_guard) = lock_epub_render_workspace();
-        let workspace_ptr = core::ptr::addr_of_mut!(*workspace);
-        let mut text = TextBuffer::<TEXT_LEN>::new();
-        let mut cursor_y = 0u16;
-        let mut current_page = 0usize;
-        let mut render_enabled = true;
-        let line_height = bookerly::BOOKERLY.line_height_px();
+        with_epub_render_workspace(|workspace| {
+            let workspace_ptr = core::ptr::addr_of_mut!(*workspace);
+            let mut epub = Epub::open(source)?;
+            let mut text = TextBuffer::<TEXT_LEN>::new();
+            let mut cursor_y = 0u16;
+            let mut current_page = 0usize;
+            let mut render_enabled = true;
+            let line_height = bookerly::BOOKERLY.line_height_px();
 
-        self.clear(0xFF);
+            self.clear(0xFF);
 
-        loop {
-            let event = epub.next_event(ReaderBuffers {
-                zip_cd: unsafe { &mut (*workspace_ptr).zip_cd },
-                inflate: unsafe { &mut (*workspace_ptr).inflate },
-                xml: unsafe { &mut (*workspace_ptr).xml },
-                catalog: unsafe { &mut (*workspace_ptr).catalog },
-                path_buf: unsafe { &mut (*workspace_ptr).path_buf },
-                archive: unsafe { &mut (*workspace_ptr).archive },
-            })?;
+            loop {
+                let event = epub.next_event(ReaderBuffers {
+                    zip_cd: unsafe { &mut (*workspace_ptr).zip_cd },
+                    inflate: unsafe { &mut (*workspace_ptr).inflate },
+                    xml: unsafe { &mut (*workspace_ptr).xml },
+                    catalog: unsafe { &mut (*workspace_ptr).catalog },
+                    path_buf: unsafe { &mut (*workspace_ptr).path_buf },
+                    archive: unsafe { &mut (*workspace_ptr).archive },
+                })?;
 
-            let Some(event) = event else {
-                break;
-            };
+                let Some(event) = event else {
+                    break;
+                };
 
-            match event {
-                EpubEvent::Text(chunk) => {
-                    if render_enabled {
-                        text.push(chunk);
-                    }
-                    on_text_chunk(chunk)?;
-                }
-                EpubEvent::LineBreak => {
-                    if render_enabled {
-                        cursor_y = self.flush_text_buffer(&mut text, cursor_y);
-                        cursor_y = cursor_y.saturating_add(line_height);
-                    }
-                    on_text_chunk("\n")?;
-                }
-                EpubEvent::ParagraphStart | EpubEvent::HeadingStart(_) => {}
-                EpubEvent::ParagraphEnd | EpubEvent::HeadingEnd => {
-                    if render_enabled {
-                        cursor_y = self.flush_text_buffer(&mut text, cursor_y);
-                        cursor_y = cursor_y.saturating_add(line_height / 2);
-                    }
-                    on_text_chunk("\n")?;
-                }
-                EpubEvent::Image { alt, .. } => {
-                    if let Some(alt) = alt {
+                match event {
+                    EpubEvent::Text(chunk) => {
                         if render_enabled {
-                            text.push(alt);
+                            text.push(chunk);
                         }
-                        on_text_chunk(alt)?;
+                        on_text_chunk(chunk)?;
+                    }
+                    EpubEvent::LineBreak => {
                         if render_enabled {
                             cursor_y = self.flush_text_buffer(&mut text, cursor_y);
-                        }
-                        on_text_chunk("\n")?;
-                        if render_enabled {
                             cursor_y = cursor_y.saturating_add(line_height);
                         }
+                        on_text_chunk("\n")?;
+                    }
+                    EpubEvent::ParagraphStart | EpubEvent::HeadingStart(_) => {}
+                    EpubEvent::ParagraphEnd | EpubEvent::HeadingEnd => {
+                        if render_enabled {
+                            cursor_y = self.flush_text_buffer(&mut text, cursor_y);
+                            cursor_y = cursor_y.saturating_add(line_height / 2);
+                        }
+                        on_text_chunk("\n")?;
+                    }
+                    EpubEvent::Image { alt, .. } => {
+                        if let Some(alt) = alt {
+                            if render_enabled {
+                                text.push(alt);
+                            }
+                            on_text_chunk(alt)?;
+                            if render_enabled {
+                                cursor_y = self.flush_text_buffer(&mut text, cursor_y);
+                            }
+                            on_text_chunk("\n")?;
+                            if render_enabled {
+                                cursor_y = cursor_y.saturating_add(line_height);
+                            }
+                        }
+                    }
+                    EpubEvent::UnsupportedTag => {}
+                }
+
+                if cursor_y >= DISPLAY_HEIGHT {
+                    if render_enabled && current_page >= target_page {
+                        if parse_full_book {
+                            render_enabled = false;
+                            cursor_y = 0;
+                            text.clear();
+                            continue;
+                        }
+                        break;
+                    }
+                    current_page = current_page.saturating_add(1);
+                    cursor_y = 0;
+                    text.clear();
+                    if render_enabled {
+                        self.clear(0xFF);
                     }
                 }
-                EpubEvent::UnsupportedTag => {}
             }
 
-            if cursor_y >= DISPLAY_HEIGHT {
-                if render_enabled && current_page >= target_page {
-                    if parse_full_book {
-                        render_enabled = false;
-                        cursor_y = 0;
-                        text.clear();
-                        continue;
-                    }
-                    break;
-                }
-                current_page = current_page.saturating_add(1);
-                cursor_y = 0;
+            if !text.is_empty() {
+                on_text_chunk(text.as_str())?;
                 text.clear();
-                if render_enabled {
-                    self.clear(0xFF);
-                }
             }
-        }
-
-        if !text.is_empty() {
-            on_text_chunk(text.as_str())?;
-            text.clear();
-        }
-        if render_enabled {
-            let _ = self.flush_text_buffer(&mut text, cursor_y);
-        }
-        Ok(current_page)
+            if render_enabled {
+                let _ = self.flush_text_buffer(&mut text, cursor_y);
+            }
+            Ok(current_page)
+        })
     }
 
     pub fn render_cached_text_page<R>(

@@ -1341,6 +1341,7 @@ version = "0.1.0"
 name = "xteink-display"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "embedded-hal 1.0.0",
  "fontdue",
  "heapless 0.8.0",
