@@ -17,12 +17,11 @@ embedded-hal-bus = "0.3"
 esp32c3 = "0.31.0"
 heapless = { version = "0.8", default-features = false }
 xteink-buttons = { path = "../crates/xteink-buttons" }
+xteink-input = { path = "../crates/xteink-input" }
 xteink-browser = { path = "../crates/xteink-browser" }
 xteink-epub = { path = "../crates/xteink-epub" }
-xteink-sdspi = { path = "../crates/xteink-sdspi" }
-xteink-power = { path = "../crates/xteink-power" }
+xteink-fs = { path = "../crates/xteink-fs" }
 xteink-display = { path = "../crates/xteink-display" }
-embedded-sdmmc = { version = "0.9.0", default-features = false }
 
 [[bin]]
 name = "xteink-reader"

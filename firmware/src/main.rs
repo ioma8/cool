@@ -16,6 +16,10 @@ use esp_hal::{
     time::Rate,
 };
 use heapless::String;
+use xteink_fs::{
+    init_sd, join_child_path, load_directory_page, render_epub_from_entry,
+    render_epub_page_from_entry, ListedEntry, MAX_ENTRIES,
+};
 use xteink_browser::{Input as BrowserInput, PagedAction, PagedBrowser};
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
 use xteink_buttons::{
@@ -24,15 +28,6 @@ use xteink_buttons::{
 use xteink_input::InputManager;
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
-
-mod sd_hw;
-mod sd_browser;
-mod sd_path;
-mod sd_ffi;
-
-use sd_browser::{ListedEntry, load_directory_page, render_epub_from_entry, render_epub_page_from_entry};
-use sd_ffi::init_sd;
-use sd_path::join_child_path;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,7 +485,7 @@ fn browser_page_size() -> usize {
     let line_height = usize::from(bookerly::BOOKERLY.line_height_px());
     let used_top = 4 + line_height * 2;
     let visible = usize::from(DISPLAY_HEIGHT).saturating_sub(used_top) / line_height.max(1);
-    visible.clamp(1, sd_ffi::MAX_ENTRIES)
+    visible.clamp(1, MAX_ENTRIES)
 }
 
 fn render_browser_screen<SPI, DC, RST, BUSY, DELAY>(

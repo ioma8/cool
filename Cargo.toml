@@ -1,11 +1,13 @@
 [workspace]
 members = [
     "crates/xteink-buttons",
+    "crates/xteink-input",
     "crates/xteink-browser",
     "crates/xteink-power",
     "crates/xteink-display",
     "crates/xteink-epub",
     "crates/xteink-sdspi",
+    "crates/xteink-fs",
     "firmware",
 ]
 resolver = "2"

@@ -4,16 +4,13 @@ use embassy_embedded_hal::SetConfig;
 use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::spi::{ErrorType as SpiErrorType, SpiBus};
-use embedded_sdmmc::{
-    DirEntry, File, LfnBuffer, Mode, RawDirectory, RawVolume, ShortFileName,
-    TimeSource, Timestamp, VolumeIdx, VolumeManager,
-};
+use embedded_sdmmc::{DirEntry, File, LfnBuffer, Mode, RawDirectory, RawVolume, ShortFileName, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use heapless::{String, Vec};
 use xteink_browser::EntryKind;
 use xteink_epub::{EpubError, EpubSource};
 use xteink_sdspi::{SdSpiCard, SdSpiOptions, SpiTransport};
 
-use crate::sd_hw::{self, RawGpioOutput};
+use crate::{hal, path::normalize_path};
 
 pub const MAX_ENTRIES: usize = 64;
 const LABEL_CAPACITY: usize = 96;
@@ -113,8 +110,8 @@ where
 
 type SdCard<'bus, SPI, DELAY> = SdSpiCard<
     SharedSpiTransport<'bus, SPI>,
-    RawGpioOutput,
-    RawGpioOutput,
+    hal::RawGpioOutput,
+    hal::RawGpioOutput,
     DELAY,
     SdTransportError<<SPI as SpiErrorType>::Error>,
     Infallible,
@@ -159,9 +156,9 @@ where
         delay: DELAY,
     ) -> Result<Self, FsError> {
         let transport = SharedSpiTransport::new(spi_bus, base_config);
-        sd_hw::power_on_sd_card();
-        let cs = sd_hw::sd_cs_output();
-        let power = RawGpioOutput::new(sd_hw::SD_POWER_PIN, true);
+        hal::power_on_sd_card();
+        let cs = hal::sd_cs_output();
+        let power = hal::RawGpioOutput::new(hal::SD_POWER_PIN, true);
         let card = SdSpiCard::new(transport, cs, power, delay, SdSpiOptions::default());
         let card_type = match card.begin() {
             Ok(card_type) => card_type,
@@ -183,7 +180,8 @@ where
         &'fs self,
         path: &str,
     ) -> Result<RawDirectory, FsError> {
-        esp_println::println!("SD open_directory_at_path start: {}", path);
+        let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
+        esp_println::println!("SD open_directory_at_path start: {}", path.as_str());
         let mut raw_directory = self
             .volume_mgr
             .open_root_dir(self.raw_volume)
@@ -195,7 +193,7 @@ where
                 );
                 FsError::OpenFailed(error_string(&err))
             })?;
-        for component in path_components(path) {
+        for component in path_components(path.as_str()) {
             esp_println::println!("SD open_directory_at_path component: {}", component);
             raw_directory = self
                 .volume_mgr
@@ -210,7 +208,7 @@ where
                     FsError::OpenFailed(error_string(&err))
                 })?;
         }
-        esp_println::println!("SD open_directory_at_path complete: {}", path);
+        esp_println::println!("SD open_directory_at_path complete: {}", path.as_str());
         Ok(raw_directory)
     }
 
@@ -221,11 +219,12 @@ where
         File<'fs, SdCard<'bus, SPI, DELAY>, NoopTimeSource, MAX_DIRS, MAX_FILES, MAX_VOLUMES>,
         FsError,
     > {
-        esp_println::println!("SD open_file_at_path start: {}", path);
-        let (parent_path, file_name) = split_parent_path(path)?;
+        let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
+        esp_println::println!("SD open_file_at_path start: {}", path.as_str());
+        let (parent_path, file_name) = split_parent_path(path.as_str())?;
         esp_println::println!(
             "SD open_file_at_path split: {} parent={} file={}",
-            path,
+            path.as_str(),
             parent_path,
             file_name
         );
@@ -236,12 +235,12 @@ where
             .map_err(|err| {
                 esp_println::println!(
                     "SD open_file_at_path open_file_in_dir failed: {} -> {:?}",
-                    path,
+                    path.as_str(),
                     err
                 );
                 FsError::OpenFailed(error_string(&err))
             })?;
-        esp_println::println!("SD open_file_at_path complete: {}", path);
+        esp_println::println!("SD open_file_at_path complete: {}", path.as_str());
         Ok(file.to_file(&self.volume_mgr))
     }
 }
@@ -251,7 +250,7 @@ where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
     DELAY: DelayNs,
 {
-    type EpubSource<'fs> = SdEpubSource<'fs, 'bus, SPI, DELAY> where Self: 'fs;
+    type EpubSource<'a> = SdEpubSource<'a, 'bus, SPI, DELAY> where Self: 'a;
 
     fn list_directory_page(
         &self,
@@ -434,10 +433,7 @@ fn heapless_string(label: &str) -> Result<String<LABEL_CAPACITY>, FsError> {
     Ok(out)
 }
 
-fn push_listed_entry(
-    entries: &mut Vec<ListedEntry, MAX_ENTRIES>,
-    entry: ListedEntry,
-) -> Option<()> {
+fn push_listed_entry(entries: &mut Vec<ListedEntry, MAX_ENTRIES>, entry: ListedEntry) -> Option<()> {
     entries.push(entry).ok()
 }
 
@@ -455,7 +451,9 @@ fn error_message(msg: &str) -> String<64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{error_string, is_epub_label, listed_entry_from_parts, push_listed_entry};
+    use super::{
+        error_string, is_epub_label, listed_entry_from_parts, path_components, push_listed_entry,
+    };
 
     #[derive(Debug)]
     struct TestError;
@@ -502,5 +500,20 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].label.as_str(), "one");
         assert_eq!(entries[0].fs_name.as_str(), "ONE");
+    }
+
+    #[test]
+    fn path_components_ignore_current_directory_segments() {
+        let components: heapless::Vec<&str, 4> = path_components("/MYBOOKS/./WHEN_I~1.EPU").collect();
+
+        assert_eq!(components.as_slice(), &["MYBOOKS", "WHEN_I~1.EPU"]);
+    }
+
+    #[test]
+    fn normalizes_current_directory_segments_before_opening() {
+        use crate::path::normalize_path;
+        let normalized = normalize_path("/MYBOOKS/./WHEN_I~1.EPU").unwrap();
+
+        assert_eq!(normalized.as_str(), "/MYBOOKS/WHEN_I~1.EPU");
     }
 }
