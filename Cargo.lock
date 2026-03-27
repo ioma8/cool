@@ -1235,6 +1235,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "xteink-fs"
+version = "0.1.0"
+dependencies = [
+ "embassy-embedded-hal",
+ "embassy-sync 0.7.2",
+ "embedded-hal 1.0.0",
+ "embedded-sdmmc",
+ "esp-hal",
+ "esp-println",
+ "esp32c3",
+ "heapless 0.8.0",
+ "xteink-browser",
+ "xteink-display",
+ "xteink-epub",
+ "xteink-sdspi",
+]
+
+[[package]]
+name = "xteink-input"
+version = "0.1.0"
+dependencies = [
+ "xteink-buttons",
+]
+
+[[package]]
 name = "xteink-power"
 version = "0.1.0"
 
@@ -1247,7 +1272,6 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embedded-hal 1.0.0",
  "embedded-hal-bus",
- "embedded-sdmmc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-hal",
@@ -1259,8 +1283,8 @@ dependencies = [
  "xteink-buttons",
  "xteink-display",
  "xteink-epub",
- "xteink-power",
- "xteink-sdspi",
+ "xteink-fs",
+ "xteink-input",
 ]
 
 [[package]]

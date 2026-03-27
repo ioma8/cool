@@ -5,8 +5,20 @@ extern crate std;
 
 // Keep this as the raw-register fallback ceiling for current firmware reads.
 // Threshold contract mirrored from the ESP32-C3 validated prototype.
-pub const ADC_RANGES_1: [i32; 5] = [11400, 10280, 9800, 8400, i32::MIN];
-pub const ADC_RANGES_2: [i32; 3] = [19300, 17200, i32::MIN];
+//
+// Added a small calibration headroom so threshold crossings are less brittle.
+// Confirm (legacy "upper" button on GPIO1) is also wired to the observed raw center
+// around 11640 seen on this board/sample.
+const GPIO1_CONFIRM_REMAP: (i32, i32) = (11540, 11740);
+const ADC_HEADROOM: i32 = 80;
+pub const ADC_RANGES_1: [i32; 5] = [
+    11400 + ADC_HEADROOM,
+    10280 + ADC_HEADROOM,
+    9800 + ADC_HEADROOM,
+    8400 + ADC_HEADROOM,
+    i32::MIN,
+];
+pub const ADC_RANGES_2: [i32; 3] = [19300 + ADC_HEADROOM, 17200 + ADC_HEADROOM, i32::MIN];
 
 const ADC_LABELS_1: [Button; 4] = [Button::Back, Button::Confirm, Button::Left, Button::Right];
 const ADC_LABELS_2: [Button; 2] = [Button::Up, Button::Down];
@@ -84,6 +96,9 @@ impl ButtonState {
 
 pub fn get_button_from_adc_1(adc_value: u16) -> Option<Button> {
     let value = adc_value as i32;
+    if (GPIO1_CONFIRM_REMAP.0..=GPIO1_CONFIRM_REMAP.1).contains(&value) {
+        return Some(Button::Confirm);
+    }
     map_from_ranges(&ADC_RANGES_1, &ADC_LABELS_1, value)
 }
 
@@ -107,17 +122,20 @@ mod tests {
 
     #[test]
     fn gpio1_thresholds_map_to_expected_buttons() {
-        assert_eq!(get_button_from_adc_1(11400), Some(Button::Back));
-        assert_eq!(get_button_from_adc_1(10280), Some(Button::Confirm));
-        assert_eq!(get_button_from_adc_1(9800), Some(Button::Left));
-        assert_eq!(get_button_from_adc_1(8400), Some(Button::Right));
+        assert_eq!(get_button_from_adc_1(11480), Some(Button::Back));
+        assert_eq!(get_button_from_adc_1(10360), Some(Button::Confirm));
+        assert_eq!(get_button_from_adc_1(9880), Some(Button::Left));
+        assert_eq!(get_button_from_adc_1(8480), Some(Button::Right));
         assert_eq!(get_button_from_adc_1(8399), Some(Button::Right));
+        assert_eq!(get_button_from_adc_1(11640), Some(Button::Confirm));
+        assert_eq!(get_button_from_adc_1(11679), Some(Button::Confirm));
+        assert_eq!(get_button_from_adc_1(11741), None);
     }
 
     #[test]
     fn gpio2_thresholds_map_to_expected_buttons() {
-        assert_eq!(get_button_from_adc_2(19300), Some(Button::Up));
-        assert_eq!(get_button_from_adc_2(17200), Some(Button::Down));
+        assert_eq!(get_button_from_adc_2(19380), Some(Button::Up));
+        assert_eq!(get_button_from_adc_2(17280), Some(Button::Down));
     }
 
     #[test]
@@ -139,13 +157,14 @@ mod tests {
 
     #[test]
     fn no_button_thresholds_return_none() {
-        assert_eq!(get_button_from_adc_1(11401), None);
-        assert_eq!(get_button_from_adc_2(19301), None);
+        assert_eq!(get_button_from_adc_1(11481), None);
+        assert_eq!(get_button_from_adc_2(19381), None);
     }
 
     #[test]
     fn high_adc_band_is_not_a_front_button_press() {
-        assert_eq!(get_button_from_adc_1(11401), None);
-        assert_eq!(get_button_from_adc_2(19301), None);
+        assert_eq!(get_button_from_adc_1(11539), None);
+        assert_eq!(get_button_from_adc_1(11741), None);
+        assert_eq!(get_button_from_adc_2(19381), None);
     }
 }
