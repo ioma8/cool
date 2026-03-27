@@ -25,7 +25,6 @@ use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
 use xteink_buttons::{
     Button as RawButton, ButtonState, get_button_from_adc_1, get_button_from_adc_2,
 };
-use xteink_input::InputManager;
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
 
@@ -177,8 +176,7 @@ fn main() -> ! {
     esp_println::println!("Browser render complete");
 
     let loop_delay = Delay::new();
-    let mut input_manager = InputManager::new();
-    let mut now_ms = 0u32;
+    let mut last_raw_state = ButtonState::default();
     let mut adc_config = AdcConfig::new();
     let mut debug_frame: u32 = 0;
     peripherals.GPIO1.rtcio_pullup(false);
@@ -197,12 +195,22 @@ fn main() -> ! {
 
     loop {
         let mut raw_state = ButtonState::default();
-        let adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
-        loop_delay.delay_millis(1);
-        let adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
+        let mut adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
+        loop_delay.delay_micros(250);
+        let mut adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
+
+        let mut decoded_pin1 = get_button_from_adc_1(adc1_value);
+        let mut decoded_pin2 = get_button_from_adc_2(adc2_value);
         let power_button_pressed = power_button.is_low();
-        let decoded_pin1 = get_button_from_adc_1(adc1_value);
-        let decoded_pin2 = get_button_from_adc_2(adc2_value);
+
+        if decoded_pin1.is_none() && decoded_pin2.is_none() && !power_button_pressed {
+            loop_delay.delay_micros(250);
+            adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
+            loop_delay.delay_micros(250);
+            adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
+            decoded_pin1 = get_button_from_adc_1(adc1_value);
+            decoded_pin2 = get_button_from_adc_2(adc2_value);
+        }
 
         if let Some(raw_button) = decoded_pin1 {
             raw_state = raw_state.with_button(raw_button);
@@ -227,10 +235,8 @@ fn main() -> ! {
         }
         debug_frame = debug_frame.wrapping_add(1);
 
-        input_manager.update(raw_state, now_ms);
-        let pressed = pressed_button(&input_manager);
-
-        now_ms = now_ms.saturating_add(1);
+        let pressed = pressed_button_from_state(last_raw_state, raw_state);
+        last_raw_state = raw_state;
 
         if screen_mode == ScreenMode::Browse {
             if let Some(button) = pressed {
@@ -567,22 +573,16 @@ fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
     display.refresh_full();
 }
 
-fn pressed_button(input_manager: &InputManager) -> Option<RawButton> {
-    if input_manager.was_pressed(RawButton::Confirm) {
-        Some(RawButton::Back)
-    } else if input_manager.was_pressed(RawButton::Back) {
-        Some(RawButton::Confirm)
-    } else if input_manager.was_pressed(RawButton::Left) {
-        Some(RawButton::Left)
-    } else if input_manager.was_pressed(RawButton::Right) {
-        Some(RawButton::Right)
-    } else if input_manager.was_pressed(RawButton::Up) {
-        Some(RawButton::Up)
-    } else if input_manager.was_pressed(RawButton::Down) {
-        Some(RawButton::Down)
-    } else if input_manager.was_pressed(RawButton::Power) {
-        Some(RawButton::Power)
-    } else {
-        None
+fn pressed_button_from_state(previous_state: ButtonState, current_state: ButtonState) -> Option<RawButton> {
+    let new_press = ButtonState {
+        state: current_state.state & !previous_state.state,
+    };
+    if let Some(button) = new_press.first_pressed() {
+        return match button {
+            RawButton::Back => Some(RawButton::Confirm),
+            RawButton::Confirm => Some(RawButton::Back),
+            _ => Some(button),
+        };
     }
+    None
 }
