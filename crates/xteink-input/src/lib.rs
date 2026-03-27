@@ -15,6 +15,7 @@ pub struct InputManager {
     last_state: ButtonState,
     button_press_start: u32,
     button_press_finish: u32,
+    button_press_started: bool,
 }
 
 impl InputManager {
@@ -30,6 +31,7 @@ impl InputManager {
             last_state: ButtonState::default(),
             button_press_start: 0,
             button_press_finish: 0,
+            button_press_started: false,
         }
     }
 
@@ -58,13 +60,22 @@ impl InputManager {
 
             if self.pressed_events.any_pressed() && !self.current_state.any_pressed() {
                 self.button_press_start = now_ms;
+                self.button_press_started = false;
             }
 
             if self.released_events.any_pressed() && !state.any_pressed() {
                 self.button_press_finish = now_ms;
+                self.button_press_started = false;
             }
 
             self.current_state = self.pending_state;
+        }
+
+        if self.current_state.any_pressed() && !self.button_press_started {
+            if now_ms > self.button_press_start {
+                self.button_press_start = now_ms;
+                self.button_press_started = true;
+            }
         }
     }
 
@@ -90,6 +101,9 @@ impl InputManager {
 
     pub fn held_time(&self, now_ms: u32) -> u32 {
         if self.current_state.any_pressed() {
+            if !self.button_press_started {
+                return 0;
+            }
             now_ms.saturating_sub(self.button_press_start)
         } else {
             self.button_press_finish.saturating_sub(self.button_press_start)
