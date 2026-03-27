@@ -49,6 +49,11 @@ pub enum RefreshMode {
     Fast,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshScheduleError {
+    Busy,
+}
+
 pub struct SSD1677Display<SPI, DC, RST, BUSY, DELAY>
 where
     SPI: SpiDevice,
@@ -323,7 +328,11 @@ where
         next_y
     }
 
-    pub fn display_buffer(&mut self, mode: RefreshMode) {
+    pub fn display_buffer(&mut self, mode: RefreshMode, wait_for_ready: bool) -> Result<(), RefreshScheduleError> {
+        if !wait_for_ready && self.is_busy() {
+            return Err(RefreshScheduleError::Busy);
+        }
+
         self.set_ram_area(0, 0, PHYSICAL_WIDTH, PHYSICAL_HEIGHT);
 
         if mode != RefreshMode::Fast {
@@ -343,14 +352,32 @@ where
             self.send_command(CMD_WRITE_RAM_RED);
             self.write_framebuffer();
         }
+
+        if wait_for_ready {
+            self.wait_while_busy();
+        }
+
+        Ok(())
     }
 
     pub fn refresh_full(&mut self) {
-        self.display_buffer(RefreshMode::Full);
+        let _ = self.display_buffer(RefreshMode::Full, true);
     }
 
     pub fn refresh_fast(&mut self) {
-        self.display_buffer(RefreshMode::Fast);
+        let _ = self.display_buffer(RefreshMode::Fast, true);
+    }
+
+    pub fn refresh_full_nonblocking(&mut self) -> Result<(), RefreshScheduleError> {
+        self.display_buffer(RefreshMode::Full, false)
+    }
+
+    pub fn refresh_fast_nonblocking(&mut self) -> Result<(), RefreshScheduleError> {
+        self.display_buffer(RefreshMode::Fast, false)
+    }
+
+    pub fn is_busy(&mut self) -> bool {
+        self.busy.is_high().unwrap_or(false)
     }
 
     pub fn deep_sleep(&mut self) {
@@ -946,7 +973,7 @@ mod tests {
     fn full_refresh_writes_both_rams_and_activates_the_panel() {
         let mut display = new_display();
 
-        display.display_buffer(RefreshMode::Full);
+        let _ = display.display_buffer(RefreshMode::Full, true);
 
         assert_eq!(
             display
@@ -999,7 +1026,7 @@ mod tests {
     fn fast_refresh_updates_red_ram_after_refresh() {
         let mut display = new_display();
 
-        display.display_buffer(RefreshMode::Fast);
+        let _ = display.display_buffer(RefreshMode::Fast, true);
 
         assert_eq!(
             display
@@ -1025,7 +1052,7 @@ mod tests {
     fn deep_sleep_powers_down_an_awake_screen() {
         let mut display = new_display();
 
-        display.display_buffer(RefreshMode::Full);
+        let _ = display.display_buffer(RefreshMode::Full, true);
         display.deep_sleep();
 
         assert!(

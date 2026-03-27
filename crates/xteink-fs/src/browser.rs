@@ -13,6 +13,18 @@ pub struct DirectoryPage {
     pub info: DirectoryPageInfo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpubRefreshMode {
+    Full,
+    Fast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpubRenderResult {
+    pub rendered_page: usize,
+    pub refresh: EpubRefreshMode,
+}
+
 pub fn load_directory_page<SD: SdFilesystem>(
     fs: &SD,
     current_path: &str,
@@ -29,7 +41,7 @@ pub fn render_epub_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
     display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     current_path: &str,
     entry: &ListedEntry,
-) -> Result<(), EpubError>
+) -> Result<EpubRefreshMode, EpubError>
 where
     SD: SdFilesystem,
     SPI: SpiDevice,
@@ -38,7 +50,7 @@ where
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    render_epub_page_from_entry(fs, display, current_path, entry, 0, false).map(|_| ())
+    render_epub_page_from_entry(fs, display, current_path, entry, 0, false).map(|result| result.refresh)
 }
 
 pub fn render_epub_page_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
@@ -48,7 +60,7 @@ pub fn render_epub_page_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
     entry: &ListedEntry,
     page_index: usize,
     fast_refresh: bool,
-) -> Result<usize, EpubError>
+) -> Result<EpubRenderResult, EpubError>
 where
     SD: SdFilesystem,
     SPI: SpiDevice,
@@ -74,10 +86,13 @@ where
         path.as_str(),
         rendered_page
     );
-    if fast_refresh {
-        display.refresh_fast();
+    let refresh = if fast_refresh {
+        EpubRefreshMode::Fast
     } else {
-        display.refresh_full();
-    }
-    Ok(rendered_page)
+        EpubRefreshMode::Full
+    };
+    Ok(EpubRenderResult {
+        rendered_page,
+        refresh,
+    })
 }

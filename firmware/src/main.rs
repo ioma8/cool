@@ -18,7 +18,7 @@ use esp_hal::{
 use heapless::String;
 use xteink_fs::{
     init_sd, join_child_path, load_directory_page, render_epub_from_entry,
-    render_epub_page_from_entry, ListedEntry, MAX_ENTRIES,
+    render_epub_page_from_entry, EpubRefreshMode, ListedEntry, MAX_ENTRIES,
 };
 use xteink_browser::{Input as BrowserInput, PagedAction, PagedBrowser};
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
@@ -39,6 +39,32 @@ enum ScreenMode {
 enum BrowserRefresh {
     Full,
     Fast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingDisplayRefresh {
+    None,
+    Full,
+    Fast,
+}
+
+impl PendingDisplayRefresh {
+    fn request(&mut self, refresh: BrowserRefresh) {
+        *self = match (*self, refresh) {
+            (_, BrowserRefresh::Full) => Self::Full,
+            (Self::None, BrowserRefresh::Fast) => Self::Fast,
+            (Self::Full, BrowserRefresh::Fast) => Self::Full,
+            (Self::Fast, BrowserRefresh::Fast) => Self::Fast,
+        };
+    }
+
+    fn as_refresh(&self) -> Option<BrowserRefresh> {
+        match self {
+            Self::None => None,
+            Self::Full => Some(BrowserRefresh::Full),
+            Self::Fast => Some(BrowserRefresh::Fast),
+        }
+    }
 }
 
 const ADC_ATTEN_BITS_12DB: u8 = 0x03;
@@ -137,10 +163,15 @@ fn main() -> ! {
     let mut current_path: String<256> = String::new();
     let _ = current_path.push('/');
     let page_size = browser_page_size();
+    let mut pending_display_refresh = PendingDisplayRefresh::None;
 
     let Some(sd) = sd else {
         display.init();
-        render_error_screen(&mut display, "SD init failed");
+        render_error_screen(
+            &mut display,
+            "SD init failed",
+            &mut pending_display_refresh,
+        );
         loop {
             boot_delay.delay_millis(1000);
         }
@@ -151,7 +182,11 @@ fn main() -> ! {
         Err(err) => {
             esp_println::println!("Directory listing failed: {:?}", err);
             display.init();
-            render_error_screen(&mut display, "Directory listing error");
+            render_error_screen(
+                &mut display,
+                "Directory listing error",
+                &mut pending_display_refresh,
+            );
             loop {
                 boot_delay.delay_millis(1000);
             }
@@ -174,6 +209,7 @@ fn main() -> ! {
         &page.entries,
         browser.selected_index(page.entries.len()),
         BrowserRefresh::Full,
+        &mut pending_display_refresh,
     );
     esp_println::println!("Browser render complete");
 
@@ -275,6 +311,7 @@ fn main() -> ! {
                                                         &page.entries,
                                                         browser.selected_index(page.entries.len()),
                                                         BrowserRefresh::Full,
+                                                        &mut pending_display_refresh,
                                                     );
                                                 }
                                                 Err(err) => {
@@ -285,26 +322,46 @@ fn main() -> ! {
                                                     render_error_screen(
                                                         &mut display,
                                                         "Directory listing error",
+                                                        &mut pending_display_refresh,
                                                     );
                                                 }
                                             }
                                         }
                                         Err(_) => {
                                             esp_println::println!("Enter directory failed");
-                                            render_error_screen(&mut display, "Failed to open directory");
+                                            render_error_screen(
+                                                &mut display,
+                                                "Failed to open directory",
+                                                &mut pending_display_refresh,
+                                            );
                                         }
                                     }
                                 }
                                 xteink_browser::EntryKind::Epub => {
                                     reader_entry = Some(entry.clone());
                                     reader_page = 0;
-                                    if let Err(err) =
-                                        render_epub_from_entry(&sd, &mut display, current_path.as_str(), entry)
-                                    {
-                                        esp_println::println!("EPUB render failed: {:?}", err);
-                                        render_error_screen(&mut display, "EPUB render error");
-                                    } else {
-                                        screen_mode = ScreenMode::Reading;
+                                    match render_epub_from_entry(
+                                        &sd,
+                                        &mut display,
+                                        current_path.as_str(),
+                                        entry,
+                                    ) {
+                                        Ok(EpubRefreshMode::Full) => {
+                                            pending_display_refresh.request(BrowserRefresh::Full);
+                                            screen_mode = ScreenMode::Reading;
+                                        }
+                                        Ok(EpubRefreshMode::Fast) => {
+                                            pending_display_refresh.request(BrowserRefresh::Fast);
+                                            screen_mode = ScreenMode::Reading;
+                                        }
+                                        Err(err) => {
+                                            esp_println::println!("EPUB render failed: {:?}", err);
+                                            render_error_screen(
+                                                &mut display,
+                                                "EPUB render error",
+                                                &mut pending_display_refresh,
+                                            );
+                                        }
                                     }
                                 }
                                 xteink_browser::EntryKind::Other => {
@@ -314,6 +371,7 @@ fn main() -> ! {
                                         &page.entries,
                                         browser.selected_index(page.entries.len()),
                                         BrowserRefresh::Fast,
+                                        &mut pending_display_refresh,
                                     );
                                 }
                             }
@@ -337,11 +395,16 @@ fn main() -> ! {
                                             &page.entries,
                                             browser.selected_index(page.entries.len()),
                                             BrowserRefresh::Full,
+                                            &mut pending_display_refresh,
                                         );
                                     }
                                     Err(err) => {
                                         esp_println::println!("Directory listing failed: {:?}", err);
-                                        render_error_screen(&mut display, "Directory listing error");
+                                        render_error_screen(
+                                            &mut display,
+                                            "Directory listing error",
+                                            &mut pending_display_refresh,
+                                        );
                                     }
                                 }
                             }
@@ -363,6 +426,7 @@ fn main() -> ! {
                                         &page.entries,
                                         Some(selected),
                                         BrowserRefresh::Fast,
+                                        &mut pending_display_refresh,
                                     );
                                 }
                                 PagedAction::LoadPage {
@@ -388,6 +452,7 @@ fn main() -> ! {
                                                 &page.entries,
                                                 browser.selected_index(page.entries.len()),
                                                 BrowserRefresh::Fast,
+                                                &mut pending_display_refresh,
                                             );
                                         }
                                         Err(err) => {
@@ -395,7 +460,11 @@ fn main() -> ! {
                                                 "Directory listing failed: {:?}",
                                                 err
                                             );
-                                            render_error_screen(&mut display, "Directory listing error");
+                                            render_error_screen(
+                                                &mut display,
+                                                "Directory listing error",
+                                                &mut pending_display_refresh,
+                                            );
                                         }
                                     }
                                 }
@@ -418,6 +487,7 @@ fn main() -> ! {
                                     &page.entries,
                                     browser.selected_index(page.entries.len()),
                                     BrowserRefresh::Fast,
+                                    &mut pending_display_refresh,
                                 );
                             }
                             PagedAction::LoadPage {
@@ -433,6 +503,7 @@ fn main() -> ! {
                                         &page.entries,
                                         browser.selected_index(page.entries.len()),
                                         BrowserRefresh::Fast,
+                                        &mut pending_display_refresh,
                                     );
                                 }
                                 Err(err) => {
@@ -440,7 +511,11 @@ fn main() -> ! {
                                         "Directory listing failed: {:?}",
                                         err
                                     );
-                                    render_error_screen(&mut display, "Directory listing error");
+                                    render_error_screen(
+                                        &mut display,
+                                        "Directory listing error",
+                                        &mut pending_display_refresh,
+                                    );
                                 }
                             },
                             PagedAction::OpenSelected(_) => {}
@@ -462,7 +537,7 @@ fn main() -> ! {
                     BrowserInput::Left => {
                         reader_page = reader_page.saturating_sub(1);
                         if let Some(entry) = reader_entry.as_ref() {
-                            if let Err(err) = render_epub_page_from_entry(
+                            match render_epub_page_from_entry(
                                 &sd,
                                 &mut display,
                                 current_path.as_str(),
@@ -470,8 +545,25 @@ fn main() -> ! {
                                 reader_page,
                                 true,
                             ) {
-                                esp_println::println!("EPUB page render failed: {:?}", err);
-                                render_error_screen(&mut display, "EPUB render error");
+                                Ok(result) => {
+                                    reader_page = result.rendered_page;
+                                    match result.refresh {
+                                        EpubRefreshMode::Full => {
+                                            pending_display_refresh.request(BrowserRefresh::Full)
+                                        }
+                                        EpubRefreshMode::Fast => {
+                                            pending_display_refresh.request(BrowserRefresh::Fast)
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    esp_println::println!("EPUB page render failed: {:?}", err);
+                                    render_error_screen(
+                                        &mut display,
+                                        "EPUB render error",
+                                        &mut pending_display_refresh,
+                                    );
+                                }
                             }
                         }
                     }
@@ -486,10 +578,24 @@ fn main() -> ! {
                                 reader_page,
                                 true,
                             ) {
-                                Ok(rendered_page) => reader_page = rendered_page,
+                                Ok(result) => {
+                                    reader_page = result.rendered_page;
+                                    match result.refresh {
+                                        EpubRefreshMode::Full => {
+                                            pending_display_refresh.request(BrowserRefresh::Full)
+                                        }
+                                        EpubRefreshMode::Fast => {
+                                            pending_display_refresh.request(BrowserRefresh::Fast)
+                                        }
+                                    }
+                                }
                                 Err(err) => {
                                     esp_println::println!("EPUB page render failed: {:?}", err);
-                                    render_error_screen(&mut display, "EPUB render error");
+                                    render_error_screen(
+                                        &mut display,
+                                        "EPUB render error",
+                                        &mut pending_display_refresh,
+                                    );
                                 }
                             }
                         }
@@ -502,12 +608,14 @@ fn main() -> ! {
                             &page.entries,
                             browser.selected_index(page.entries.len()),
                             BrowserRefresh::Full,
+                            &mut pending_display_refresh,
                         );
                     }
                     BrowserInput::Up => {}
                 }
             }
         }
+        service_display_refresh(&mut display, &mut pending_display_refresh);
 
     }
 }
@@ -525,6 +633,7 @@ fn render_browser_screen<SPI, DC, RST, BUSY, DELAY>(
     entries: &[ListedEntry],
     selected: Option<usize>,
     refresh: BrowserRefresh,
+    pending_display_refresh: &mut PendingDisplayRefresh,
 ) where
     SPI: SpiDevice,
     DC: embedded_hal::digital::OutputPin,
@@ -560,16 +669,13 @@ fn render_browser_screen<SPI, DC, RST, BUSY, DELAY>(
         display.draw_text(4, cursor_y, line.as_str());
         cursor_y = cursor_y.saturating_add(line_height);
     }
-
-    match refresh {
-        BrowserRefresh::Full => display.refresh_full(),
-        BrowserRefresh::Fast => display.refresh_fast(),
-    }
+    pending_display_refresh.request(refresh);
 }
 
 fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
     display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     message: &str,
+    pending_display_refresh: &mut PendingDisplayRefresh,
 ) where
     SPI: SpiDevice,
     DC: embedded_hal::digital::OutputPin,
@@ -579,7 +685,31 @@ fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
 {
     display.clear(0xFF);
     display.draw_wrapped_text(4, 4, message, DISPLAY_HEIGHT);
-    display.refresh_full();
+    pending_display_refresh.request(BrowserRefresh::Full);
+}
+
+fn service_display_refresh<SPI, DC, RST, BUSY, DELAY>(
+    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    pending_display_refresh: &mut PendingDisplayRefresh,
+) where
+    SPI: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    let Some(refresh) = pending_display_refresh.as_refresh() else {
+        return;
+    };
+
+    let schedule = match refresh {
+        BrowserRefresh::Full => display.refresh_full_nonblocking(),
+        BrowserRefresh::Fast => display.refresh_fast_nonblocking(),
+    };
+
+    if schedule.is_ok() {
+        *pending_display_refresh = PendingDisplayRefresh::None;
+    }
 }
 
 fn pressed_button_from_state(previous_state: ButtonState, current_state: ButtonState) -> Option<RawButton> {
