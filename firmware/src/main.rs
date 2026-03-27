@@ -492,53 +492,51 @@ fn run_next_ui_work<SD, SPI, DC, RST, BUSY, DELAY>(
     app_directory_page_with_mut(|page| {
         match item {
             UiWorkItem::BrowseMoveLeft => {
-                if let Some(selected) = browser.selected_index(page.entries.len()) {
-                    match browser.handle(
-                        BrowserInput::Left,
-                        page.entries.len(),
-                        page.info.has_prev,
-                        page.info.has_next,
-                    ) {
-                        PagedAction::None => {}
-                        PagedAction::Redraw => {
-                            render_browser_screen(
-                                display,
-                                current_path.as_str(),
-                                &page.entries,
-                                Some(selected),
-                                BrowserRefresh::Fast,
-                                pending_display_refresh,
-                            );
-                        }
-                        PagedAction::LoadPage {
-                            page_start,
-                            selected,
-                        } => {
-                            match load_directory_page(sd, current_path.as_str(), page_start, page_size) {
-                                Ok(next_page) => {
-                                    *page = next_page;
-                                    browser.set_page(page.info.page_start, page.entries.len(), selected);
-                                    render_browser_screen(
-                                        display,
-                                        current_path.as_str(),
-                                        &page.entries,
-                                        browser.selected_index(page.entries.len()),
-                                        BrowserRefresh::Fast,
-                                        pending_display_refresh,
-                                    );
-                                }
-                                Err(err) => {
-                                    esp_println::println!("Directory listing failed: {:?}", err);
-                                    render_error_screen(
-                                        display,
-                                        "Directory listing error",
-                                        pending_display_refresh,
-                                    );
-                                }
+                match browser.handle(
+                    BrowserInput::Left,
+                    page.entries.len(),
+                    page.info.has_prev,
+                    page.info.has_next,
+                ) {
+                    PagedAction::None => {}
+                    PagedAction::Redraw => {
+                        render_browser_screen(
+                            display,
+                            current_path.as_str(),
+                            &page.entries,
+                            browser.selected_index(page.entries.len()),
+                            BrowserRefresh::Fast,
+                            pending_display_refresh,
+                        );
+                    }
+                    PagedAction::LoadPage {
+                        page_start,
+                        selected,
+                    } => {
+                        match load_directory_page(sd, current_path.as_str(), page_start, page_size) {
+                            Ok(next_page) => {
+                                *page = next_page;
+                                browser.set_page(page.info.page_start, page.entries.len(), selected);
+                                render_browser_screen(
+                                    display,
+                                    current_path.as_str(),
+                                    &page.entries,
+                                    browser.selected_index(page.entries.len()),
+                                    BrowserRefresh::Fast,
+                                    pending_display_refresh,
+                                );
+                            }
+                            Err(err) => {
+                                esp_println::println!("Directory listing failed: {:?}", err);
+                                render_error_screen(
+                                    display,
+                                    "Directory listing error",
+                                    pending_display_refresh,
+                                );
                             }
                         }
-                        PagedAction::OpenSelected(_) => {}
                     }
+                    PagedAction::OpenSelected(_) => {}
                 }
             }
             UiWorkItem::BrowseMoveRight => {
