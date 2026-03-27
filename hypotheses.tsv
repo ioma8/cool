@@ -3,3 +3,6 @@ Text flattener over-inserts boundaries around inline markup	proven
 Parser/entity coverage is still incomplete for common named entities	disproven
 List marker rendering lacked trailing spaces	proven
 Table separator rendering lacked trailing spaces	proven
+Parser emits synthetic horizontal-rule placeholders for hline images	proven
+Parser strips spaces before punctuation in text emission	proven
+test_display_none diverges past 256 chars because the parser hides CSS display:none content	proven

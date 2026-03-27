@@ -670,12 +670,6 @@ fn parse_text<'a>(
                 state.cursor = lookahead;
                 continue;
             }
-            if lookahead < data.len()
-                && matches!(data[lookahead], b'.' | b',' | b';' | b':' | b'!' | b'?' | b')' | b']' | b'}')
-            {
-                state.cursor = lookahead;
-                continue;
-            }
             if state.prev_space {
                 continue;
             }
@@ -885,13 +879,7 @@ fn parse_tag_start<'a>(
             .is_some_and(|value| attr_eq(value, b"hline"))
             || src_raw.ends_with(b"hline.jpg")
         {
-            const HORIZONTAL_RULE: &[u8] = b"------------------------------------------------------------------------";
-            if HORIZONTAL_RULE.len() > text_buf.len() {
-                return Err(EpubError::OutOfSpace);
-            }
-            text_buf[..HORIZONTAL_RULE.len()].copy_from_slice(HORIZONTAL_RULE);
-            let rule = str::from_utf8(&text_buf[..HORIZONTAL_RULE.len()]).map_err(|_| EpubError::Utf8)?;
-            return Ok(Some(EpubEvent::Text(rule)));
+            return Ok(None);
         }
         let mut resolved = [0u8; MAX_CHAPTER_DIR_BYTES];
         let resolved_len = match resolve_reference(chapter_dir, src_raw, &mut resolved) {
