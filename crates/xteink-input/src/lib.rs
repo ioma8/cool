@@ -18,7 +18,7 @@ pub struct InputManager {
 }
 
 impl InputManager {
-    pub const DEBOUNCE_DELAY_MS: u32 = 5;
+    pub const DEBOUNCE_DELAY_MS: u32 = 1;
 
     pub fn new() -> Self {
         Self {
