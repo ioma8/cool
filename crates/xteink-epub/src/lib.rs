@@ -4,13 +4,19 @@ pub mod zip;
 
 use core::str;
 
-use miniz_oxide::inflate::{decompress_slice_iter_to_slice, TINFLStatus};
+use miniz_oxide::inflate::{
+    decompress_slice_iter_to_slice,
+    stream::{inflate, InflateState},
+    TINFLStatus,
+};
+use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
 
 pub use zip::{CompressionMethod, EpubArchive, EpubEntryMetadata, Error as ZipError};
 
 pub const MAX_CHAPTER_DIR_BYTES: usize = 256;
 pub const MAX_ARCHIVE_ENTRIES: usize = 512;
 pub const MAX_ARCHIVE_NAME_CAPACITY: usize = 16 * 1024;
+const CHAPTER_TAIL_RESERVE: usize = 1024;
 
 #[derive(Debug)]
 pub enum EpubError {
@@ -57,13 +63,14 @@ where
     }
 }
 
-#[derive(Debug)]
 pub struct ReaderBuffers<'a> {
     pub zip_cd: &'a mut [u8],
     pub inflate: &'a mut [u8],
+    pub stream_input: &'a mut [u8],
     pub xml: &'a mut [u8],
     pub catalog: &'a mut [u8],
     pub path_buf: &'a mut [u8],
+    pub stream_state: &'a mut InflateState,
     pub archive: &'a mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
 
@@ -88,14 +95,22 @@ struct ParserState {
     spine_count: u16,
     spine_index: u16,
     chapter_loaded: bool,
+    chapter_finished: bool,
+    chapter_entry: Option<EpubEntryMetadata>,
     chapter_len: usize,
     cursor: usize,
+    input_len: usize,
+    input_cursor: usize,
+    compressed_read: usize,
     in_paragraph: bool,
     in_heading: u8,
     in_pre: bool,
     prev_space: bool,
     last_nonspace_char: Option<char>,
     ignore_depth: u8,
+    skip_tag_depth: u16,
+    skip_tag_name_len: u8,
+    skip_tag_name: [u8; 8],
     list_depth: u8,
     list_ordered: [bool; 8],
     list_items: [u16; 8],
@@ -114,14 +129,22 @@ impl Default for ParserState {
             spine_count: 0,
             spine_index: 0,
             chapter_loaded: false,
+            chapter_finished: false,
+            chapter_entry: None,
             chapter_len: 0,
             cursor: 0,
+            input_len: 0,
+            input_cursor: 0,
+            compressed_read: 0,
             in_paragraph: false,
             in_heading: 0,
             in_pre: false,
             prev_space: false,
             last_nonspace_char: None,
             ignore_depth: 0,
+            skip_tag_depth: 0,
+            skip_tag_name_len: 0,
+            skip_tag_name: [0u8; 8],
             list_depth: 0,
             list_ordered: [false; 8],
             list_items: [0u16; 8],
@@ -155,16 +178,20 @@ impl<S: EpubSource> Epub<S> {
         let ReaderBuffers {
             zip_cd,
             inflate,
+            stream_input,
             xml,
             catalog,
             path_buf,
+            stream_state,
             archive,
         } = workspace;
         let inflate_ptr = inflate as *mut [u8];
+        let stream_input_ptr = stream_input as *mut [u8];
         let xml_ptr = xml as *mut [u8];
         let catalog_ptr = catalog as *mut [u8];
         let path_buf_ptr = path_buf as *mut [u8];
         let zip_cd_ptr = zip_cd as *mut [u8];
+        let stream_state_ptr = stream_state as *mut InflateState;
         let archive_ptr = archive as *mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>;
 
         if self.state.done {
@@ -196,28 +223,41 @@ impl<S: EpubSource> Epub<S> {
                 // SAFETY: the raw pointers are derived from the owned `ReaderBuffers` value.
                 self.load_current_chapter(
                     unsafe { &mut *catalog_ptr },
-                    unsafe { &mut *inflate_ptr },
                     unsafe { &mut *zip_cd_ptr },
                     unsafe { &mut *path_buf_ptr },
+                    unsafe { &mut *stream_state_ptr },
                     unsafe { &mut *archive_ptr },
                 )?;
             }
 
-            let chapter = unsafe {
-                core::slice::from_raw_parts(
-                    (*inflate_ptr).as_ptr(),
-                    self.state.chapter_len,
-                )
-            };
-            if self.state.cursor >= chapter.len() {
+            if self.state.cursor >= self.state.chapter_len
+                || (!self.state.chapter_finished
+                    && self.state.chapter_len.saturating_sub(self.state.cursor) <= CHAPTER_TAIL_RESERVE)
+            {
+                if !self.state.chapter_finished && self.state.cursor >= self.state.chapter_len {
+                    self.state.cursor = self
+                        .state
+                        .chapter_len
+                        .saturating_sub(CHAPTER_TAIL_RESERVE.min(self.state.chapter_len));
+                }
+                self.refill_current_chapter(
+                    unsafe { &mut *inflate_ptr },
+                    unsafe { &mut *stream_input_ptr },
+                    unsafe { &mut *stream_state_ptr },
+                )?;
+            }
+
+            if self.state.cursor >= self.state.chapter_len {
                 self.state.chapter_loaded = false;
                 continue;
             }
 
+            let chapter = unsafe { core::slice::from_raw_parts((*inflate_ptr).as_ptr(), self.state.chapter_len) };
             let dir_len = self.state.chapter_dir_len;
             let mut chapter_dir = [0u8; MAX_CHAPTER_DIR_BYTES];
             chapter_dir[..dir_len].copy_from_slice(&self.state.chapter_dir[..dir_len]);
 
+            let cursor_before = self.state.cursor;
             if let Some(event) = parse_next_xhtml_event(
                 chapter,
                 &mut self.state,
@@ -227,7 +267,23 @@ impl<S: EpubSource> Epub<S> {
                 return Ok(Some(event));
             }
 
-            self.state.chapter_loaded = false;
+            if self.state.cursor == cursor_before && !self.state.chapter_finished {
+                if self.state.cursor >= self.state.chapter_len {
+                    self.state.cursor = self
+                        .state
+                        .chapter_len
+                        .saturating_sub(CHAPTER_TAIL_RESERVE.min(self.state.chapter_len));
+                }
+                self.refill_current_chapter(
+                    unsafe { &mut *inflate_ptr },
+                    unsafe { &mut *stream_input_ptr },
+                    unsafe { &mut *stream_state_ptr },
+                )?;
+            }
+
+            if self.state.cursor >= self.state.chapter_len && self.state.chapter_finished {
+                self.state.chapter_loaded = false;
+            }
         }
     }
 
@@ -242,9 +298,9 @@ impl<S: EpubSource> Epub<S> {
         archive.parse(&self.source)?;
 
         let container_entry = archive
-            .entry_by_name("META-INF/container.xml")
+            .entry_by_name(&self.source, "META-INF/container.xml", zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
-        let container = read_entry(&self.source, container_entry, inflate, zip_cd)?;
+        let container = read_entry(&self.source, &container_entry, inflate, zip_cd)?;
 
         let (opf_path_start, opf_path_len) = parse_container_root(container)?;
         let mut opf_path = [0u8; 512];
@@ -254,9 +310,9 @@ impl<S: EpubSource> Epub<S> {
         opf_path[..opf_path_len].copy_from_slice(&container[opf_path_start..opf_path_start + opf_path_len]);
 
         let opf_entry = archive
-            .entry_by_name_bytes(&opf_path[..opf_path_len])
+            .entry_by_name_bytes(&self.source, &opf_path[..opf_path_len], zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
-        let opf = read_entry(&self.source, opf_entry, inflate, zip_cd)?;
+        let opf = read_entry(&self.source, &opf_entry, inflate, zip_cd)?;
 
         let count = parse_opf(
             opf,
@@ -270,9 +326,9 @@ impl<S: EpubSource> Epub<S> {
     fn load_current_chapter(
         &mut self,
         catalog: &mut [u8],
-        inflate: &mut [u8],
         zip_cd: &mut [u8],
         _path_buf: &mut [u8],
+        stream_state: &mut InflateState,
         archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
         let index = self.state.spine_index;
@@ -281,9 +337,8 @@ impl<S: EpubSource> Epub<S> {
 
         archive.parse(&self.source)?;
         let entry = archive
-            .entry_by_name_bytes(chapter_path)
+            .entry_by_name_bytes(&self.source, chapter_path, zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
-        let data = read_entry(&self.source, entry, inflate, zip_cd)?;
 
         let base = path_parent(chapter_path);
         if base.len() > self.state.chapter_dir.len() {
@@ -291,16 +346,150 @@ impl<S: EpubSource> Epub<S> {
         }
         self.state.chapter_dir[..base.len()].copy_from_slice(base);
         self.state.chapter_dir_len = base.len();
-        self.state.chapter_len = data.len();
+        self.state.chapter_entry = Some(entry);
+        self.state.chapter_len = 0;
         self.state.cursor = 0;
+        self.state.input_len = 0;
+        self.state.input_cursor = 0;
+        self.state.compressed_read = 0;
+        self.state.chapter_finished = matches!(entry.compression, CompressionMethod::Stored)
+            && entry.uncompressed_size == 0;
         self.state.in_paragraph = false;
         self.state.in_heading = 0;
         self.state.in_pre = false;
         self.state.prev_space = false;
         self.state.last_nonspace_char = None;
+        self.state.ignore_depth = 0;
+        self.state.skip_tag_depth = 0;
+        self.state.skip_tag_name_len = 0;
+        self.state.skip_tag_name = [0u8; 8];
+        self.state.list_depth = 0;
+        self.state.list_ordered = [false; 8];
+        self.state.list_items = [0u16; 8];
+        self.state.table_in_head = false;
+        self.state.table_has_head = false;
+        self.state.table_row_cols = 0;
         self.state.chapter_loaded = true;
         self.state.spine_index = self.state.spine_index.saturating_add(1);
+        stream_state.reset(DataFormat::Raw);
         Ok(())
+    }
+
+    fn refill_current_chapter(
+        &mut self,
+        chapter_buf: &mut [u8],
+        stream_input: &mut [u8],
+        stream_state: &mut InflateState,
+    ) -> Result<(), EpubError> {
+        let preserved = self.state.chapter_len.saturating_sub(self.state.cursor);
+        if preserved == chapter_buf.len() {
+            return Err(EpubError::OutOfSpace);
+        }
+        if preserved > 0 && self.state.cursor > 0 {
+            chapter_buf.copy_within(self.state.cursor..self.state.chapter_len, 0);
+        }
+        self.state.chapter_len = preserved;
+        self.state.cursor = 0;
+
+        let Some(entry) = self.state.chapter_entry else {
+            return Err(EpubError::InvalidFormat);
+        };
+
+        match entry.compression {
+            CompressionMethod::Stored => {
+                let total = usize::try_from(entry.uncompressed_size).map_err(|_| EpubError::InvalidFormat)?;
+                if self.state.compressed_read >= total {
+                    self.state.chapter_finished = true;
+                    return Ok(());
+                }
+                let remaining = total - self.state.compressed_read;
+                let to_read = remaining.min(chapter_buf.len().saturating_sub(self.state.chapter_len));
+                read_exact(
+                    &self.source,
+                    u64::from(entry.data_offset)
+                        + u64::try_from(self.state.compressed_read).map_err(|_| EpubError::InvalidFormat)?,
+                    &mut chapter_buf[self.state.chapter_len..self.state.chapter_len + to_read],
+                )?;
+                self.state.compressed_read = self.state.compressed_read.saturating_add(to_read);
+                self.state.chapter_len = self.state.chapter_len.saturating_add(to_read);
+                self.state.chapter_finished = self.state.compressed_read >= total;
+                Ok(())
+            }
+            CompressionMethod::Deflate => {
+                let compressed_total =
+                    usize::try_from(entry.compressed_size).map_err(|_| EpubError::InvalidFormat)?;
+                loop {
+                    if self.state.chapter_len >= chapter_buf.len() {
+                        return Ok(());
+                    }
+
+                    if self.state.input_cursor >= self.state.input_len
+                        && self.state.compressed_read < compressed_total
+                    {
+                        let remaining = compressed_total - self.state.compressed_read;
+                        let to_read = remaining.min(stream_input.len());
+                        read_exact(
+                            &self.source,
+                            u64::from(entry.data_offset)
+                                + u64::try_from(self.state.compressed_read)
+                                    .map_err(|_| EpubError::InvalidFormat)?,
+                            &mut stream_input[..to_read],
+                        )?;
+                        self.state.compressed_read = self.state.compressed_read.saturating_add(to_read);
+                        self.state.input_len = to_read;
+                        self.state.input_cursor = 0;
+                    }
+
+                    let input = &stream_input[self.state.input_cursor..self.state.input_len];
+                    let flush = if self.state.compressed_read >= compressed_total {
+                        MZFlush::Finish
+                    } else {
+                        MZFlush::None
+                    };
+                    let result = inflate(
+                        stream_state,
+                        input,
+                        &mut chapter_buf[self.state.chapter_len..],
+                        flush,
+                    );
+                    self.state.input_cursor = self.state.input_cursor.saturating_add(result.bytes_consumed);
+                    self.state.chapter_len = self.state.chapter_len.saturating_add(result.bytes_written);
+
+                    match result.status {
+                        Ok(MZStatus::Ok) => {
+                            if result.bytes_written > 0 {
+                                return Ok(());
+                            }
+                            if self.state.input_cursor >= self.state.input_len
+                                && self.state.compressed_read >= compressed_total
+                            {
+                                return Err(EpubError::Compression);
+                            }
+                        }
+                        Ok(MZStatus::StreamEnd) => {
+                            self.state.chapter_finished = true;
+                            return Ok(());
+                        }
+                        Ok(MZStatus::NeedDict) => return Err(EpubError::Unsupported),
+                        Err(MZError::Buf) => {
+                            if result.bytes_written > 0 || self.state.chapter_len >= chapter_buf.len() {
+                                return Ok(());
+                            }
+                            if self.state.input_cursor >= self.state.input_len
+                                && self.state.compressed_read < compressed_total
+                            {
+                                continue;
+                            }
+                            return Err(EpubError::OutOfSpace);
+                        }
+                        Err(MZError::Data) => return Err(EpubError::Compression),
+                        Err(MZError::Stream | MZError::Param) => return Err(EpubError::InvalidFormat),
+                        Err(_) => return Err(EpubError::Compression),
+                    }
+                }
+            }
+            CompressionMethod::Other(_) => Err(EpubError::Unsupported),
+        }
     }
 }
 
@@ -416,6 +605,7 @@ fn parse_opf(opf: &[u8], opf_path: &[u8], catalog: &mut [u8]) -> Result<u16, Epu
 }
 
 fn manifest_item_for_id(opf: &[u8], idref: &[u8]) -> Result<ManifestItem, EpubError> {
+    let opf_start = opf.as_ptr() as usize;
     let mut cursor = 0usize;
     while cursor < opf.len() {
         if opf[cursor] != b'<' {
@@ -428,11 +618,17 @@ fn manifest_item_for_id(opf: &[u8], idref: &[u8]) -> Result<ManifestItem, EpubEr
                     if attr_eq(id, idref) {
                         let media = tag.attr(b"media-type").unwrap_or(b"");
                         let href = tag.attr(b"href").ok_or(EpubError::InvalidFormat)?;
+                        let href_start = href.as_ptr() as usize - opf_start;
+                        let media_start = if media.is_empty() {
+                            href_start
+                        } else {
+                            media.as_ptr() as usize - opf_start
+                        };
                         return Ok(ManifestItem {
                             href_len: u16::try_from(href.len()).map_err(|_| EpubError::OutOfSpace)?,
-                            href_start: href.as_ptr() as usize - opf.as_ptr() as usize,
-                            media_start: media.as_ptr() as usize - opf.as_ptr() as usize,
-                            media_end: media.as_ptr() as usize - opf.as_ptr() as usize + media.len(),
+                            href_start,
+                            media_start,
+                            media_end: media_start + media.len(),
                         });
                     }
                 }
@@ -576,6 +772,25 @@ fn parse_next_xhtml_event<'a>(
 ) -> Result<Option<EpubEvent<'a>>, EpubError> {
     let text_buf_ptr = text_buf as *mut [u8];
     loop {
+        if state.skip_tag_depth > 0 {
+            let name_len = usize::from(state.skip_tag_name_len);
+            let cursor_before = state.cursor;
+            state.skip_tag_depth = skip_container_fast(
+                data,
+                &mut state.cursor,
+                &state.skip_tag_name[..name_len],
+                state.skip_tag_depth,
+            )?;
+            if state.skip_tag_depth == 0 {
+                state.skip_tag_name_len = 0;
+                continue;
+            }
+            if state.cursor == cursor_before {
+                return Ok(None);
+            }
+            continue;
+        }
+
         if state.cursor >= data.len() {
             return Ok(None);
         }
@@ -590,6 +805,17 @@ fn parse_next_xhtml_event<'a>(
                 }
                 continue;
             }
+            if should_fast_skip_container(&tag) {
+                let local_name = trim_namespace(tag.name);
+                if local_name.len() > state.skip_tag_name.len() {
+                    return Err(EpubError::OutOfSpace);
+                }
+                state.skip_tag_name[..local_name.len()].copy_from_slice(local_name);
+                state.skip_tag_name_len =
+                    u8::try_from(local_name.len()).map_err(|_| EpubError::OutOfSpace)?;
+                state.skip_tag_depth = 1;
+                continue;
+            }
             if let Some(event) = unsafe {
                 parse_tag_start(tag, state, chapter_dir, &mut *text_buf_ptr)
             }? {
@@ -602,6 +828,52 @@ fn parse_next_xhtml_event<'a>(
             return Ok(Some(EpubEvent::Text(text)));
         }
     }
+}
+
+fn should_fast_skip_container(tag: &Tag<'_>) -> bool {
+    (tag.name_is("nav")
+        && tag
+            .attr(b"type")
+            .is_some_and(|value| attr_contains_token(value, b"toc")))
+        || ((tag.name_is("body") || tag.name_is("section") || tag.name_is("div"))
+            && tag.attr(b"type").is_some_and(|value| {
+                attr_contains_token(value, b"titlepage") || attr_contains_token(value, b"cover")
+            }))
+}
+
+fn skip_container_fast(
+    data: &[u8],
+    cursor: &mut usize,
+    tag_name: &[u8],
+    mut depth: u16,
+) -> Result<u16, EpubError> {
+    let local_name = trim_namespace(tag_name);
+    while *cursor < data.len() {
+        while *cursor < data.len() && data[*cursor] != b'<' {
+            *cursor += 1;
+        }
+        if *cursor >= data.len() {
+            return Ok(depth);
+        }
+        let before = *cursor;
+        let Some(tag) = parse_xml_tag(data, cursor)? else {
+            if *cursor == before {
+                return Ok(depth);
+            }
+            continue;
+        };
+        if eq_ascii_case(trim_namespace(tag.name), local_name) {
+            if tag.is_end {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok(0);
+                }
+            } else if !tag.is_self_closing {
+                depth = depth.saturating_add(1);
+            }
+        }
+    }
+    Ok(depth)
 }
 
 fn parse_text<'a>(
@@ -624,6 +896,10 @@ fn parse_text<'a>(
         if current == b'<' {
             break;
         }
+        let remaining = data.len() - state.cursor;
+        if remaining < b"[HIDDEN]".len() && b"[HIDDEN]".starts_with(&data[state.cursor..]) {
+            break;
+        }
         if data[state.cursor..].starts_with(b"[HIDDEN]") {
             state.cursor += b"[HIDDEN]".len();
             continue;
@@ -632,6 +908,9 @@ fn parse_text<'a>(
             let mut end = state.cursor + 1;
             while end < data.len() && data[end] != b';' {
                 end += 1;
+            }
+            if end >= data.len() {
+                break;
             }
             if end < data.len() {
                 let entity_bytes = &data[state.cursor..=end];
@@ -1226,6 +1505,7 @@ impl<'a> Tag<'a> {
 }
 
 fn parse_xml_tag<'a>(data: &'a [u8], cursor: &mut usize) -> Result<Option<Tag<'a>>, EpubError> {
+    let tag_start = *cursor;
     while *cursor < data.len() && data[*cursor].is_ascii_whitespace() {
         *cursor += 1;
     }
@@ -1235,6 +1515,7 @@ fn parse_xml_tag<'a>(data: &'a [u8], cursor: &mut usize) -> Result<Option<Tag<'a
 
     *cursor += 1;
     if *cursor >= data.len() {
+        *cursor = tag_start;
         return Ok(None);
     }
 
@@ -1278,7 +1559,8 @@ fn parse_xml_tag<'a>(data: &'a [u8], cursor: &mut usize) -> Result<Option<Tag<'a
                 *cursor += 1;
             }
             if *cursor >= data.len() {
-                return Err(EpubError::InvalidFormat);
+                *cursor = tag_start;
+                return Ok(None);
             }
             *cursor += 1;
             continue;
@@ -1286,7 +1568,8 @@ fn parse_xml_tag<'a>(data: &'a [u8], cursor: &mut usize) -> Result<Option<Tag<'a
         *cursor += 1;
     }
     if *cursor >= data.len() {
-        return Err(EpubError::InvalidFormat);
+        *cursor = tag_start;
+        return Ok(None);
     }
 
     let is_self_closing = *cursor > name_start && data[*cursor - 1] == b'/';

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use miniz_oxide::{inflate::stream::InflateState, DataFormat};
 use xteink_epub::{
     Epub, EpubArchive, EpubError, EpubEvent, EpubSource, ReaderBuffers, MAX_ARCHIVE_ENTRIES,
     MAX_ARCHIVE_NAME_CAPACITY,
@@ -43,20 +44,31 @@ impl EpubSource for MemorySource {
 struct Scratch {
     zip_cd: Vec<u8>,
     inflate: Vec<u8>,
+    stream_input: Vec<u8>,
     xml: Vec<u8>,
     catalog: Vec<u8>,
     path_buf: Vec<u8>,
+    stream_state: InflateState,
     archive: EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
 
 impl Scratch {
-    fn new(zip_cd: usize, inflate: usize, xml: usize, catalog: usize, path_buf: usize) -> Self {
+    fn new(
+        zip_cd: usize,
+        inflate: usize,
+        stream_input: usize,
+        xml: usize,
+        catalog: usize,
+        path_buf: usize,
+    ) -> Self {
         Self {
             zip_cd: vec![0; zip_cd],
             inflate: vec![0; inflate],
+            stream_input: vec![0; stream_input],
             xml: vec![0; xml],
             catalog: vec![0; catalog],
             path_buf: vec![0; path_buf],
+            stream_state: InflateState::new(DataFormat::Raw),
             archive: EpubArchive::new(),
         }
     }
@@ -65,27 +77,29 @@ impl Scratch {
         ReaderBuffers {
             zip_cd: self.zip_cd.as_mut_slice(),
             inflate: self.inflate.as_mut_slice(),
+            stream_input: self.stream_input.as_mut_slice(),
             xml: self.xml.as_mut_slice(),
             catalog: self.catalog.as_mut_slice(),
             path_buf: self.path_buf.as_mut_slice(),
+            stream_state: &mut self.stream_state,
             archive: &mut self.archive,
         }
     }
 
     fn tiny_out_of_space() -> Self {
-        Self::new(64, 64, 64, 8, 32)
+        Self::new(64, 64, 32, 64, 8, 32)
     }
 }
 
 impl Default for Scratch {
     fn default() -> Self {
-        Self::new(16384, 32768, 32768, 2048, 1024)
+        Self::new(16384, 32768, 4096, 32768, 2048, 1024)
     }
 }
 
 impl Scratch {
     fn large_for_smoke() -> Self {
-        Self::new(131072, 1_048_576, 65536, 131072, 2048)
+        Self::new(131072, 1_048_576, 8192, 65536, 131072, 2048)
     }
 }
 
@@ -144,6 +158,44 @@ fn collect_events(data: Vec<u8>, scratch: &mut Scratch) -> Result<Vec<OwnedEvent
     }
 
     Ok(out)
+}
+
+fn collect_readable_prefix(
+    data: Vec<u8>,
+    scratch: &mut Scratch,
+    normalized_prefix_len: usize,
+) -> Result<String, EpubError> {
+    let source = MemorySource::new(data);
+    let mut epub = Epub::open(source)?;
+    let mut out = String::new();
+    let mut pending_space = false;
+    let mut pending_initial = false;
+
+    loop {
+        match epub.next_event(scratch.buffers())? {
+            Some(event) => match to_owned_event(event) {
+                OwnedEvent::Text(text) => {
+                    push_readable_segment(&mut out, &text, &mut pending_space, &mut pending_initial);
+                }
+                OwnedEvent::ParagraphStart
+                | OwnedEvent::ParagraphEnd
+                | OwnedEvent::HeadingStart(_)
+                | OwnedEvent::HeadingEnd
+                | OwnedEvent::LineBreak => {
+                    pending_space = !out.is_empty();
+                    pending_initial = false;
+                }
+                OwnedEvent::UnsupportedTag | OwnedEvent::Image { .. } => {}
+            },
+            None => break,
+        }
+
+        if normalize_whitespace(&out).chars().count() >= normalized_prefix_len {
+            break;
+        }
+    }
+
+    Ok(normalize_whitespace(&out))
 }
 
 fn collect_level1_headings(events: &[OwnedEvent]) -> Vec<String> {
@@ -219,31 +271,6 @@ fn push_readable_segment(
     out.push_str(text);
     *pending_space = false;
     *pending_initial = ends_with_initial || should_join_initial;
-}
-
-fn readable_text_from_events(events: &[OwnedEvent]) -> String {
-    let mut out = String::new();
-    let mut pending_space = false;
-    let mut pending_initial = false;
-
-    for event in events {
-        match event {
-            OwnedEvent::Text(text) => {
-                push_readable_segment(&mut out, text, &mut pending_space, &mut pending_initial);
-            }
-            OwnedEvent::ParagraphStart
-            | OwnedEvent::ParagraphEnd
-            | OwnedEvent::HeadingStart(_)
-            | OwnedEvent::HeadingEnd
-            | OwnedEvent::LineBreak => {
-                pending_space = !out.is_empty();
-                pending_initial = false;
-            }
-            OwnedEvent::UnsupportedTag | OwnedEvent::Image { .. } => {}
-        }
-    }
-
-    out
 }
 
 fn prefix_chars(text: &str, len: usize) -> String {
@@ -359,7 +386,7 @@ fn chapter_text_is_extracted_from_real_fixture_content() {
             "Chapter 1",
             "The Typographer",
             "AVERY WATT always wanted to be a typographer.",
-            "Watt &Yardley, Fine Typography",
+            "Watt & Yardley, Fine Typography",
         ],
     );
 }
@@ -432,16 +459,32 @@ fn every_epub_fixture_matches_reference_text_prefix() {
         let name = *name;
 
         let mut scratch = Scratch::large_for_smoke();
-        let events = collect_events(load_fixture(name), &mut scratch)
+        let actual = collect_readable_prefix(load_fixture(name), &mut scratch, expected.chars().count())
             .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
-
-        let actual = normalize_whitespace(&readable_text_from_events(&events));
 
         assert!(
             actual.starts_with(expected),
             "fixture {name} did not match reference text prefix\nactual: {actual}\nexpected: {expected}"
         );
     }
+}
+
+#[test]
+fn zero_to_production_prefix_matches_reference_text() {
+    let name = "Zero To Production In Rust - Luca Palmieri.epub";
+    let expected = reference_text::EPUB_REFERENCE_CASES
+        .iter()
+        .find_map(|(fixture, expected)| (*fixture == name).then_some(*expected))
+        .expect("expected Zero To Production reference text");
+
+    let mut scratch = Scratch::large_for_smoke();
+    let actual = collect_readable_prefix(load_fixture(name), &mut scratch, expected.chars().count())
+        .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+
+    assert!(
+        actual.starts_with(expected),
+        "fixture {name} did not match reference text prefix\nactual: {actual}\nexpected: {expected}"
+    );
 }
 
 #[test]
@@ -455,10 +498,11 @@ fn every_epub_fixture_matches_reference_text_1024_prefix() {
         let name = *name;
 
         let mut scratch = Scratch::large_for_smoke();
-        let events = collect_events(load_fixture(name), &mut scratch)
-            .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
-
-        let actual = prefix_chars(&normalize_whitespace(&readable_text_from_events(&events)), 1024);
+        let actual = prefix_chars(
+            &collect_readable_prefix(load_fixture(name), &mut scratch, 1024)
+                .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}")),
+            1024,
+        );
 
         assert_eq!(
             actual, *expected,
