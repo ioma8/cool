@@ -365,6 +365,8 @@ async fn input_task(
         if let Some(button) = pressed {
             let _ = sender.send(button).await;
         }
+
+        yield_now().await;
     }
 }
 
@@ -402,6 +404,7 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
             &mut pending_display_refresh,
         );
     });
+    service_display_refresh(&mut display, &mut pending_display_refresh);
 
     loop {
         let button = receiver.receive().await;
