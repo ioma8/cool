@@ -79,6 +79,14 @@ rustup component add rust-src --toolchain nightly
 cargo +nightly build --release
 ```
 
+## Testing
+
+The workspace defaults to the embedded `riscv32imc-unknown-none-elf` target. Host-side parser tests for the EPUB crate should be run explicitly on the host target:
+
+```bash
+cargo test -p xteink-epub --target aarch64-apple-darwin -Zbuild-std=std,panic_abort
+```
+
 ## Flashing
 
 ```bash
