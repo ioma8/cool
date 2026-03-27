@@ -3,20 +3,16 @@
 #[cfg(test)]
 extern crate std;
 
-pub const ADC_MAX: u16 = 4095;
-pub const ADC_NO_BUTTON: i32 = 3800;
+// Keep this as the raw-register fallback ceiling for current firmware reads.
+pub const ADC_MAX: u16 = u16::MAX;
 
-// Recorded on real devices (same ladder method as legacy C firmware):
-// BACK CONF LEFT RGHT   UP DOWN
-// 3597 2760 1530    6 2300    6
-// 3470 2666 1480    6 2222    5
-// 3470 2655 1470    3 2205    3
-// Averages:
-// BACK CONF LEFT RGHT   UP DOWN
-// 3512 2694 1493    5 2242    5
-// Midpoint bands are used below to keep the mapping tolerant across devices.
-const ADC_RANGES_1: [i32; 5] = [ADC_NO_BUTTON, 3100, 2090, 750, -1];
-const ADC_RANGES_2: [i32; 3] = [ADC_NO_BUTTON, 1120, -1];
+// Threshold contract mirrored from the ESP32-C3 validated prototype.
+pub const ADC_NO_BUTTON: i32 = 11400;
+pub const ADC_RANGES_1: [i32; 5] = [11400, 10280, 9800, 8400, i32::MIN];
+pub const ADC_RANGES_2: [i32; 3] = [19300, 17200, i32::MIN];
+
+const ADC_LABELS_1: [Button; 4] = [Button::Back, Button::Confirm, Button::Left, Button::Right];
+const ADC_LABELS_2: [Button; 2] = [Button::Up, Button::Down];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -91,26 +87,18 @@ impl ButtonState {
 
 pub fn get_button_from_adc_1(adc_value: u16) -> Option<Button> {
     let value = adc_value as i32;
-    map_from_ranges(&ADC_RANGES_1, value)
+    map_from_ranges(&ADC_RANGES_1, &ADC_LABELS_1, value)
 }
 
 pub fn get_button_from_adc_2(adc_value: u16) -> Option<Button> {
     let value = adc_value as i32;
-    map_from_ranges(&ADC_RANGES_2, value)
+    map_from_ranges(&ADC_RANGES_2, &ADC_LABELS_2, value)
 }
 
-fn map_from_ranges(ranges: &[i32], value: i32) -> Option<Button> {
+fn map_from_ranges(ranges: &[i32], labels: &[Button], value: i32) -> Option<Button> {
     for i in 0..(ranges.len() - 1) {
         if ranges[i + 1] < value && value <= ranges[i] {
-            return match (ranges.len(), i) {
-                (5, 0) => Some(Button::Left),
-                (5, 1) => Some(Button::Confirm),
-                (5, 2) => Some(Button::Right),
-                (5, 3) => Some(Button::Back),
-                (3, 0) => Some(Button::Down),
-                (3, 1) => Some(Button::Up),
-                _ => None,
-            };
+            return Some(labels[i]);
         }
     }
     None
@@ -122,22 +110,23 @@ mod tests {
 
     #[test]
     fn gpio1_thresholds_map_to_expected_buttons() {
-        assert_eq!(get_button_from_adc_1(3500), Some(Button::Left));
-        assert_eq!(get_button_from_adc_1(2700), Some(Button::Confirm));
-        assert_eq!(get_button_from_adc_1(1500), Some(Button::Right));
-        assert_eq!(get_button_from_adc_1(500), Some(Button::Back));
+        assert_eq!(get_button_from_adc_1(11400), Some(Button::Back));
+        assert_eq!(get_button_from_adc_1(10280), Some(Button::Confirm));
+        assert_eq!(get_button_from_adc_1(9800), Some(Button::Left));
+        assert_eq!(get_button_from_adc_1(8400), Some(Button::Right));
+        assert_eq!(get_button_from_adc_1(8399), Some(Button::Right));
     }
 
     #[test]
     fn gpio2_thresholds_map_to_expected_buttons() {
-        assert_eq!(get_button_from_adc_2(2200), Some(Button::Down));
-        assert_eq!(get_button_from_adc_2(500), Some(Button::Up));
+        assert_eq!(get_button_from_adc_2(19300), Some(Button::Up));
+        assert_eq!(get_button_from_adc_2(17200), Some(Button::Down));
     }
 
     #[test]
     fn adc_low_extreme_values_map_to_expected_endpoints() {
-        assert_eq!(get_button_from_adc_1(0), Some(Button::Down));
-        assert_eq!(get_button_from_adc_2(0), Some(Button::Left));
+        assert_eq!(get_button_from_adc_1(0), Some(Button::Right));
+        assert_eq!(get_button_from_adc_2(0), Some(Button::Down));
     }
 
     #[test]

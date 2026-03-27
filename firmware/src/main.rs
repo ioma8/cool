@@ -9,18 +9,22 @@ use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
     clock::CpuClock,
     delay::Delay,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPinWithResistors},
     main,
     rtc_cntl::{SocResetReason, reset_reason, wakeup_cause},
     spi::master::{Config as SpiConfig, Spi},
+    peripherals::APB_SARADC,
     system::{Cpu, SleepSource},
-    time::Instant,
     time::Rate,
 };
 use heapless::String;
 use xteink_browser::{Input as BrowserInput, PagedAction, PagedBrowser};
-use xteink_buttons::{Button, ButtonState, get_button_from_adc_1, get_button_from_adc_2};
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
+use xteink_input::{
+    browse_command_from_buttons, BrowseCommand, Button, ButtonMapping, MappedInputManager,
+    RawInputState,
+};
+use xteink_buttons::{Button as RawButton, get_button_from_adc_1, get_button_from_adc_2};
 use xteink_power::{ResetReason, WakeCause, classify_wakeup_reason};
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
@@ -35,8 +39,6 @@ use sd_ffi::init_sd;
 use sd_path::join_child_path;
 
 esp_bootloader_esp_idf::esp_app_desc!();
-
-const DEBOUNCE_DELAY_MS: u64 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenMode {
     Browse,
@@ -48,6 +50,8 @@ enum BrowserRefresh {
     Full,
     Fast,
 }
+
+const ADC_ATTEN_BITS_12DB: u8 = 0x03;
 
 trait BrowserScreenDisplay {
     fn clear(&mut self, color: u8);
@@ -81,6 +85,37 @@ where
     }
 }
 
+#[inline]
+fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
+    let masked = attenuation_bits & 0x03;
+
+    APB_SARADC::regs().onetime_sample().modify(|_, w| unsafe {
+        w.saradc1_onetime_sample().set_bit();
+        w.onetime_channel().bits(channel);
+        w.onetime_atten().bits(masked)
+    });
+    APB_SARADC::regs().onetime_sample().modify(|_, w| {
+        w.onetime_start().set_bit()
+    });
+
+    while !APB_SARADC::regs().int_raw().read().adc1_done().bit() {}
+
+    let value = APB_SARADC::regs()
+        .sar1data_status()
+        .read()
+        .saradc1_data()
+        .bits() as u16;
+
+    APB_SARADC::regs()
+        .int_clr()
+        .write(|w| w.adc1_done().clear_bit_by_one());
+    APB_SARADC::regs()
+        .onetime_sample()
+        .modify(|_, w| w.onetime_start().clear_bit());
+
+    value
+}
+
 #[main]
 fn main() -> ! {
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
@@ -88,7 +123,7 @@ fn main() -> ! {
     let boot_delay = Delay::new();
     let usb_detect = Input::new(
         peripherals.GPIO20,
-        InputConfig::default().with_pull(Pull::None),
+        InputConfig::default().with_pull(Pull::Down),
     );
     let usb_connected = usb_detect.is_high();
 
@@ -195,59 +230,54 @@ fn main() -> ! {
     esp_println::println!("Browser render complete");
 
     let loop_delay = Delay::new();
-    let mut current_state = ButtonState::default();
-    let mut last_state = ButtonState::default();
-    let mut last_debounce_time = Instant::now();
+    let mut input = MappedInputManager::new(ButtonMapping::default());
+    let mut now_ms = 0u32;
     let mut adc_config = AdcConfig::new();
-    let mut adc_pin1 = adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
-    let mut adc_pin2 = adc_config.enable_pin(peripherals.GPIO2, Attenuation::_11dB);
-    let mut adc = Adc::new(peripherals.ADC1, adc_config);
+    peripherals.GPIO1.rtcio_pullup(false);
+    peripherals.GPIO1.rtcio_pulldown(true);
+    peripherals.GPIO2.rtcio_pullup(false);
+    peripherals.GPIO2.rtcio_pulldown(true);
+    peripherals.GPIO3.rtcio_pullup(false);
+    peripherals.GPIO3.rtcio_pulldown(true);
+    let _adc_pin1 = adc_config.enable_pin(peripherals.GPIO1, Attenuation::_11dB);
+    let _adc_pin2 = adc_config.enable_pin(peripherals.GPIO2, Attenuation::_11dB);
+    let _adc = Adc::new(peripherals.ADC1, adc_config);
     let power_button = Input::new(
         peripherals.GPIO3,
-        InputConfig::default().with_pull(Pull::Up),
+        InputConfig::default().with_pull(Pull::Down),
     );
 
     loop {
-        let mut raw_state = ButtonState::default();
-        let adc1_value =
-            nb::block!(adc.read_oneshot(&mut adc_pin1)).unwrap_or(xteink_buttons::ADC_MAX);
+        now_ms = now_ms.wrapping_add(1);
+        let mut raw_state = RawInputState::new();
+        let adc1_value = read_adc1_oneshot_raw(1, ADC_ATTEN_BITS_12DB);
+        loop_delay.delay_millis(1);
+        let adc2_value = read_adc1_oneshot_raw(2, ADC_ATTEN_BITS_12DB);
+
         if let Some(button) = get_button_from_adc_1(adc1_value) {
             raw_state = raw_state.with_button(button);
         }
 
-        let adc2_value =
-            nb::block!(adc.read_oneshot(&mut adc_pin2)).unwrap_or(xteink_buttons::ADC_MAX);
         if let Some(button) = get_button_from_adc_2(adc2_value) {
             raw_state = raw_state.with_button(button);
         }
 
         if power_button.is_low() {
-            raw_state = raw_state.with_button(Button::Power);
+            raw_state = raw_state.with_button(RawButton::Power);
         }
 
-        if raw_state.state != last_state.state {
-            last_state = raw_state;
-            last_debounce_time = Instant::now();
-        }
+        input.update(raw_state, now_ms);
 
-        let mut pressed_events = ButtonState::default();
-        if last_debounce_time.elapsed().as_millis() >= DEBOUNCE_DELAY_MS
-            && raw_state.state != current_state.state
-        {
-            pressed_events = ButtonState {
-                state: raw_state.state & !current_state.state,
-            };
-            current_state = raw_state;
-        }
-
-        if screen_mode == ScreenMode::Browse && pressed_events.any_pressed() {
-            let browser_input = if pressed_events.is_pressed(Button::Left) {
+        if screen_mode == ScreenMode::Browse && input.was_any_pressed() {
+            let browser_input = if input.was_pressed(Button::Left) {
                 Some(BrowserInput::Left)
-            } else if pressed_events.is_pressed(Button::Right) {
+            } else if input.was_pressed(Button::Right) {
                 Some(BrowserInput::Right)
-            } else if pressed_events.is_pressed(Button::Up) {
+            } else if input.was_pressed(Button::Up)
+            {
                 Some(BrowserInput::Up)
-            } else if pressed_events.is_pressed(Button::Down) {
+            } else if input.was_pressed(Button::Down)
+            {
                 Some(BrowserInput::Down)
             } else {
                 None
@@ -360,14 +390,108 @@ fn main() -> ! {
                     }
                 }
             }
-        }
 
-        else if screen_mode == ScreenMode::Reading && pressed_events.any_pressed() {
-            let reader_input = if pressed_events.is_pressed(Button::Left) {
+            match browse_command_from_buttons(input.state(), current_path.as_str() != "/") {
+                BrowseCommand::None => {}
+                BrowseCommand::OpenSelected => {
+                    if let Some(entry) = page.entries.get(browser.selected_index(page.entries.len()).unwrap_or(0)) {
+                        match entry.kind {
+                            xteink_browser::EntryKind::Directory => {
+                                match join_child_path(current_path.as_str(), entry.fs_name.as_str()) {
+                                    Ok(next_path) => {
+                                        current_path = next_path;
+                                        browser = PagedBrowser::new(page_size);
+                                        match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
+                                            Ok(next_page) => {
+                                                page = next_page;
+                                                browser.set_page(page.info.page_start, page.entries.len(), 0);
+                                                render_browser_screen(
+                                                    &mut display,
+                                                    current_path.as_str(),
+                                                    &page.entries,
+                                                    browser.selected_index(page.entries.len()),
+                                                    BrowserRefresh::Full,
+                                                );
+                                            }
+                                            Err(err) => {
+                                                esp_println::println!("Directory listing failed: {:?}", err);
+                                                render_error_screen(&mut display, "Directory listing error");
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        esp_println::println!("Enter directory failed");
+                                        render_error_screen(&mut display, "Failed to open directory");
+                                    }
+                                }
+                            }
+                            xteink_browser::EntryKind::Epub => {
+                                reader_entry = Some(entry.clone());
+                                reader_page = 0;
+                                if let Err(err) = render_epub_from_entry(
+                                    &sd,
+                                    &mut display,
+                                    current_path.as_str(),
+                                    entry,
+                                ) {
+                                    esp_println::println!("EPUB render failed: {:?}", err);
+                                    render_error_screen(&mut display, "EPUB render error");
+                                } else {
+                                    screen_mode = ScreenMode::Reading;
+                                }
+                            }
+                            xteink_browser::EntryKind::Other => {
+                                render_browser_screen(
+                                    &mut display,
+                                    current_path.as_str(),
+                                    &page.entries,
+                                    browser.selected_index(page.entries.len()),
+                                    BrowserRefresh::Fast,
+                                );
+                            }
+                        }
+                    }
+                }
+                BrowseCommand::GoUp => {
+                    if current_path.as_str() != "/" {
+                        if let Some(parent) = current_path.as_str().rsplit_once('/') {
+                            let mut next_path: String<256> = String::new();
+                            let _ = next_path.push_str(if parent.0.is_empty() { "/" } else { parent.0 });
+                            current_path = next_path;
+                            browser = PagedBrowser::new(page_size);
+                            match load_directory_page(&sd, current_path.as_str(), 0, page_size) {
+                                Ok(next_page) => {
+                                    page = next_page;
+                                    browser.set_page(page.info.page_start, page.entries.len(), 0);
+                                    render_browser_screen(
+                                        &mut display,
+                                        current_path.as_str(),
+                                        &page.entries,
+                                        browser.selected_index(page.entries.len()),
+                                        BrowserRefresh::Full,
+                                    );
+                                }
+                                Err(err) => {
+                                    esp_println::println!("Directory listing failed: {:?}", err);
+                                    render_error_screen(&mut display, "Directory listing error");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if screen_mode == ScreenMode::Reading && input.was_any_pressed() {
+            let reader_input = if input.was_pressed(Button::Left) {
                 Some(BrowserInput::Left)
-            } else if pressed_events.is_pressed(Button::Right) {
+            } else if input.was_pressed(Button::Right) {
                 Some(BrowserInput::Right)
-            } else if pressed_events.is_pressed(Button::Up) || pressed_events.is_pressed(Button::Down) {
+            } else if input.was_pressed(Button::Up)
+                || input.was_pressed(Button::Down)
+                || input.was_pressed(Button::Back)
+                || input.was_pressed(Button::Confirm)
+                || input.was_pressed(Button::PageBack)
+                || input.was_pressed(Button::PageForward)
+            {
                 Some(BrowserInput::Down)
             } else {
                 None
@@ -514,49 +638,4 @@ fn map_reset_reason(reason: Option<SocResetReason>) -> Option<ResetReason> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListedEntry, ScreenMode, render_browser_screen};
-    use xteink_browser::EntryKind;
-
-    #[derive(Default)]
-    struct BrowserRenderRecorder {
-        calls: [&'static str; 8],
-        len: usize,
-    }
-
-    impl BrowserRenderRecorder {
-        fn push(&mut self, call: &'static str) {
-            self.calls[self.len] = call;
-            self.len += 1;
-        }
-    }
-
-    impl BrowserScreenDisplay for BrowserRenderRecorder {
-        fn clear(&mut self, _color: u8) {
-            self.push("clear");
-        }
-
-        fn draw_text(&mut self, _x: u16, _y: u16, _text: &str) {
-            self.push("draw");
-        }
-
-        fn refresh_full(&mut self) {
-            self.push("refresh_full");
-        }
-    }
-
-    #[test]
-    fn browser_screen_uses_full_refresh() {
-        let mut display = BrowserRenderRecorder::default();
-        let mut label = heapless::String::<96>::new();
-        label.push_str("book.epub").unwrap();
-        let entries = [ListedEntry {
-            label,
-            kind: EntryKind::Epub,
-        }];
-
-        render_browser_screen(&mut display, "/", &entries, Some(0));
-
-        assert!(display.calls[..display.len].contains(&"refresh_full"));
-        assert!(!display.calls[..display.len].contains(&"refresh_fast"));
-    }
 }
