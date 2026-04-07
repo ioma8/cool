@@ -7,9 +7,10 @@
 ## Top-Level Architecture
 
 - `firmware/`: hardware-facing application crate and async entrypoint
+- `crates/xteink-controller/`: host-testable app/controller state transitions for browse and reader flow
 - `crates/xteink-display/`: SSD1677 display driver, framebuffer, text layout, EPUB rendering helpers
 - `crates/xteink-epub/`: heap-conscious EPUB and ZIP parsing
-- `crates/xteink-fs/`: SD card initialization, directory paging, path utilities, and EPUB loading/render orchestration
+- `crates/xteink-fs/`: SD card initialization, directory paging, cache helpers, and EPUB loading/render orchestration
 - `crates/xteink-sdspi/`: SPI transport and SD card protocol implementation
 - `crates/xteink-browser/`: paged browser state machine for directory navigation
 - `crates/xteink-buttons/`: raw button definitions and ADC threshold mapping
@@ -23,15 +24,16 @@ The main runtime lives in `firmware/src/main.rs`. On boot it:
 1. Initializes the ESP32-C3 peripherals.
 2. Detects USB power and configures SPI, GPIO, ADC, display, and SD access.
 3. Builds the initial browser state for the SD card root directory.
-4. Renders either the file browser or reader screen to the e-ink display.
-5. Processes button input to navigate directories, open EPUB files, turn pages, and exit reading mode.
+4. Delegates browse/reader state transitions to `xteink-controller`.
+5. Renders either the file browser or reader screen to the e-ink display.
+6. Processes button input to navigate directories, open EPUB files, turn pages, and exit reading mode.
 
 The firmware uses `embassy`, `esp-hal`, and `heapless`, keeping the design compatible with `no_std` constraints and predictable memory usage.
 
 ## Key Design Characteristics
 
 - No general-purpose OS and no heap allocation in the runtime path.
-- Workspace split into focused crates so hardware, input, browsing, storage, and rendering logic are separable.
+- Workspace split into focused crates so hardware, input, browsing, controller logic, storage, and rendering logic are separable.
 - Custom EPUB handling instead of depending on a desktop-style reader stack.
 - Embedded-first filesystem flow: paged directory listing, entry selection, and on-device page rendering.
 - Power-aware behavior through explicit wakeup classification and a five-minute idle sleep policy.
@@ -47,3 +49,10 @@ This is not just a display driver demo. The workspace already contains the piece
 - deep sleep / wakeup behavior
 
 The firmware crate is the integration layer; the crates under `crates/` hold most of the reusable logic.
+
+## Verification
+
+- Host workspace tests: `cargo test --workspace --target aarch64-apple-darwin`
+- Host crate loop: `bash scripts/run-tests-host.sh`
+- Embedded firmware check: `bash scripts/check-firmware.sh`
+- Embedded fs build check: `bash scripts/run-tests-embedded-fs.sh`

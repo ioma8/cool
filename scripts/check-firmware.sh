@@ -10,9 +10,9 @@ cd "$ROOT_DIR"
 
 echo "Using embedded target: $TARGET"
 echo "Using build-std: $BUILD_STD"
-echo "Checking embedded xteink-fs build..."
+echo "Checking firmware..."
 
-cargo check -p xteink-fs --features embedded --target "$TARGET" -Zbuild-std="$BUILD_STD"
+cargo check -p xteink-reader --features embedded --target "$TARGET" -Zbuild-std="$BUILD_STD"
 
 echo
-echo "Embedded fs check completed."
+echo "Firmware check completed."

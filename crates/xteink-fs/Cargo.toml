@@ -20,5 +20,6 @@ xteink-sdspi = { path = "../xteink-sdspi" }
 embassy-embedded-hal = "0.5"
 embassy-sync = "0.7"
 esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
+esp-rtos = { version = "0.2.0", features = ["esp32c3"] }
 esp-println = { version = "0.16", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
 esp32c3 = "0.31.0"

@@ -1,5 +1,7 @@
 #![no_std]
 
+use core::mem::MaybeUninit;
+
 use embedded_hal::{
     delay::DelayNs,
     digital::{InputPin, OutputPin},
@@ -8,6 +10,7 @@ use embedded_hal::{
 use critical_section;
 #[cfg(target_arch = "riscv32")]
 use esp_rtos::CurrentThreadHandle;
+use miniz_oxide::inflate::stream::InflateState;
 use xteink_epub::{
     Epub,
     EpubArchive,
@@ -19,6 +22,13 @@ use xteink_epub::{
 };
 
 pub mod bookerly;
+pub mod demo;
+pub(crate) mod pagination;
+pub(crate) mod text;
+
+use pagination::{CachedPaginationState, CachedTextRenderer};
+use text::{TextBuffer, WrappedLine, measure_text_width};
+pub use demo::{DemoDisplay, show_embedded_epub_demo};
 
 const PHYSICAL_WIDTH: u16 = 800;
 const PHYSICAL_HEIGHT: u16 = 480;
@@ -51,11 +61,13 @@ const CTRL1_BYPASS_RED: u8 = 0x40;
 const DATA_ENTRY_X_INC_Y_DEC: u8 = 0x01;
 const TEMP_SENSOR_INTERNAL: u8 = 0x80;
 const DISPLAY_BUSY_TIMEOUT_MS: u16 = 250;
-const EPUB_WORKSPACE_ZIP_CD: usize = 16 * 1024;
-const EPUB_WORKSPACE_INFLATE: usize = 32 * 1024;
-const EPUB_WORKSPACE_XML: usize = 4 * 1024;
-const EPUB_WORKSPACE_CATALOG: usize = 4 * 1024;
-const EPUB_WORKSPACE_PATH_BUF: usize = 512;
+const EPUB_WORKSPACE_ZIP_CD: usize = 768;
+const EPUB_WORKSPACE_INFLATE: usize = 3 * 1024;
+const EPUB_WORKSPACE_STREAM_INPUT: usize = 1024;
+const EPUB_WORKSPACE_XML: usize = 1024;
+const EPUB_WORKSPACE_CATALOG: usize = 1536;
+const EPUB_WORKSPACE_PATH_BUF: usize = 256;
+const EPUB_WORKSPACE_BUDGET: usize = 50 * 1024;
 const TEXT_LEN: usize = 2048;
 const CACHED_TEXT_CHUNK: usize = 1024;
 const CACHED_LINE_LEN: usize = 1024;
@@ -72,31 +84,44 @@ fn cooperative_yield() {
 struct EpubRenderWorkspace {
     zip_cd: [u8; EPUB_WORKSPACE_ZIP_CD],
     inflate: [u8; EPUB_WORKSPACE_INFLATE],
+    stream_input: [u8; EPUB_WORKSPACE_STREAM_INPUT],
     xml: [u8; EPUB_WORKSPACE_XML],
     catalog: [u8; EPUB_WORKSPACE_CATALOG],
     path_buf: [u8; EPUB_WORKSPACE_PATH_BUF],
+    stream_state: InflateState,
     archive: EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
 
 impl EpubRenderWorkspace {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             zip_cd: [0u8; EPUB_WORKSPACE_ZIP_CD],
             inflate: [0u8; EPUB_WORKSPACE_INFLATE],
+            stream_input: [0u8; EPUB_WORKSPACE_STREAM_INPUT],
             xml: [0u8; EPUB_WORKSPACE_XML],
             catalog: [0u8; EPUB_WORKSPACE_CATALOG],
             path_buf: [0u8; EPUB_WORKSPACE_PATH_BUF],
+            stream_state: InflateState::new(miniz_oxide::DataFormat::Raw),
             archive: EpubArchive::new(),
         }
     }
 }
 
-static mut EPUB_RENDER_WORKSPACE: EpubRenderWorkspace = EpubRenderWorkspace::new();
+const _: [(); 1] = [(); (core::mem::size_of::<EpubRenderWorkspace>() <= EPUB_WORKSPACE_BUDGET) as usize];
+
+static mut EPUB_RENDER_WORKSPACE: MaybeUninit<EpubRenderWorkspace> = MaybeUninit::uninit();
+static mut EPUB_RENDER_WORKSPACE_READY: bool = false;
 
 fn with_epub_render_workspace<R>(f: impl FnOnce(&mut EpubRenderWorkspace) -> R) -> R {
     critical_section::with(|_| {
         // SAFETY: access is serialized by the critical section above.
-        let workspace = unsafe { &mut *core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) };
+        let workspace = unsafe {
+            if !EPUB_RENDER_WORKSPACE_READY {
+                core::ptr::write(core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace, EpubRenderWorkspace::new());
+                EPUB_RENDER_WORKSPACE_READY = true;
+            }
+            &mut *(core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace)
+        };
         f(workspace)
     })
 }
@@ -306,23 +331,14 @@ where
                     return Err(xteink_epub::EpubError::Cancelled);
                 }
 
-                #[cfg(target_arch = "riscv32")]
-                if event_count % 64 == 0 {
-                    let _ = esp_println::println!(
-                        "EPUB render event begin: count={} page={} cursor_y={} enabled={}",
-                        event_count,
-                        current_page,
-                        cursor_y,
-                        render_enabled
-                    );
-                }
-
                 let event = epub.next_event(ReaderBuffers {
                     zip_cd: unsafe { &mut (*workspace_ptr).zip_cd },
                     inflate: unsafe { &mut (*workspace_ptr).inflate },
+                    stream_input: unsafe { &mut (*workspace_ptr).stream_input },
                     xml: unsafe { &mut (*workspace_ptr).xml },
                     catalog: unsafe { &mut (*workspace_ptr).catalog },
                     path_buf: unsafe { &mut (*workspace_ptr).path_buf },
+                    stream_state: unsafe { &mut (*workspace_ptr).stream_state },
                     archive: unsafe { &mut (*workspace_ptr).archive },
                 })?;
 
@@ -378,17 +394,6 @@ where
                     if should_cancel() {
                         return Err(xteink_epub::EpubError::Cancelled);
                     }
-                }
-
-                #[cfg(target_arch = "riscv32")]
-                if event_count % 64 == 0 {
-                    let _ = esp_println::println!(
-                        "EPUB render event end: count={} page={} cursor_y={} enabled={}",
-                        event_count,
-                        current_page,
-                        cursor_y,
-                        render_enabled
-                    );
                 }
 
                 if cursor_y >= DISPLAY_HEIGHT {
@@ -458,7 +463,7 @@ where
         let mut cursor_y = 0u16;
         let mut current_page = 0usize;
         let line_height = bookerly::BOOKERLY.line_height_px();
-        let mut line = WrappedLine::<CACHED_LINE_LEN>::new();
+        let mut state = CachedPaginationState::<CACHED_LINE_LEN>::new();
         let mut read_buffer = [0u8; CACHED_TEXT_CHUNK];
         let mut done = false;
         let mut chunk_count = 0usize;
@@ -490,27 +495,33 @@ where
             while !source.is_empty() && !done {
                 match core::str::from_utf8(source) {
                     Ok(text) => {
-                        done = self.render_cached_text_snippet(
-                            &mut line,
-                            &mut cursor_y,
-                            &mut current_page,
+                        state.cursor_y = cursor_y;
+                        state.current_page = current_page;
+                        done = pagination::render_cached_text_snippet(
+                            self,
+                            &mut state,
                             target_page,
                             line_height,
                             text,
                         )?;
+                        cursor_y = state.cursor_y;
+                        current_page = state.current_page;
                         source = &[];
                     }
                     Err(err) => {
                         let valid = err.valid_up_to();
                         if valid > 0 {
-                            done = self.render_cached_text_snippet(
-                                &mut line,
-                                &mut cursor_y,
-                                &mut current_page,
+                            state.cursor_y = cursor_y;
+                            state.current_page = current_page;
+                            done = pagination::render_cached_text_snippet(
+                                self,
+                                &mut state,
                                 target_page,
                                 line_height,
                                 core::str::from_utf8(&source[..valid]).unwrap_or(""),
                             )?;
+                            cursor_y = state.cursor_y;
+                            current_page = state.current_page;
                             source = &source[valid..];
                         } else {
                             source = &source[1..];
@@ -527,111 +538,12 @@ where
         }
 
         if !done {
-            self.render_cached_text_snippet(
-                &mut line,
-                &mut cursor_y,
-                &mut current_page,
-                target_page,
-                line_height,
-                "",
-            )?;
+            state.cursor_y = cursor_y;
+            state.current_page = current_page;
+            pagination::render_cached_text_snippet(self, &mut state, target_page, line_height, "")?;
+            current_page = state.current_page;
         }
         Ok(current_page)
-    }
-
-    fn render_cached_text_snippet(
-        &mut self,
-        line: &mut WrappedLine<CACHED_LINE_LEN>,
-        cursor_y: &mut u16,
-        current_page: &mut usize,
-        target_page: usize,
-        line_height: u16,
-        text: &str,
-    ) -> Result<bool, xteink_epub::EpubError> {
-        let finish_line = |display: &mut Self,
-                               line: &mut WrappedLine<CACHED_LINE_LEN>,
-                               cursor_y: &mut u16,
-                               current_page: &mut usize|
-         -> Result<bool, xteink_epub::EpubError> {
-            if line.is_empty() {
-                return Ok(false);
-            }
-            if cursor_y.saturating_add(line_height) > DISPLAY_HEIGHT {
-                if *current_page >= target_page {
-                    return Ok(true);
-                }
-                *current_page = current_page.saturating_add(1);
-                line.clear();
-                *cursor_y = 0;
-                display.clear(0xFF);
-            }
-            display.draw_text(0, *cursor_y, line.as_str());
-            *cursor_y = cursor_y.saturating_add(line_height);
-            line.clear();
-            Ok(false)
-        };
-
-        let finish_vertical_gap = |display: &mut Self,
-                                       cursor_y: &mut u16,
-                                       current_page: &mut usize|
-         -> Result<bool, xteink_epub::EpubError> {
-            if cursor_y.saturating_add(line_height) > DISPLAY_HEIGHT {
-                if *current_page >= target_page {
-                    return Ok(true);
-                }
-                *current_page = current_page.saturating_add(1);
-                *cursor_y = 0;
-                display.clear(0xFF);
-            }
-            *cursor_y = cursor_y.saturating_add(line_height);
-            Ok(false)
-        };
-
-        for (segment_index, segment) in text.split('\n').enumerate() {
-            if segment_index > 0 {
-                if finish_line(self, line, cursor_y, current_page)? {
-                    return Ok(true);
-                }
-                if finish_vertical_gap(self, cursor_y, current_page)? {
-                    return Ok(true);
-                }
-            }
-
-            for word in segment.split_whitespace() {
-                let word_width = self.measure_text_width(word);
-                if !line.is_empty()
-                    && line.width + self.measure_text_width(" ") + word_width > i32::from(DISPLAY_WIDTH)
-                {
-                    if cursor_y.saturating_add(line_height) > DISPLAY_HEIGHT {
-                        if *current_page >= target_page {
-                            return Ok(true);
-                        }
-                        *current_page = current_page.saturating_add(1);
-                        line.clear();
-                        *cursor_y = 0;
-                        self.clear(0xFF);
-                    }
-                    self.draw_text(0, *cursor_y, line.as_str());
-                    *cursor_y = cursor_y.saturating_add(line_height);
-                    line.clear();
-                }
-                if !line.is_empty() {
-                    line.push_space();
-                }
-                line.push_str(word);
-            }
-
-            if !segment.is_empty() && !line.is_empty() {
-                if finish_line(self, line, cursor_y, current_page)? {
-                    return Ok(true);
-                }
-            }
-
-            if *current_page > target_page && *cursor_y >= DISPLAY_HEIGHT {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     fn draw_glyph(&mut self, glyph: &bookerly::Glyph, x: i32, y: i32) {
@@ -669,9 +581,7 @@ where
     }
 
     fn measure_text_width(&self, text: &str) -> i32 {
-        text.chars()
-            .map(|ch| i32::from(bookerly::BOOKERLY.glyph_for_char(ch).advance_x))
-            .sum()
+        measure_text_width(text)
     }
 
     fn flush_text_buffer<const N: usize>(
@@ -892,23 +802,6 @@ where
     }
 }
 
-pub trait DemoDisplay {
-    type Error;
-
-    fn init(&mut self);
-    fn clear(&mut self, color: u8);
-    fn render_embedded_epub_first_screen(&mut self) -> Result<(), Self::Error>;
-    fn refresh_full(&mut self);
-}
-
-pub fn show_embedded_epub_demo<D: DemoDisplay>(display: &mut D) -> Result<(), D::Error> {
-    display.init();
-    display.clear(0xFF);
-    display.render_embedded_epub_first_screen()?;
-    display.refresh_full();
-    Ok(())
-}
-
 impl<SPI, DC, RST, BUSY, DELAY> DemoDisplay for SSD1677Display<SPI, DC, RST, BUSY, DELAY>
 where
     SPI: SpiDevice,
@@ -936,95 +829,32 @@ where
     }
 }
 
-struct WrappedLine<const N: usize> {
-    buf: [u8; N],
-    len: usize,
-    width: i32,
-}
-
-struct TextBuffer<const N: usize> {
-    buf: [u8; N],
-    len: usize,
-}
-
-impl<const N: usize> TextBuffer<N> {
-    const fn new() -> Self {
-        Self {
-            buf: [0; N],
-            len: 0,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
+impl<SPI, DC, RST, BUSY, DELAY> CachedTextRenderer for SSD1677Display<SPI, DC, RST, BUSY, DELAY>
+where
+    SPI: SpiDevice,
+    DC: OutputPin,
+    RST: OutputPin,
+    BUSY: InputPin,
+    DELAY: DelayNs,
+{
     fn clear(&mut self) {
-        self.len = 0;
+        SSD1677Display::clear(self, 0xFF);
     }
 
-    fn push(&mut self, text: &str) {
-        let bytes = text.as_bytes();
-        let needs_space = self.len > 0
-            && !self.buf[self.len - 1].is_ascii_whitespace()
-            && !bytes.first().copied().unwrap_or(b' ').is_ascii_whitespace();
-
-        if needs_space && self.len < self.buf.len() {
-            self.buf[self.len] = b' ';
-            self.len += 1;
-        }
-
-        let remaining = self.buf.len().saturating_sub(self.len);
-        let copy_len = core::cmp::min(remaining, bytes.len());
-        self.buf[self.len..self.len + copy_len].copy_from_slice(&bytes[..copy_len]);
-        self.len += copy_len;
+    fn draw_text(&mut self, x: u16, y: u16, text: &str) {
+        SSD1677Display::draw_text(self, x, y, text);
     }
 
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
-    }
-}
-
-impl<const N: usize> WrappedLine<N> {
-    const fn new() -> Self {
-        Self {
-            buf: [0; N],
-            len: 0,
-            width: 0,
-        }
+    fn measure_text_width(&self, text: &str) -> i32 {
+        SSD1677Display::measure_text_width(self, text)
     }
 
-    fn is_empty(&self) -> bool {
-        self.len == 0
+    fn display_width(&self) -> u16 {
+        DISPLAY_WIDTH
     }
 
-    fn clear(&mut self) {
-        self.len = 0;
-        self.width = 0;
-    }
-
-    fn push_space(&mut self) {
-        if self.len < self.buf.len() {
-            self.buf[self.len] = b' ';
-            self.len += 1;
-            self.width += i32::from(bookerly::BOOKERLY.glyph_for_char(' ').advance_x);
-        }
-    }
-
-    fn push_str(&mut self, text: &str) {
-        let bytes = text.as_bytes();
-        let remaining = self.buf.len().saturating_sub(self.len);
-        let copy_len = core::cmp::min(remaining, bytes.len());
-        self.buf[self.len..self.len + copy_len].copy_from_slice(&bytes[..copy_len]);
-        self.len += copy_len;
-        self.width += text
-            .chars()
-            .map(|ch| i32::from(bookerly::BOOKERLY.glyph_for_char(ch).advance_x))
-            .sum::<i32>();
-    }
-
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    fn display_height(&self) -> u16 {
+        DISPLAY_HEIGHT
     }
 }
 
@@ -1069,7 +899,7 @@ mod tests {
     use super::*;
     use core::convert::Infallible;
     use embedded_hal::spi::Operation;
-    use std::{vec, vec::Vec};
+    use std::{string::{String, ToString}, vec, vec::Vec};
     use xteink_epub::{EpubError, EpubSource};
 
     const PAGINATION_EPUB_BYTES: &[u8] =
@@ -1207,6 +1037,65 @@ mod tests {
         display.clear(0x00);
 
         assert!(display.framebuffer().iter().all(|&byte| byte == 0x00));
+    }
+
+    #[test]
+    fn text_buffer_inserts_separator_only_between_non_whitespace_chunks() {
+        let mut buffer = crate::text::TextBuffer::<32>::new();
+
+        buffer.push("Hello");
+        buffer.push("world");
+        buffer.push("\nnext");
+
+        assert_eq!(buffer.as_str(), "Hello world\nnext");
+    }
+
+    #[test]
+    fn cached_pagination_snippet_wraps_words_into_multiple_draw_calls() {
+        struct FakeRenderer {
+            draws: Vec<(u16, String)>,
+            clears: usize,
+        }
+
+        impl crate::pagination::CachedTextRenderer for FakeRenderer {
+            fn clear(&mut self) {
+                self.clears += 1;
+            }
+
+            fn draw_text(&mut self, _x: u16, y: u16, text: &str) {
+                self.draws.push((y, text.to_string()));
+            }
+
+            fn measure_text_width(&self, text: &str) -> i32 {
+                (text.len() as i32) * 10
+            }
+
+            fn display_width(&self) -> u16 {
+                30
+            }
+
+            fn display_height(&self) -> u16 {
+                100
+            }
+        }
+
+        let mut renderer = FakeRenderer {
+            draws: Vec::new(),
+            clears: 0,
+        };
+        let mut state = crate::pagination::CachedPaginationState::<64>::new();
+
+        let done = crate::pagination::render_cached_text_snippet(
+            &mut renderer,
+            &mut state,
+            0,
+            10,
+            "one two",
+        )
+        .unwrap();
+
+        assert!(!done);
+        assert_eq!(renderer.draws, vec![(0, "one".to_string()), (10, "two".to_string())]);
     }
 
     #[test]

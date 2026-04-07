@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${HOST_TARGET:-aarch64-apple-darwin}"
-RUSTFLAGS="${RUSTFLAGS_EXTRA:--Zbuild-std=std,panic_abort}"
+BUILD_STD="${HOST_BUILD_STD:-std,panic_abort}"
 
 CRATES=(
   xteink-buttons
@@ -20,12 +20,12 @@ CRATES=(
 cd "$ROOT_DIR"
 
 echo "Using host target: $TARGET"
-echo "Using build flags: $RUSTFLAGS"
+echo "Using build-std: $BUILD_STD"
 
 for crate in "${CRATES[@]}"; do
   echo
   echo "Running tests for $crate..."
-  cargo test -p "$crate" --target "$TARGET" "$RUSTFLAGS"
+  cargo test -p "$crate" --target "$TARGET" -Zbuild-std="$BUILD_STD"
 done
 
 echo

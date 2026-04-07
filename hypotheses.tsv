@@ -6,3 +6,4 @@ Table separator rendering lacked trailing spaces	proven
 Parser emits synthetic horizontal-rule placeholders for hline images	proven
 Parser strips spaces before punctuation in text emission	proven
 test_display_none diverges past 256 chars because the parser hides CSS display:none content	proven
+Dropping OPF nav documents wholesale loses non-TOC reading content like loi pages	proven

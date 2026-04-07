@@ -7,15 +7,17 @@ TARGET="${TARGET:-riscv32imc-unknown-none-elf}"
 BUILD_MODE="${BUILD_MODE:-release}"
 CRATE_NAME="${CRATE_NAME:-xteink-reader}"
 PACKAGE="${PACKAGE:-xteink-reader}"
+FEATURES="${FEATURES:-embedded}"
+BUILD_STD="${EMBEDDED_BUILD_STD:-core}"
 
 cd "$ROOT_DIR"
 
 echo "Building $PACKAGE for $TARGET ($BUILD_MODE)"
 if [ "$BUILD_MODE" = "release" ]; then
-  cargo build -p "$PACKAGE" --target "$TARGET" --release
+  cargo build -p "$PACKAGE" --features "$FEATURES" --target "$TARGET" --release -Zbuild-std="$BUILD_STD"
   OUT_DIR="$ROOT_DIR/target/$TARGET/release"
 else
-  cargo build -p "$PACKAGE" --target "$TARGET"
+  cargo build -p "$PACKAGE" --features "$FEATURES" --target "$TARGET" -Zbuild-std="$BUILD_STD"
   OUT_DIR="$ROOT_DIR/target/$TARGET/debug"
 fi
 

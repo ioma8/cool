@@ -1,0 +1,12 @@
+[package]
+name = "xteink-controller"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+heapless = { version = "0.8", default-features = false }
+xteink-browser = { path = "../xteink-browser" }
+xteink-buttons = { path = "../xteink-buttons" }
+
+[lib]
+path = "src/lib.rs"

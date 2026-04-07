@@ -74,6 +74,67 @@ pub struct ReaderBuffers<'a> {
     pub archive: &'a mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
 
+struct ReaderScratch<'a> {
+    zip_cd: *mut [u8],
+    inflate: *mut [u8],
+    stream_input: *mut [u8],
+    xml: *mut [u8],
+    catalog: *mut [u8],
+    path_buf: *mut [u8],
+    stream_state: *mut InflateState,
+    archive: *mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
+    _marker: core::marker::PhantomData<&'a mut ()>,
+}
+
+impl<'a> ReaderScratch<'a> {
+    fn new(buffers: ReaderBuffers<'a>) -> Self {
+        Self {
+            zip_cd: buffers.zip_cd as *mut [u8],
+            inflate: buffers.inflate as *mut [u8],
+            stream_input: buffers.stream_input as *mut [u8],
+            xml: buffers.xml as *mut [u8],
+            catalog: buffers.catalog as *mut [u8],
+            path_buf: buffers.path_buf as *mut [u8],
+            stream_state: buffers.stream_state as *mut InflateState,
+            archive: buffers.archive
+                as *mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
+            _marker: core::marker::PhantomData,
+        }
+    }
+
+    fn zip_cd_ptr(&self) -> *mut [u8] {
+        self.zip_cd
+    }
+
+    fn inflate_ptr(&self) -> *mut [u8] {
+        self.inflate
+    }
+
+    fn stream_input_ptr(&self) -> *mut [u8] {
+        self.stream_input
+    }
+
+    fn xml_ptr(&self) -> *mut [u8] {
+        self.xml
+    }
+
+    fn catalog_ptr(&self) -> *mut [u8] {
+        self.catalog
+    }
+
+    fn path_buf_ptr(&self) -> *mut [u8] {
+        self.path_buf
+    }
+
+    fn stream_state_ptr(&self) -> *mut InflateState {
+        self.stream_state
+    }
+
+    fn archive_ptr(&self) -> *mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY> {
+        self.archive
+    }
+}
+
 #[derive(Debug)]
 pub enum EpubEvent<'a> {
     Text(&'a str),
@@ -105,6 +166,9 @@ struct ParserState {
     in_paragraph: bool,
     in_heading: u8,
     in_pre: bool,
+    chapter_is_nav_doc: bool,
+    nav_suppress_outside: bool,
+    nav_visible_depth: u8,
     prev_space: bool,
     last_nonspace_char: Option<char>,
     ignore_depth: u8,
@@ -139,6 +203,9 @@ impl Default for ParserState {
             in_paragraph: false,
             in_heading: 0,
             in_pre: false,
+            chapter_is_nav_doc: false,
+            nav_suppress_outside: false,
+            nav_visible_depth: 0,
             prev_space: false,
             last_nonspace_char: None,
             ignore_depth: 0,
@@ -175,38 +242,31 @@ impl<S: EpubSource> Epub<S> {
         &'a mut self,
         workspace: ReaderBuffers<'a>,
     ) -> Result<Option<EpubEvent<'a>>, EpubError> {
-        let ReaderBuffers {
-            zip_cd,
-            inflate,
-            stream_input,
-            xml,
-            catalog,
-            path_buf,
-            stream_state,
-            archive,
-        } = workspace;
-        let inflate_ptr = inflate as *mut [u8];
-        let stream_input_ptr = stream_input as *mut [u8];
-        let xml_ptr = xml as *mut [u8];
-        let catalog_ptr = catalog as *mut [u8];
-        let path_buf_ptr = path_buf as *mut [u8];
-        let zip_cd_ptr = zip_cd as *mut [u8];
-        let stream_state_ptr = stream_state as *mut InflateState;
-        let archive_ptr = archive as *mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>;
+        let scratch = ReaderScratch::new(workspace);
+        let inflate_ptr = scratch.inflate_ptr();
+        let stream_input_ptr = scratch.stream_input_ptr();
+        let xml_ptr = scratch.xml_ptr();
+        let catalog_ptr = scratch.catalog_ptr();
+        let path_buf_ptr = scratch.path_buf_ptr();
+        let zip_cd_ptr = scratch.zip_cd_ptr();
+        let stream_state_ptr = scratch.stream_state_ptr();
+        let archive_ptr = scratch.archive_ptr();
 
         if self.state.done {
             return Ok(None);
         }
 
         if !self.state.catalog_ready {
-            // SAFETY: the raw pointers are derived from the owned `ReaderBuffers` value.
-            self.prepare_catalog(
-                unsafe { &mut *catalog_ptr },
-                unsafe { &mut *inflate_ptr },
-                unsafe { &mut *zip_cd_ptr },
-                unsafe { &mut *path_buf_ptr },
-                unsafe { &mut *archive_ptr },
-            )?;
+            let (catalog, inflate, zip_cd, path_buf, archive) = unsafe {
+                (
+                    &mut *catalog_ptr,
+                    &mut *inflate_ptr,
+                    &mut *zip_cd_ptr,
+                    &mut *path_buf_ptr,
+                    &mut *archive_ptr,
+                )
+            };
+            self.prepare_catalog(catalog, inflate, zip_cd, path_buf, archive)?;
             self.state.catalog_ready = true;
         }
 
@@ -220,14 +280,16 @@ impl<S: EpubSource> Epub<S> {
                     self.state.done = true;
                     return Ok(None);
                 }
-                // SAFETY: the raw pointers are derived from the owned `ReaderBuffers` value.
-                self.load_current_chapter(
-                    unsafe { &mut *catalog_ptr },
-                    unsafe { &mut *zip_cd_ptr },
-                    unsafe { &mut *path_buf_ptr },
-                    unsafe { &mut *stream_state_ptr },
-                    unsafe { &mut *archive_ptr },
-                )?;
+                let (catalog, zip_cd, path_buf, stream_state, archive) = unsafe {
+                    (
+                        &mut *catalog_ptr,
+                        &mut *zip_cd_ptr,
+                        &mut *path_buf_ptr,
+                        &mut *stream_state_ptr,
+                        &mut *archive_ptr,
+                    )
+                };
+                self.load_current_chapter(catalog, zip_cd, path_buf, stream_state, archive)?;
             }
 
             if self.state.cursor >= self.state.chapter_len
@@ -240,11 +302,10 @@ impl<S: EpubSource> Epub<S> {
                         .chapter_len
                         .saturating_sub(CHAPTER_TAIL_RESERVE.min(self.state.chapter_len));
                 }
-                self.refill_current_chapter(
-                    unsafe { &mut *inflate_ptr },
-                    unsafe { &mut *stream_input_ptr },
-                    unsafe { &mut *stream_state_ptr },
-                )?;
+                let (inflate, stream_input, stream_state) = unsafe {
+                    (&mut *inflate_ptr, &mut *stream_input_ptr, &mut *stream_state_ptr)
+                };
+                self.refill_current_chapter(inflate, stream_input, stream_state)?;
             }
 
             if self.state.cursor >= self.state.chapter_len {
@@ -252,7 +313,9 @@ impl<S: EpubSource> Epub<S> {
                 continue;
             }
 
-            let chapter = unsafe { core::slice::from_raw_parts((*inflate_ptr).as_ptr(), self.state.chapter_len) };
+            let chapter = unsafe {
+                core::slice::from_raw_parts((*inflate_ptr).as_ptr(), self.state.chapter_len)
+            };
             let dir_len = self.state.chapter_dir_len;
             let mut chapter_dir = [0u8; MAX_CHAPTER_DIR_BYTES];
             chapter_dir[..dir_len].copy_from_slice(&self.state.chapter_dir[..dir_len]);
@@ -274,11 +337,10 @@ impl<S: EpubSource> Epub<S> {
                         .chapter_len
                         .saturating_sub(CHAPTER_TAIL_RESERVE.min(self.state.chapter_len));
                 }
-                self.refill_current_chapter(
-                    unsafe { &mut *inflate_ptr },
-                    unsafe { &mut *stream_input_ptr },
-                    unsafe { &mut *stream_state_ptr },
-                )?;
+                let (inflate, stream_input, stream_state) = unsafe {
+                    (&mut *inflate_ptr, &mut *stream_input_ptr, &mut *stream_state_ptr)
+                };
+                self.refill_current_chapter(inflate, stream_input, stream_state)?;
             }
 
             if self.state.cursor >= self.state.chapter_len && self.state.chapter_finished {
@@ -357,6 +419,10 @@ impl<S: EpubSource> Epub<S> {
         self.state.in_paragraph = false;
         self.state.in_heading = 0;
         self.state.in_pre = false;
+        self.state.chapter_is_nav_doc =
+            chapter_path.ends_with(b"toc.xhtml") || chapter_path.ends_with(b"nav.xhtml");
+        self.state.nav_suppress_outside = false;
+        self.state.nav_visible_depth = 0;
         self.state.prev_space = false;
         self.state.last_nonspace_char = None;
         self.state.ignore_depth = 0;
@@ -887,6 +953,12 @@ fn parse_text<'a>(
         }
         return Ok(None);
     }
+    if state.chapter_is_nav_doc && state.nav_suppress_outside && state.nav_visible_depth == 0 {
+        while state.cursor < data.len() && data[state.cursor] != b'<' {
+            state.cursor += 1;
+        }
+        return Ok(None);
+    }
 
     let mut out_len = 0usize;
     let mut did_write = false;
@@ -985,6 +1057,15 @@ fn match_tag_end<'a>(
         state.ignore_depth = state.ignore_depth.saturating_sub(1);
         return Ok(None);
     }
+    if state.chapter_is_nav_doc && state.nav_suppress_outside {
+        if tag.name_is("nav") && state.nav_visible_depth > 0 {
+            state.nav_visible_depth = state.nav_visible_depth.saturating_sub(1);
+            return Ok(None);
+        }
+        if state.nav_visible_depth == 0 {
+            return Ok(None);
+        }
+    }
     if tag.name_is("ol") || tag.name_is("ul") {
         if state.list_depth > 0 {
             state.list_depth -= 1;
@@ -1067,6 +1148,21 @@ fn parse_tag_start<'a>(
     if is_ignored_container || tag_is_css_hidden(&tag) {
         state.ignore_depth = state.ignore_depth.saturating_add(1);
         return Ok(None);
+    }
+    if state.chapter_is_nav_doc && tag.name_is("body") {
+        state.nav_suppress_outside = tag
+            .attr(b"type")
+            .is_some_and(|value| attr_contains_token(value, b"frontmatter"));
+        return Ok(None);
+    }
+    if state.chapter_is_nav_doc && state.nav_suppress_outside {
+        if tag.name_is("nav") && !tag.is_self_closing {
+            state.nav_visible_depth = state.nav_visible_depth.saturating_add(1);
+            return Ok(None);
+        }
+        if state.nav_visible_depth == 0 {
+            return Ok(None);
+        }
     }
     if tag.name_is("ol") || tag.name_is("ul") {
         let depth = usize::from(state.list_depth);

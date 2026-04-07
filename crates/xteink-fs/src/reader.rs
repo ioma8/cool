@@ -8,18 +8,11 @@ use crate::{
         cache_paths_for_epub_candidates, parse_meta, serialize_meta, CacheMeta, CachePaths,
         CACHE_VERSION,
     },
-    low_level::{self, DirectoryPageInfo, FsError, SdFilesystem, SdFsFile},
+    directory::ListedEntry,
+    log::logln,
+    low_level::{SdFilesystem, SdFsFile},
     path::join_child_path,
 };
-
-pub const MAX_ENTRIES: usize = low_level::MAX_ENTRIES;
-pub use crate::low_level::ListedEntry;
-
-#[derive(Debug)]
-pub struct DirectoryPage {
-    pub entries: heapless::Vec<ListedEntry, MAX_ENTRIES>,
-    pub info: DirectoryPageInfo,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpubRefreshMode {
@@ -31,17 +24,6 @@ pub enum EpubRefreshMode {
 pub struct EpubRenderResult {
     pub rendered_page: usize,
     pub refresh: EpubRefreshMode,
-}
-
-pub fn load_directory_page<SD: SdFilesystem>(
-    fs: &SD,
-    current_path: &str,
-    page_start: usize,
-    page_size: usize,
-) -> Result<DirectoryPage, FsError> {
-    let mut entries: heapless::Vec<ListedEntry, MAX_ENTRIES> = heapless::Vec::new();
-    let info = fs.list_directory_page(current_path, page_start, page_size, &mut entries)?;
-    Ok(DirectoryPage { entries, info })
 }
 
 pub fn render_epub_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
@@ -77,14 +59,14 @@ where
     DELAY: embedded_hal::delay::DelayNs,
     C: FnMut() -> bool,
 {
-    let _ = esp_println::println!(
+    logln!(
         "EPUB render start: path={} entry={} kind={:?}",
         current_path,
         entry.fs_name.as_str(),
         entry.kind
     );
     let cache_candidates = cache_paths_for_epub_candidates(current_path, entry.fs_name.as_str());
-    let _ = esp_println::println!(
+    logln!(
         "EPUB cache probe begin: {} | {}",
         cache_candidates[0].progress.as_str(),
         cache_candidates[1].progress.as_str()
@@ -92,9 +74,9 @@ where
     let start_page = cache_candidates
         .iter()
         .find_map(|paths| {
-            let _ = esp_println::println!("EPUB cache probe read begin: {}", paths.progress.as_str());
+            logln!("EPUB cache probe read begin: {}", paths.progress.as_str());
             let result = read_cached_progress(fs, paths);
-            let _ = esp_println::println!(
+            logln!(
                 "EPUB cache probe read end: {} -> {:?}",
                 paths.progress.as_str(),
                 result
@@ -102,13 +84,13 @@ where
             result
         })
         .unwrap_or(0);
-    let _ = esp_println::println!(
+    logln!(
         "EPUB render progress: cached_start_page={} cache_root={}",
         start_page,
         cache_candidates[0].directory.as_str()
     );
 
-    let result = render_epub_page_from_entry_with_cancel(
+    render_epub_page_from_entry_with_cancel(
         fs,
         display,
         current_path,
@@ -116,8 +98,7 @@ where
         start_page,
         false,
         should_cancel,
-    )?;
-    Ok(result)
+    )
 }
 
 pub fn render_epub_page_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
@@ -160,10 +141,7 @@ where
     let source_path = join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
     let cache_paths = cache_paths_for_epub_candidates(current_path, entry.fs_name.as_str());
     let mut should_cancel = should_cancel;
-    let _ = esp_println::println!(
-        "EPUB source open begin: {}",
-        source_path.as_str()
-    );
+    logln!("EPUB source open begin: {}", source_path.as_str());
 
     let source_size = u32::try_from(
         fs.open_epub_source(source_path.as_str())
@@ -171,7 +149,7 @@ where
             .len(),
     )
     .map_err(|_| EpubError::OutOfSpace)?;
-    let _ = esp_println::println!(
+    logln!(
         "EPUB source opened: {} bytes={} target_page={} fast_refresh={}",
         source_path.as_str(),
         source_size,
@@ -180,14 +158,14 @@ where
     );
 
     let mut cache_paths_for_work: Option<CachePaths> = None;
-    let rendered_page = if let Some((paths, _meta)) = select_valid_cache(fs, &cache_paths, source_size) {
+    let rendered_page = if let Some((paths, meta)) = select_valid_cache(fs, &cache_paths, source_size) {
         cache_paths_for_work = Some(paths);
-        let _ = esp_println::println!(
+        logln!(
             "EPUB cache hit: {} v{} source_size={} content_length={}",
             source_path.as_str(),
-            _meta.version,
-            _meta.source_size,
-            _meta.content_length
+            meta.version,
+            meta.source_size,
+            meta.content_length
         );
         let paths = cache_paths_for_work
             .as_ref()
@@ -201,7 +179,7 @@ where
         };
         display.render_cached_text_page_with_cancel(&mut read_text, page_index, &mut should_cancel)?
     } else {
-        let _ = esp_println::println!("EPUB cache miss, parsing source: {}", source_path.as_str());
+        logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
         let source = fs.open_epub_source(source_path.as_str()).map_err(|_| EpubError::Io)?;
         let chosen = choose_cache_root(fs, &cache_paths).or_else(|| cache_paths.first().cloned());
         if let Some(chosen) = chosen {
@@ -211,7 +189,7 @@ where
             .as_ref()
             .cloned()
             .unwrap_or_else(|| cache_paths[0].clone());
-        let _ = esp_println::println!(
+        logln!(
             "EPUB parse start: source={} cache_dir={}",
             source_path.as_str(),
             cache_paths_for_render.directory.as_str()
@@ -226,7 +204,7 @@ where
             page_index,
             &mut should_cancel,
         )?;
-        let _ = esp_println::println!(
+        logln!(
             "EPUB parse complete: source={} rendered_page={}",
             source_path.as_str(),
             rendered_page
@@ -384,7 +362,7 @@ where
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    let _ = esp_println::println!(
+    logln!(
         "EPUB cache write start: directory={} content={}",
         paths.directory.as_str(),
         paths.content.as_str()
@@ -417,7 +395,7 @@ where
     if let Some(mut file) = content {
         let _ = file.flush();
         if write_meta(fs, paths, source_size, content_length).is_ok() {
-            let _ = esp_println::println!(
+            logln!(
                 "EPUB parsed and cached: {} -> bytes={} content_len={}",
                 source_path,
                 source_size,

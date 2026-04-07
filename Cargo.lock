@@ -1338,6 +1338,15 @@ name = "xteink-buttons"
 version = "0.1.0"
 
 [[package]]
+name = "xteink-controller"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "xteink-browser",
+ "xteink-buttons",
+]
+
+[[package]]
 name = "xteink-display"
 version = "0.1.0"
 dependencies = [
@@ -1348,6 +1357,7 @@ dependencies = [
  "esp-rtos",
  "fontdue",
  "heapless 0.8.0",
+ "miniz_oxide",
  "xteink-epub",
 ]
 
@@ -1368,6 +1378,7 @@ dependencies = [
  "embedded-sdmmc",
  "esp-hal",
  "esp-println",
+ "esp-rtos",
  "esp32c3",
  "heapless 0.8.0",
  "xteink-browser",
@@ -1409,6 +1420,7 @@ dependencies = [
  "nb 1.1.0",
  "xteink-browser",
  "xteink-buttons",
+ "xteink-controller",
  "xteink-display",
  "xteink-epub",
  "xteink-fs",

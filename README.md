@@ -41,6 +41,7 @@ The firmware uses calibrated raw ADC thresholds from `xteink-buttons`. The front
 ├── crates/
 │   ├── xteink-browser/  # Paged browser state machine for SD directory navigation
 │   ├── xteink-buttons/  # ADC threshold mapping and button-state logic
+│   ├── xteink-controller/ # Host-testable app/controller state transitions
 │   ├── xteink-display/  # SSD1677 framebuffer, text layout, render helpers
 │   ├── xteink-epub/     # EPUB and ZIP parsing for embedded use
 │   ├── xteink-fs/       # SD filesystem access and reader/browser orchestration
@@ -65,6 +66,7 @@ Custom logic now lives in dedicated crates:
 - `xteink-epub` parses EPUB content for on-device rendering
 - `xteink-buttons` and `xteink-input` handle raw input mapping and button events
 - `xteink-browser` and `xteink-power` provide UI navigation and sleep policy
+- `xteink-controller` owns host-testable browse/reader state transitions used by firmware
 
 For a short architecture summary, see `docs/PROJECT_OVERVIEW.md`.
 
@@ -81,20 +83,25 @@ cargo +nightly build --release
 
 ## Testing
 
-The workspace defaults to the embedded `riscv32imc-unknown-none-elf` target. Host-side parser tests for the EPUB crate should be run explicitly on the host target:
+Host and embedded verification are now explicit instead of being forced by workspace-wide Cargo config:
 
 ```bash
-cargo test -p xteink-epub --target aarch64-apple-darwin -Zbuild-std=std,panic_abort
+bash scripts/run-tests-host.sh
+bash scripts/check-firmware.sh
+bash scripts/run-tests-embedded-fs.sh
+```
+
+For a full host-side workspace test run:
+
+```bash
+cargo test --workspace --target aarch64-apple-darwin
 ```
 
 ## Flashing
 
 ```bash
-# Install espflash
-cargo install espflash
-
-# Flash via USB
-espflash flash --monitor target/riscv32imc-unknown-none-elf/release/xteink-reader
+# Build and flash via USB
+bash scripts/build-and-flash.sh
 ```
 
 ## License

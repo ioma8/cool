@@ -4,27 +4,34 @@
 extern crate std;
 
 #[cfg(feature = "embedded")]
-mod browser;
+mod directory;
 #[cfg(feature = "embedded")]
 mod cache;
 #[cfg(feature = "embedded")]
 mod hal;
 #[cfg(feature = "embedded")]
+mod log;
+#[cfg(feature = "embedded")]
 mod low_level;
 #[cfg(feature = "embedded")]
 mod path;
+#[cfg(feature = "embedded")]
+mod reader;
 
 #[cfg(feature = "embedded")]
-pub use browser::{
+pub use directory::{
     load_directory_page,
+    DirectoryPage,
+    ListedEntry,
+};
+#[cfg(feature = "embedded")]
+pub use reader::{
+    EpubRefreshMode,
+    EpubRenderResult,
     render_epub_from_entry,
     render_epub_from_entry_with_cancel,
     render_epub_page_from_entry,
     render_epub_page_from_entry_with_cancel,
-    DirectoryPage,
-    ListedEntry,
-    EpubRefreshMode,
-    EpubRenderResult,
 };
 #[cfg(feature = "embedded")]
 pub use hal::{RawGpioOutput, SD_CS_PIN, SD_POWER_PIN};

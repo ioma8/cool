@@ -5,11 +5,5 @@ rustflags = [
   "-C", "force-frame-pointers",
 ]
 
-[build]
-target = "riscv32imc-unknown-none-elf"
-
 [env]
 ESP_LOG = "info"
-
-[unstable]
-build-std = ["core"]

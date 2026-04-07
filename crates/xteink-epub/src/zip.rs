@@ -113,8 +113,6 @@ impl EndOfCentralDirectory {
 
 #[derive(Debug, Clone, Copy)]
 pub struct EpubEntryMetadata {
-    pub name_offset: u16,
-    pub name_len: u16,
     pub compression: CompressionMethod,
     pub crc32: u32,
     pub compressed_size: u32,
@@ -127,9 +125,6 @@ pub struct EpubEntryMetadata {
 pub struct EpubArchive<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> {
     eocd: EndOfCentralDirectory,
     entry_count: usize,
-    entries: [Option<EpubEntryMetadata>; MAX_ENTRIES],
-    names: [u8; NAME_CAPACITY],
-    names_len: usize,
 }
 
 impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
@@ -140,9 +135,6 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
         Self {
             eocd: EndOfCentralDirectory::empty(),
             entry_count: 0,
-            entries: [None; MAX_ENTRIES],
-            names: [0u8; NAME_CAPACITY],
-            names_len: 0,
         }
     }
 
@@ -156,8 +148,6 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
 
     pub fn clear(&mut self) {
         self.entry_count = 0;
-        self.names_len = 0;
-        self.entries.iter_mut().for_each(|entry| *entry = None);
     }
 
     pub fn parse<S: ZipSource>(&mut self, source: &S) -> Result<(), Error> {
@@ -184,32 +174,8 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
         }
 
         let mut cursor = cd_start;
-        for index in 0..entry_count {
+        for _ in 0..entry_count {
             let entry = parse_central_directory_entry(source, cursor)?;
-
-            let name_len = usize::from(entry.name_len);
-            let name_start = self.names_len;
-            if name_len > NAME_CAPACITY.saturating_sub(name_start) {
-                return Err(Error::NameBufferTooSmall);
-            }
-
-            let name_end = name_start
-                .checked_add(name_len)
-                .ok_or(Error::ArithmeticOverflow)?;
-
-            read_exact_at(source, cursor + CENTRAL_DIR_FILE_HEADER_SIZE as u64, &mut self.names[name_start..name_end])?;
-            self.entries[index] = Some(EpubEntryMetadata {
-                name_offset: u16::try_from(name_start).map_err(|_| Error::ArithmeticOverflow)?,
-                name_len: u16::try_from(name_len).map_err(|_| Error::ArithmeticOverflow)?,
-                compression: entry.compression,
-                crc32: entry.crc32,
-                compressed_size: entry.compressed_size,
-                uncompressed_size: entry.uncompressed_size,
-                local_header_offset: entry.local_header_offset,
-                data_offset: entry.data_offset,
-            });
-
-            self.names_len = name_end;
             self.entry_count = self.entry_count.saturating_add(1);
             cursor = cursor
                 .checked_add(CENTRAL_DIR_FILE_HEADER_SIZE as u64)
@@ -229,28 +195,61 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
         Ok(())
     }
 
-    pub fn entry_by_index(&self, index: usize) -> Option<&EpubEntryMetadata> {
-        self.entries.get(index).and_then(Option::as_ref)
-    }
-
-    pub fn entry_by_name(&self, name: &str) -> Option<&EpubEntryMetadata> {
+    pub fn entry_by_name<S: ZipSource>(
+        &self,
+        source: &S,
+        name: &str,
+        scratch: &mut [u8],
+    ) -> Result<Option<EpubEntryMetadata>, Error> {
         let needle = name.as_bytes();
-        self.entry_by_name_bytes(needle)
+        self.entry_by_name_bytes(source, needle, scratch)
     }
 
-    pub fn entry_by_name_bytes(&self, needle: &[u8]) -> Option<&EpubEntryMetadata> {
-        self.entries[..self.entry_count]
-            .iter()
-            .flatten()
-            .find(|entry| self.entry_name_bytes(entry) == needle)
-    }
+    pub fn entry_by_name_bytes<S: ZipSource>(
+        &self,
+        source: &S,
+        needle: &[u8],
+        scratch: &mut [u8],
+    ) -> Result<Option<EpubEntryMetadata>, Error> {
+        let cd_start = u64::from(self.eocd.cd_offset);
+        let cd_end = cd_start
+            .checked_add(u64::from(self.eocd.cd_size))
+            .ok_or(Error::ArithmeticOverflow)?;
+        let mut cursor = cd_start;
 
-    pub fn entry_name_bytes(&self, entry: &EpubEntryMetadata) -> &[u8] {
-        &self.names[usize::from(entry.name_offset)..usize::from(entry.name_offset + entry.name_len)]
-    }
+        while cursor < cd_end {
+            let entry = parse_central_directory_entry(source, cursor)?;
+            let name_len = usize::from(entry.name_len);
+            if name_len > scratch.len() {
+                return Err(Error::NameBufferTooSmall);
+            }
 
-    pub fn entry_name_utf8(&self, entry: &EpubEntryMetadata) -> Option<&str> {
-        core::str::from_utf8(self.entry_name_bytes(entry)).ok()
+            read_exact_at(
+                source,
+                cursor + CENTRAL_DIR_FILE_HEADER_SIZE as u64,
+                &mut scratch[..name_len],
+            )?;
+
+            if &scratch[..name_len] == needle {
+                return Ok(Some(EpubEntryMetadata {
+                    compression: entry.compression,
+                    crc32: entry.crc32,
+                    compressed_size: entry.compressed_size,
+                    uncompressed_size: entry.uncompressed_size,
+                    local_header_offset: entry.local_header_offset,
+                    data_offset: entry.data_offset,
+                }));
+            }
+
+            cursor = cursor
+                .checked_add(CENTRAL_DIR_FILE_HEADER_SIZE as u64)
+                .and_then(|value| value.checked_add(u64::from(entry.name_len)))
+                .and_then(|value| value.checked_add(u64::from(entry.extra_length)))
+                .and_then(|value| value.checked_add(u64::from(entry.comment_length)))
+                .ok_or(Error::ArithmeticOverflow)?;
+        }
+
+        Ok(None)
     }
 }
 

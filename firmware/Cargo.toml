@@ -3,7 +3,11 @@ name = "xteink-reader"
 version.workspace = true
 edition.workspace = true
 
-[dependencies]
+[features]
+default = []
+embedded = []
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
 embassy-executor = { version = "0.9", default-features = false }
 embassy-sync = "0.7"
 embassy-time = "0.4"
@@ -22,6 +26,7 @@ heapless = { version = "0.8", default-features = false }
 xteink-buttons = { path = "../crates/xteink-buttons" }
 xteink-input = { path = "../crates/xteink-input" }
 xteink-browser = { path = "../crates/xteink-browser" }
+xteink-controller = { path = "../crates/xteink-controller" }
 xteink-epub = { path = "../crates/xteink-epub" }
 xteink-fs = { path = "../crates/xteink-fs", features = ["embedded"] }
 xteink-display = { path = "../crates/xteink-display" }
@@ -30,3 +35,4 @@ embedded-hal-bus = "0.3"
 [[bin]]
 name = "xteink-reader"
 path = "src/main.rs"
+required-features = ["embedded"]
