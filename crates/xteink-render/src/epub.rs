@@ -5,6 +5,7 @@ use xteink_epub::{
     Epub, EpubArchive, EpubError, EpubEvent, EpubSource, MAX_ARCHIVE_ENTRIES,
     MAX_ARCHIVE_NAME_CAPACITY, ReaderBuffers,
 };
+use xteink_memory::SHARED_RENDER_EPUB_WORKSPACE_LIMIT_BYTES;
 
 use crate::{DISPLAY_HEIGHT, Framebuffer, bookerly, text::TextBuffer};
 
@@ -14,8 +15,6 @@ const EPUB_WORKSPACE_STREAM_INPUT: usize = 1024;
 const EPUB_WORKSPACE_XML: usize = 32 * 1024;
 const EPUB_WORKSPACE_CATALOG: usize = 1536;
 const EPUB_WORKSPACE_PATH_BUF: usize = 256;
-#[cfg(target_arch = "riscv32")]
-const EPUB_WORKSPACE_BUDGET: usize = 160 * 1024;
 const TEXT_LEN: usize = 2048;
 
 struct EpubRenderWorkspace {
@@ -28,6 +27,8 @@ struct EpubRenderWorkspace {
     stream_state: InflateState,
     archive: EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
+
+pub const EPUB_RENDER_WORKSPACE_BYTES: usize = core::mem::size_of::<EpubRenderWorkspace>();
 
 impl EpubRenderWorkspace {
     fn new() -> Self {
@@ -44,9 +45,8 @@ impl EpubRenderWorkspace {
     }
 }
 
-#[cfg(target_arch = "riscv32")]
 const _: [(); 1] =
-    [(); (core::mem::size_of::<EpubRenderWorkspace>() <= EPUB_WORKSPACE_BUDGET) as usize];
+    [(); (EPUB_RENDER_WORKSPACE_BYTES <= SHARED_RENDER_EPUB_WORKSPACE_LIMIT_BYTES) as usize];
 
 static mut EPUB_RENDER_WORKSPACE: MaybeUninit<EpubRenderWorkspace> = MaybeUninit::uninit();
 static mut EPUB_RENDER_WORKSPACE_READY: bool = false;

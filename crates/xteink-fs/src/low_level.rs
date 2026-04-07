@@ -15,7 +15,7 @@ use xteink_sdspi::{SdSpiCard, SdSpiOptions, SpiTransport};
 
 use crate::{hal, path::normalize_path};
 
-pub const MAX_ENTRIES: usize = 64;
+pub const MAX_ENTRIES: usize = 24;
 const LABEL_CAPACITY: usize = 96;
 const LFN_CAPACITY: usize = 256;
 const MAX_DIRS: usize = 16;

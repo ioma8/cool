@@ -118,18 +118,35 @@ impl AppController {
         page_entries: &[UiEntry],
         page_info: DirectoryPageInfo,
     ) -> ControllerCommand {
+        let selected_entry = self
+            .browser
+            .selected_index(page_entries.len())
+            .and_then(|index| page_entries.get(index))
+            .cloned();
+        self.handle_button_with_selected_entry(
+            button,
+            page_entries.len(),
+            page_info,
+            selected_entry,
+        )
+    }
+
+    pub fn handle_button_with_selected_entry(
+        &mut self,
+        button: RawButton,
+        page_len: usize,
+        page_info: DirectoryPageInfo,
+        selected_entry: Option<UiEntry>,
+    ) -> ControllerCommand {
         match (self.screen_mode, button) {
             (ScreenMode::Browse, RawButton::Left | RawButton::Up) => {
-                self.handle_browse_navigation(BrowserInput::Left, page_entries.len(), page_info)
+                self.handle_browse_navigation(BrowserInput::Left, page_len, page_info)
             }
             (ScreenMode::Browse, RawButton::Right | RawButton::Down) => {
-                self.handle_browse_navigation(BrowserInput::Right, page_entries.len(), page_info)
+                self.handle_browse_navigation(BrowserInput::Right, page_len, page_info)
             }
             (ScreenMode::Browse, RawButton::Back) => {
-                let Some(index) = self.browser.selected_index(page_entries.len()) else {
-                    return ControllerCommand::None;
-                };
-                let Some(entry) = page_entries.get(index) else {
+                let Some(entry) = selected_entry else {
                     return ControllerCommand::None;
                 };
 
@@ -153,7 +170,7 @@ impl AppController {
                         self.reader_entry = Some(entry.clone());
                         ControllerCommand::OpenEpub {
                             path: self.current_path.clone(),
-                            entry: entry.clone(),
+                            entry,
                         }
                     }
                     EntryKind::Other => ControllerCommand::None,

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 miniz_oxide = { version = "0.8", default-features = false }
 xteink-epub = { path = "../xteink-epub" }
+xteink-memory.workspace = true
 
 [build-dependencies]
 fontdue = "0.9"

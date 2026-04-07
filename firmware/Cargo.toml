@@ -30,6 +30,7 @@ xteink-controller = { path = "../crates/xteink-controller" }
 xteink-epub = { path = "../crates/xteink-epub" }
 xteink-fs = { path = "../crates/xteink-fs", features = ["embedded"] }
 xteink-display = { path = "../crates/xteink-display" }
+xteink-memory.workspace = true
 embedded-hal-bus = "0.3"
 
 [[bin]]

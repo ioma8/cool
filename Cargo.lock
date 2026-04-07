@@ -1563,6 +1563,7 @@ dependencies = [
  "xteink-browser",
  "xteink-buttons",
  "xteink-epub",
+ "xteink-memory",
  "xteink-render",
 ]
 
@@ -2148,6 +2149,7 @@ dependencies = [
  "heapless 0.8.0",
  "miniz_oxide",
  "xteink-epub",
+ "xteink-memory",
 ]
 
 [[package]]
@@ -2184,6 +2186,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xteink-memory"
+version = "0.1.0"
+
+[[package]]
 name = "xteink-power"
 version = "0.1.0"
 
@@ -2214,6 +2220,7 @@ dependencies = [
  "xteink-epub",
  "xteink-fs",
  "xteink-input",
+ "xteink-memory",
 ]
 
 [[package]]
@@ -2223,6 +2230,7 @@ dependencies = [
  "fontdue",
  "miniz_oxide",
  "xteink-epub",
+ "xteink-memory",
 ]
 
 [[package]]

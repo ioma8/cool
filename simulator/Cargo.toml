@@ -10,6 +10,7 @@ xteink-app = { path = "../crates/xteink-app" }
 xteink-browser = { path = "../crates/xteink-browser" }
 xteink-buttons = { path = "../crates/xteink-buttons" }
 xteink-epub = { path = "../crates/xteink-epub" }
+xteink-memory.workspace = true
 xteink-render = { path = "../crates/xteink-render" }
 
 [dev-dependencies]

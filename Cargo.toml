@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "simulator",
+    "crates/xteink-memory",
     "crates/xteink-app",
     "crates/xteink-render",
     "crates/xteink-controller",
@@ -24,6 +25,7 @@ version = "0.1.0"
 embedded-hal = "1.0"
 nb = "1.1"
 critical-section = "1.2"
+xteink-memory = { path = "crates/xteink-memory" }
 
 [profile.dev]
 opt-level = "s"

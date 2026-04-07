@@ -6,6 +6,7 @@ mod pagination;
 mod text;
 
 use bookerly::Glyph;
+pub use epub::EPUB_RENDER_WORKSPACE_BYTES;
 use pagination::{CachedPaginationState, CachedTextRenderer};
 use text::{WrappedLine, measure_text_width};
 

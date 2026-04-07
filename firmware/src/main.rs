@@ -2,6 +2,7 @@
 #![no_main]
 
 use core::cell::RefCell;
+use core::mem::{size_of, size_of_val};
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
@@ -27,11 +28,16 @@ use xteink_fs::{
     EpubRefreshMode, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
     render_epub_page_from_entry,
 };
+use xteink_memory::{
+    DEVICE_PERSISTENT_BUDGET_BYTES, DEVICE_STACK_RESERVE_BYTES, DEVICE_TOTAL_RAM_BYTES,
+    DEVICE_TRANSIENT_HEADROOM_BYTES, DeviceMemoryFootprint,
+};
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 const BUTTON_EVENT_CHANNEL_CAPACITY: usize = 8;
+const STACK_REPORT_GRANULARITY_BYTES: usize = 256;
 
 static BUTTON_EVENT_CHANNEL: Channel<
     CriticalSectionRawMutex,
@@ -47,6 +53,27 @@ static APP_DIRECTORY_PAGE: Mutex<CriticalSectionRawMutex, xteink_fs::DirectoryPa
             has_next: false,
         },
     });
+static UI_TASK_STACK_PROBE: Mutex<CriticalSectionRawMutex, StackProbe> =
+    Mutex::new(StackProbe::new());
+static INPUT_TASK_STACK_PROBE: Mutex<CriticalSectionRawMutex, StackProbe> =
+    Mutex::new(StackProbe::new());
+
+#[derive(Clone, Copy)]
+struct StackProbe {
+    top: usize,
+    low: usize,
+    reported_usage: usize,
+}
+
+impl StackProbe {
+    const fn new() -> Self {
+        Self {
+            top: 0,
+            low: usize::MAX,
+            reported_usage: 0,
+        }
+    }
+}
 #[inline]
 fn app_directory_page_with<R>(f: impl FnOnce(&xteink_fs::DirectoryPage) -> R) -> R {
     APP_DIRECTORY_PAGE.lock(|page| f(page))
@@ -55,6 +82,111 @@ fn app_directory_page_with<R>(f: impl FnOnce(&xteink_fs::DirectoryPage) -> R) ->
 #[inline]
 fn app_directory_page_with_mut<R>(f: impl FnOnce(&mut xteink_fs::DirectoryPage) -> R) -> R {
     unsafe { APP_DIRECTORY_PAGE.lock_mut(|page| f(page)) }
+}
+
+const FIRMWARE_STATIC_DEVICE_BYTES: usize =
+    size_of::<Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>>()
+        + size_of::<Mutex<CriticalSectionRawMutex, xteink_fs::DirectoryPage>>()
+        + xteink_display::EPUB_RENDER_WORKSPACE_BYTES;
+
+const _: [(); 1] = [(); (FIRMWARE_STATIC_DEVICE_BYTES <= DEVICE_PERSISTENT_BUDGET_BYTES) as usize];
+
+fn firmware_memory_footprint<SD, SPIBUS, SPIDEV, DC, RST, BUSY, DELAY>(
+    spi_bus: &Mutex<NoopRawMutex, RefCell<SPIBUS>>,
+    sd: &SD,
+    display: &SSD1677Display<SPIDEV, DC, RST, BUSY, DELAY>,
+    current_path: &String<256>,
+    controller: &AppController,
+) -> DeviceMemoryFootprint
+where
+    SPIDEV: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    DeviceMemoryFootprint::new(
+        FIRMWARE_STATIC_DEVICE_BYTES
+            + size_of_val(spi_bus)
+            + size_of_val(sd)
+            + size_of_val(display)
+            + size_of_val(current_path)
+            + size_of_val(controller),
+    )
+}
+
+fn enforce_firmware_memory_budget<SD, SPI, DC, RST, BUSY, DELAY>(
+    spi_bus: &Mutex<NoopRawMutex, RefCell<SPI>>,
+    sd: &SD,
+    display: &SSD1677Display<impl SpiDevice, DC, RST, BUSY, DELAY>,
+    current_path: &String<256>,
+    controller: &AppController,
+) where
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    let footprint = firmware_memory_footprint(spi_bus, sd, display, current_path, controller);
+    assert!(
+        footprint.fits_device_budget(),
+        "firmware device memory footprint {} exceeds budget {}",
+        footprint.device_bytes,
+        DEVICE_PERSISTENT_BUDGET_BYTES
+    );
+}
+
+fn log_firmware_memory_report(footprint: DeviceMemoryFootprint) {
+    let used_permille = footprint.used_device_permille();
+    esp_println::println!(
+        "Memory footprint: device={}B/{}B ({}.{}%), remaining={}B, total_ram={}B, stack_reserve={}B, transient_headroom={}B",
+        footprint.device_bytes,
+        DEVICE_PERSISTENT_BUDGET_BYTES,
+        used_permille / 10,
+        used_permille % 10,
+        footprint.remaining_device_bytes(),
+        DEVICE_TOTAL_RAM_BYTES,
+        DEVICE_STACK_RESERVE_BYTES,
+        DEVICE_TRANSIENT_HEADROOM_BYTES,
+    );
+}
+
+#[inline]
+fn current_stack_pointer() -> usize {
+    let sp: usize;
+    unsafe {
+        core::arch::asm!("mv {}, sp", out(reg) sp);
+    }
+    sp
+}
+
+fn observe_task_stack(task_name: &str, probe: &'static Mutex<CriticalSectionRawMutex, StackProbe>) {
+    let sp = current_stack_pointer();
+    unsafe {
+        probe.lock_mut(|state| {
+        if state.top == 0 {
+            state.top = sp;
+        }
+        if sp < state.low {
+            state.low = sp;
+        }
+
+        let used = state.top.saturating_sub(state.low);
+        if used >= state.reported_usage.saturating_add(STACK_REPORT_GRANULARITY_BYTES)
+            || state.reported_usage == 0
+        {
+            state.reported_usage = used;
+            esp_println::println!(
+                "Stack usage: task={} observed_used={}B current_sp=0x{:08x} stack_top=0x{:08x} stack_low=0x{:08x}",
+                task_name,
+                used,
+                sp as u32,
+                state.top as u32,
+                state.low as u32
+            );
+        }
+    })
+    };
 }
 
 fn load_browser_directory_page<SD: SdFilesystem>(
@@ -253,6 +385,9 @@ async fn main(spawner: Spawner) -> ! {
     app_directory_page_with(|page| {
         controller.apply_directory_loaded(page.info.page_start, page.entries.len(), 0);
     });
+    let footprint = firmware_memory_footprint(&spi_bus, &sd, &display, &current_path, &controller);
+    log_firmware_memory_report(footprint);
+    enforce_firmware_memory_budget(&spi_bus, &sd, &display, &current_path, &controller);
 
     let sender = BUTTON_EVENT_CHANNEL.sender();
     let receiver = BUTTON_EVENT_CHANNEL.receiver();
@@ -285,11 +420,13 @@ async fn input_task(
     sender: Sender<'static, CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
     power_button: Input<'static>,
 ) {
+    observe_task_stack("input_task", &INPUT_TASK_STACK_PROBE);
     let mut last_raw_state = ButtonState::default();
     let mut pressed_lock: Option<RawButton> = None;
     let mut no_button_streak: u8 = RELEASE_STREAK_TO_REARM_PRESS;
     let delay = Delay::new();
     loop {
+        observe_task_stack("input_task", &INPUT_TASK_STACK_PROBE);
         let mut raw_state = ButtonState::default();
         let mut decoded_pin1 = None;
         let mut decoded_pin2 = None;
@@ -361,6 +498,7 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
+    observe_task_stack("ui_task", &UI_TASK_STACK_PROBE);
     let mut pending_display_refresh = PendingDisplayRefresh::None;
     app_directory_page_with(|page| {
         render_browser_screen(
@@ -375,16 +513,19 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
     service_display_refresh(&mut display, &mut pending_display_refresh);
 
     loop {
+        observe_task_stack("ui_task", &UI_TASK_STACK_PROBE);
         let button = receiver.receive().await;
         let command = app_directory_page_with(|page| {
-            let mut ui_entries = heapless::Vec::<UiEntry, MAX_ENTRIES>::new();
-            for entry in page.entries.iter() {
-                let _ = ui_entries.push(listed_entry_to_ui_entry(entry));
-            }
-            controller.handle_button(
+            let selected_entry = controller
+                .browser()
+                .selected_index(page.entries.len())
+                .and_then(|index| page.entries.get(index))
+                .map(listed_entry_to_ui_entry);
+            controller.handle_button_with_selected_entry(
                 button,
-                ui_entries.as_slice(),
+                page.entries.len(),
                 controller_page_info(page.info),
+                selected_entry,
             )
         });
 

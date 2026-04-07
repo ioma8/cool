@@ -1,5 +1,7 @@
 use std::{
+    cell::RefCell,
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -81,23 +83,34 @@ impl From<std::io::Error> for StorageError {
 }
 
 struct FileSource {
-    bytes: Vec<u8>,
+    len: usize,
+    file: RefCell<fs::File>,
+}
+
+impl FileSource {
+    fn open(path: &Path) -> Result<Self, std::io::Error> {
+        let file = fs::File::open(path)?;
+        let len = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
+        Ok(Self {
+            len,
+            file: RefCell::new(file),
+        })
+    }
 }
 
 impl xteink_epub::EpubSource for FileSource {
     fn len(&self) -> usize {
-        self.bytes.len()
+        self.len
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, xteink_epub::EpubError> {
-        let start = offset as usize;
-        if start >= self.bytes.len() {
+        if offset >= self.len as u64 {
             return Ok(0);
         }
-        let end = (start + buffer.len()).min(self.bytes.len());
-        let chunk = &self.bytes[start..end];
-        buffer[..chunk.len()].copy_from_slice(chunk);
-        Ok(chunk.len())
+        let mut file = self.file.borrow_mut();
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| xteink_epub::EpubError::Io)?;
+        file.read(buffer).map_err(|_| xteink_epub::EpubError::Io)
     }
 }
 
@@ -169,9 +182,31 @@ impl AppStorage for HostStorage {
     ) -> Result<usize, Self::Error> {
         let mut full_path = self.resolve(current_path);
         full_path.push(entry.fs_name.as_str());
-        let bytes = fs::read(full_path)?;
+        let source = FileSource::open(&full_path)?;
         framebuffer
-            .render_epub_page(FileSource { bytes }, target_page)
+            .render_epub_page(source, target_page)
             .map_err(StorageError::Render)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileSource;
+    use std::fs;
+    use xteink_epub::EpubSource;
+
+    #[test]
+    fn file_source_reads_epub_bytes_on_demand() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("story.epub");
+        fs::write(&path, b"abcdefghijklmnopqrstuvwxyz").expect("epub");
+
+        let source = FileSource::open(&path).expect("open");
+        let mut buffer = [0u8; 5];
+
+        assert_eq!(source.len(), 26);
+        assert_eq!(source.read_at(2, &mut buffer).expect("read"), 5);
+        assert_eq!(&buffer, b"cdefg");
+        assert_eq!(source.read_at(30, &mut buffer).expect("eof"), 0);
     }
 }

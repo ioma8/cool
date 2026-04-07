@@ -15,6 +15,7 @@ use xteink_epub::{
     Epub, EpubArchive, EpubEvent, EpubSource, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY,
     ReaderBuffers,
 };
+use xteink_memory::DISPLAY_DRIVER_EPUB_WORKSPACE_LIMIT_BYTES;
 
 pub mod bookerly;
 pub mod demo;
@@ -62,7 +63,6 @@ const EPUB_WORKSPACE_STREAM_INPUT: usize = 1024;
 const EPUB_WORKSPACE_XML: usize = 1024;
 const EPUB_WORKSPACE_CATALOG: usize = 1536;
 const EPUB_WORKSPACE_PATH_BUF: usize = 256;
-const EPUB_WORKSPACE_BUDGET: usize = 50 * 1024;
 const TEXT_LEN: usize = 2048;
 const CACHED_TEXT_CHUNK: usize = 1024;
 const CACHED_LINE_LEN: usize = 1024;
@@ -87,6 +87,8 @@ struct EpubRenderWorkspace {
     archive: EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
 }
 
+pub const EPUB_RENDER_WORKSPACE_BYTES: usize = core::mem::size_of::<EpubRenderWorkspace>();
+
 impl EpubRenderWorkspace {
     fn new() -> Self {
         Self {
@@ -103,7 +105,7 @@ impl EpubRenderWorkspace {
 }
 
 const _: [(); 1] =
-    [(); (core::mem::size_of::<EpubRenderWorkspace>() <= EPUB_WORKSPACE_BUDGET) as usize];
+    [(); (EPUB_RENDER_WORKSPACE_BYTES <= DISPLAY_DRIVER_EPUB_WORKSPACE_LIMIT_BYTES) as usize];
 
 static mut EPUB_RENDER_WORKSPACE: MaybeUninit<EpubRenderWorkspace> = MaybeUninit::uninit();
 static mut EPUB_RENDER_WORKSPACE_READY: bool = false;

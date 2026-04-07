@@ -9,6 +9,7 @@ heapless = { version = "0.8", default-features = false }
 critical-section = "1.2"
 xteink-epub = { path = "../xteink-epub" }
 miniz_oxide = { version = "0.8", default-features = false }
+xteink-memory.workspace = true
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
