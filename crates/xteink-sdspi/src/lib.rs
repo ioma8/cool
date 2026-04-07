@@ -35,7 +35,10 @@ extern crate std;
 mod tests {
     use super::*;
     use core::convert::Infallible;
-    use embedded_hal::{delay::DelayNs, digital::{ErrorType, OutputPin}};
+    use embedded_hal::{
+        delay::DelayNs,
+        digital::{ErrorType, OutputPin},
+    };
     use embedded_sdmmc::{Block, BlockDevice, BlockIdx};
     use std::collections::VecDeque;
 

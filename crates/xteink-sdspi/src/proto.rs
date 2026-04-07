@@ -103,4 +103,3 @@ pub fn crc7(data: &[u8]) -> u8 {
     }
     (crc << 1) | 1
 }
-

@@ -4,12 +4,12 @@ use embedded_hal::{delay::DelayNs, digital::OutputPin};
 use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx};
 
 use crate::{
-    proto::{
-        ACMD41, CMD0, CMD12, CMD17, CMD18, CMD55, CMD58, CMD59, CMD8, CMD9, CardType,
-        DATA_START_BLOCK, DATA_CLOCK_HZ, Error, INIT_CLOCK_HZ, R1_IDLE_STATE,
-        R1_ILLEGAL_COMMAND, R1_READY_STATE, SdSpiOptions, crc7,
-    },
     SpiTransport,
+    proto::{
+        ACMD41, CMD0, CMD8, CMD9, CMD12, CMD17, CMD18, CMD55, CMD58, CMD59, CardType,
+        DATA_CLOCK_HZ, DATA_START_BLOCK, Error, INIT_CLOCK_HZ, R1_IDLE_STATE, R1_ILLEGAL_COMMAND,
+        R1_READY_STATE, SdSpiOptions, crc7,
+    },
 };
 
 pub struct SdSpiCard<SPI, CS, PWR, DELAY, SpiE, PinE>
@@ -151,7 +151,11 @@ where
             }
             Some(CardType::SD2)
         };
-        let arg = if card_type == Some(CardType::SD1) { 0 } else { 0x4000_0000 };
+        let arg = if card_type == Some(CardType::SD1) {
+            0
+        } else {
+            0x4000_0000
+        };
 
         let mut timeout = Timeout::new(10_000);
         while self.card_acmd(ACMD41, arg)? != R1_READY_STATE {
@@ -343,7 +347,11 @@ impl Timeout {
         }
     }
 
-    fn delay<D, SpiE, PinE>(&mut self, delay: &mut D, err: Error<SpiE, PinE>) -> Result<(), Error<SpiE, PinE>>
+    fn delay<D, SpiE, PinE>(
+        &mut self,
+        delay: &mut D,
+        err: Error<SpiE, PinE>,
+    ) -> Result<(), Error<SpiE, PinE>>
     where
         D: DelayNs,
     {

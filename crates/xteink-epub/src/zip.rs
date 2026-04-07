@@ -127,10 +127,7 @@ pub struct EpubArchive<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> {
     entry_count: usize,
 }
 
-impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
-    MAX_ENTRIES,
-    NAME_CAPACITY,
-> {
+impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<MAX_ENTRIES, NAME_CAPACITY> {
     pub const fn new() -> Self {
         Self {
             eocd: EndOfCentralDirectory::empty(),
@@ -157,7 +154,9 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
         let eocd = find_eocd(source, file_size)?;
 
         if eocd.disk_number != 0 || eocd.cd_entries_on_disk != eocd.cd_entries_total {
-            return Err(Error::InvalidArchive("multi-disk archives are not supported"));
+            return Err(Error::InvalidArchive(
+                "multi-disk archives are not supported",
+            ));
         }
 
         let entry_count = usize::from(eocd.cd_entries_total);
@@ -170,7 +169,9 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<
             .checked_add(u64::from(eocd.cd_size))
             .ok_or(Error::ArithmeticOverflow)?;
         if cd_end > file_size {
-            return Err(Error::InvalidArchive("central directory exceeds source length"));
+            return Err(Error::InvalidArchive(
+                "central directory exceeds source length",
+            ));
         }
 
         let mut cursor = cd_start;

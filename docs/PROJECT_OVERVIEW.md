@@ -7,8 +7,11 @@
 ## Top-Level Architecture
 
 - `firmware/`: hardware-facing application crate and async entrypoint
+- `simulator/`: native desktop runtime with host-backed SD directory and keyboard input
+- `crates/xteink-app/`: shared browse/reader session orchestration
 - `crates/xteink-controller/`: host-testable app/controller state transitions for browse and reader flow
 - `crates/xteink-display/`: SSD1677 display driver, framebuffer, text layout, EPUB rendering helpers
+- `crates/xteink-render/`: shared framebuffer, Bookerly glyph rendering, wrapped text, and EPUB page composition
 - `crates/xteink-epub/`: heap-conscious EPUB and ZIP parsing
 - `crates/xteink-fs/`: SD card initialization, directory paging, cache helpers, and EPUB loading/render orchestration
 - `crates/xteink-sdspi/`: SPI transport and SD card protocol implementation
@@ -29,6 +32,8 @@ The main runtime lives in `firmware/src/main.rs`. On boot it:
 6. Processes button input to navigate directories, open EPUB files, turn pages, and exit reading mode.
 
 The firmware uses `embassy`, `esp-hal`, and `heapless`, keeping the design compatible with `no_std` constraints and predictable memory usage.
+
+The simulator reuses the same controller and rendering pipeline, but swaps the hardware layer for host filesystem access, a native window, and keyboard input.
 
 ## Key Design Characteristics
 
@@ -53,6 +58,7 @@ The firmware crate is the integration layer; the crates under `crates/` hold mos
 ## Verification
 
 - Host workspace tests: `cargo test --workspace --target aarch64-apple-darwin`
+- Desktop simulator: `bash scripts/run-simulator.sh`
 - Host crate loop: `bash scripts/run-tests-host.sh`
 - Embedded firmware check: `bash scripts/check-firmware.sh`
 - Embedded fs build check: `bash scripts/run-tests-embedded-fs.sh`

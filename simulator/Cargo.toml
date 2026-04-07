@@ -1,0 +1,19 @@
+[package]
+name = "simulator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+heapless = { version = "0.8", default-features = false }
+minifb = "0.28"
+xteink-app = { path = "../crates/xteink-app" }
+xteink-browser = { path = "../crates/xteink-browser" }
+xteink-buttons = { path = "../crates/xteink-buttons" }
+xteink-epub = { path = "../crates/xteink-epub" }
+xteink-render = { path = "../crates/xteink-render" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+path = "src/lib.rs"

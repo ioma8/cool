@@ -10,7 +10,10 @@ fn debounce_emits_press_and_release_edges() {
     assert!(input.is_pressed(RawButton::Left));
     assert!(!input.was_released(RawButton::Left));
 
-    input.update(ButtonState::default(), InputManager::debounce_delay_ms() + 2);
+    input.update(
+        ButtonState::default(),
+        InputManager::debounce_delay_ms() + 2,
+    );
     assert!(input.was_released(RawButton::Left));
     assert!(!input.is_pressed(RawButton::Left));
 }
@@ -39,7 +42,12 @@ fn input_manager_handles_multiple_raw_buttons() {
 
     assert!(manager.is_pressed(RawButton::Back));
     assert!(manager.is_pressed(RawButton::Power));
-    assert_eq!(manager.state(), ButtonState::default().with_button(RawButton::Back).with_button(RawButton::Power));
+    assert_eq!(
+        manager.state(),
+        ButtonState::default()
+            .with_button(RawButton::Back)
+            .with_button(RawButton::Power)
+    );
 }
 
 #[test]

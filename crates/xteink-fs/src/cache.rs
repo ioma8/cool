@@ -52,11 +52,7 @@ pub fn sanitize_cache_name(input: &str) -> String<NAME_CAPACITY> {
     for &byte in input.as_bytes() {
         hasher.write(byte.to_ascii_uppercase());
         let ch = byte.to_ascii_uppercase();
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch
-        } else {
-            b'_'
-        };
+        let mapped = if ch.is_ascii_alphanumeric() { ch } else { b'_' };
         let _ = out.push(char::from(mapped));
         if out.len() == out.capacity() {
             break;
@@ -89,17 +85,18 @@ pub fn cache_paths_for_epub(source_path: &str, entry_name: &str) -> CachePaths {
     cache_paths_for_epub_with_root(source_path, entry_name, PRIMARY_CACHE_ROOT_DIR)
 }
 
-pub fn cache_paths_for_epub_candidates(
-    source_path: &str,
-    entry_name: &str,
-) -> [CachePaths; 2] {
+pub fn cache_paths_for_epub_candidates(source_path: &str, entry_name: &str) -> [CachePaths; 2] {
     [
         cache_paths_for_epub_with_root(source_path, entry_name, CACHE_ROOT_DIRS[0]),
         cache_paths_for_epub_with_root(source_path, entry_name, CACHE_ROOT_DIRS[1]),
     ]
 }
 
-fn cache_paths_for_epub_with_root(source_path: &str, entry_name: &str, root_dir: &str) -> CachePaths {
+fn cache_paths_for_epub_with_root(
+    source_path: &str,
+    entry_name: &str,
+    root_dir: &str,
+) -> CachePaths {
     let full_path = {
         let mut merged = String::<NAME_CAPACITY>::new();
         let _ = merged.push_str(source_path);
@@ -144,10 +141,7 @@ pub fn serialize_meta(meta: &CacheMeta, source_size: u32) -> String<256> {
     let _ = write!(
         &mut output,
         "version={}\nsource_size={}\ncontent_length={}\nsource_len={}\n",
-        meta.version,
-        meta.source_size,
-        meta.content_length,
-        source_size
+        meta.version, meta.source_size, meta.content_length, source_size
     );
     output
 }
@@ -196,7 +190,10 @@ mod tests {
     fn sanitize_cache_name_keeps_only_alnum_and_underscore() {
         let name = sanitize_cache_name("/MYBOOKS/WHEN_I WRITE/BOOK.EPU");
         assert_eq!(name.len(), 8);
-        assert!(name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'));
+        assert!(
+            name.chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        );
     }
 
     #[test]
@@ -224,11 +221,14 @@ mod tests {
         };
         let raw = serialize_meta(&meta, 12345);
         let parsed = parse_meta(raw.as_str()).expect("meta should parse");
-        assert_eq!(parsed, CacheMeta {
-            version: CACHE_VERSION,
-            source_size: 12345,
-            content_length: 4096,
-        });
+        assert_eq!(
+            parsed,
+            CacheMeta {
+                version: CACHE_VERSION,
+                source_size: 12345,
+                content_length: 4096,
+            }
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use miniz_oxide::{inflate::stream::InflateState, DataFormat};
+use miniz_oxide::{DataFormat, inflate::stream::InflateState};
 use xteink_epub::{
-    Epub, EpubArchive, EpubError, EpubEvent, EpubSource, ReaderBuffers, MAX_ARCHIVE_ENTRIES,
-    MAX_ARCHIVE_NAME_CAPACITY,
+    Epub, EpubArchive, EpubError, EpubEvent, EpubSource, MAX_ARCHIVE_ENTRIES,
+    MAX_ARCHIVE_NAME_CAPACITY, ReaderBuffers,
 };
 
 mod reference_text;
@@ -175,7 +175,12 @@ fn collect_readable_prefix(
         match epub.next_event(scratch.buffers())? {
             Some(event) => match to_owned_event(event) {
                 OwnedEvent::Text(text) => {
-                    push_readable_segment(&mut out, &text, &mut pending_space, &mut pending_initial);
+                    push_readable_segment(
+                        &mut out,
+                        &text,
+                        &mut pending_space,
+                        &mut pending_initial,
+                    );
                 }
                 OwnedEvent::ParagraphStart
                 | OwnedEvent::ParagraphEnd
@@ -303,7 +308,11 @@ fn find_heading_index(headings: &[String], expected_substrings: &str, start_at: 
 }
 
 fn replace_all_exact(src: &mut [u8], pattern: &[u8], replacement: &[u8]) {
-    assert_eq!(pattern.len(), replacement.len(), "mutated fixture keeps length constant");
+    assert_eq!(
+        pattern.len(),
+        replacement.len(),
+        "mutated fixture keeps length constant"
+    );
     let mut i = 0usize;
     while i + pattern.len() <= src.len() {
         if &src[i..i + pattern.len()] == pattern {
@@ -332,10 +341,22 @@ fn with_missing_opf_reference(mut data: Vec<u8>) -> Vec<u8> {
 #[test]
 fn container_discovery_and_opf_parsing_respect_sample_ordering() {
     let fixtures = [
-        ("test_display_none.epub", ["CSS display:none Test EPUB", "Test: Class Selector"]),
-        ("test_png_images.epub", ["PNG Image Tests", "PNG Format Test"]),
-        ("test_jpeg_images.epub", ["JPEG Image Tests", "JPEG Format Test"]),
-        ("test_mixed_images.epub", ["Mixed Image Format Tests", "JPEG in Mixed EPUB"]),
+        (
+            "test_display_none.epub",
+            ["CSS display:none Test EPUB", "Test: Class Selector"],
+        ),
+        (
+            "test_png_images.epub",
+            ["PNG Image Tests", "PNG Format Test"],
+        ),
+        (
+            "test_jpeg_images.epub",
+            ["JPEG Image Tests", "JPEG Format Test"],
+        ),
+        (
+            "test_mixed_images.epub",
+            ["Mixed Image Format Tests", "JPEG in Mixed EPUB"],
+        ),
         ("test_tables.epub", ["Some small tables", "Some big tables"]),
         ("test_kerning_ligature.epub", ["Chapter 1", "Chapter 2"]),
     ];
@@ -414,8 +435,7 @@ fn image_events_include_src_and_alt() {
 
     assert!(events.iter().any(|event| match event {
         OwnedEvent::Image { src, alt } => {
-            src.ends_with("images/png_format.png")
-                && alt.as_deref() == Some("PNG format test")
+            src.ends_with("images/png_format.png") && alt.as_deref() == Some("PNG format test")
         }
         _ => false,
     }));
@@ -427,7 +447,9 @@ fn table_markup_yields_unsupported_tag_events() {
     let events = collect_events(load_fixture("test_tables.epub"), &mut scratch).unwrap();
 
     assert!(
-        events.iter().any(|event| matches!(event, OwnedEvent::UnsupportedTag)),
+        events
+            .iter()
+            .any(|event| matches!(event, OwnedEvent::UnsupportedTag)),
         "expected tables to generate UnsupportedTag events"
     );
 }
@@ -443,7 +465,10 @@ fn malformed_or_missing_epub_inputs_are_rejected() {
 
     let mut truncated = load_fixture("test_png_images.epub");
     truncated.truncate(truncated.len() / 8);
-    assert!(collect_events(truncated, &mut scratch).is_err(), "truncated payload should be rejected");
+    assert!(
+        collect_events(truncated, &mut scratch).is_err(),
+        "truncated payload should be rejected"
+    );
 
     let missing_container = with_missing_container_entry(load_fixture("test_png_images.epub"));
     assert!(collect_events(missing_container, &mut scratch).is_err());
@@ -475,8 +500,9 @@ fn every_epub_fixture_matches_reference_text_prefix() {
         let name = *name;
 
         let mut scratch = Scratch::large_for_smoke();
-        let actual = collect_readable_prefix(load_fixture(name), &mut scratch, expected.chars().count())
-            .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+        let actual =
+            collect_readable_prefix(load_fixture(name), &mut scratch, expected.chars().count())
+                .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
 
         assert!(
             actual.starts_with(expected),
@@ -494,8 +520,9 @@ fn zero_to_production_prefix_matches_reference_text() {
         .expect("expected Zero To Production reference text");
 
     let mut scratch = Scratch::large_for_smoke();
-    let actual = collect_readable_prefix(load_fixture(name), &mut scratch, expected.chars().count())
-        .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+    let actual =
+        collect_readable_prefix(load_fixture(name), &mut scratch, expected.chars().count())
+            .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
 
     assert!(
         actual.starts_with(expected),

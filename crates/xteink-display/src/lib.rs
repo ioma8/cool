@@ -2,23 +2,18 @@
 
 use core::mem::MaybeUninit;
 
+use critical_section;
 use embedded_hal::{
     delay::DelayNs,
     digital::{InputPin, OutputPin},
     spi::SpiDevice,
 };
-use critical_section;
 #[cfg(target_arch = "riscv32")]
 use esp_rtos::CurrentThreadHandle;
 use miniz_oxide::inflate::stream::InflateState;
 use xteink_epub::{
-    Epub,
-    EpubArchive,
-    EpubEvent,
-    EpubSource,
+    Epub, EpubArchive, EpubEvent, EpubSource, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY,
     ReaderBuffers,
-    MAX_ARCHIVE_ENTRIES,
-    MAX_ARCHIVE_NAME_CAPACITY,
 };
 
 pub mod bookerly;
@@ -26,9 +21,9 @@ pub mod demo;
 pub(crate) mod pagination;
 pub(crate) mod text;
 
+pub use demo::{DemoDisplay, show_embedded_epub_demo};
 use pagination::{CachedPaginationState, CachedTextRenderer};
 use text::{TextBuffer, WrappedLine, measure_text_width};
-pub use demo::{DemoDisplay, show_embedded_epub_demo};
 
 const PHYSICAL_WIDTH: u16 = 800;
 const PHYSICAL_HEIGHT: u16 = 480;
@@ -107,7 +102,8 @@ impl EpubRenderWorkspace {
     }
 }
 
-const _: [(); 1] = [(); (core::mem::size_of::<EpubRenderWorkspace>() <= EPUB_WORKSPACE_BUDGET) as usize];
+const _: [(); 1] =
+    [(); (core::mem::size_of::<EpubRenderWorkspace>() <= EPUB_WORKSPACE_BUDGET) as usize];
 
 static mut EPUB_RENDER_WORKSPACE: MaybeUninit<EpubRenderWorkspace> = MaybeUninit::uninit();
 static mut EPUB_RENDER_WORKSPACE_READY: bool = false;
@@ -117,7 +113,10 @@ fn with_epub_render_workspace<R>(f: impl FnOnce(&mut EpubRenderWorkspace) -> R) 
         // SAFETY: access is serialized by the critical section above.
         let workspace = unsafe {
             if !EPUB_RENDER_WORKSPACE_READY {
-                core::ptr::write(core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace, EpubRenderWorkspace::new());
+                core::ptr::write(
+                    core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace,
+                    EpubRenderWorkspace::new(),
+                );
                 EPUB_RENDER_WORKSPACE_READY = true;
             }
             &mut *(core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace)
@@ -298,7 +297,13 @@ where
         source: S,
         target_page: usize,
     ) -> Result<usize, xteink_epub::EpubError> {
-        self.render_epub_page_with_text_sink_and_cancel(source, target_page, |_| Ok(()), false, || false)
+        self.render_epub_page_with_text_sink_and_cancel(
+            source,
+            target_page,
+            |_| Ok(()),
+            false,
+            || false,
+        )
     }
 
     pub fn render_epub_page_with_text_sink_and_cancel<S: EpubSource, F, C>(
@@ -436,7 +441,13 @@ where
     where
         F: FnMut(&str) -> Result<(), xteink_epub::EpubError>,
     {
-        self.render_epub_page_with_text_sink_and_cancel(source, target_page, on_text_chunk, parse_full_book, || false)
+        self.render_epub_page_with_text_sink_and_cancel(
+            source,
+            target_page,
+            on_text_chunk,
+            parse_full_book,
+            || false,
+        )
     }
 
     pub fn render_cached_text_page<R>(
@@ -598,7 +609,11 @@ where
         next_y
     }
 
-    pub fn display_buffer(&mut self, mode: RefreshMode, wait_for_ready: bool) -> Result<(), RefreshScheduleError> {
+    pub fn display_buffer(
+        &mut self,
+        mode: RefreshMode,
+        wait_for_ready: bool,
+    ) -> Result<(), RefreshScheduleError> {
         if !wait_for_ready && self.is_busy() {
             return Err(RefreshScheduleError::Busy);
         }
@@ -866,7 +881,7 @@ mod host_critical_section {
     use core::cell::RefCell;
     use std::sync::{Mutex, MutexGuard};
 
-    use critical_section::{set_impl, Impl, RawRestoreState};
+    use critical_section::{Impl, RawRestoreState, set_impl};
 
     static GLOBAL_MUTEX: Mutex<()> = Mutex::new(());
     std::thread_local!(static GLOBAL_GUARD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) });
@@ -899,7 +914,11 @@ mod tests {
     use super::*;
     use core::convert::Infallible;
     use embedded_hal::spi::Operation;
-    use std::{string::{String, ToString}, vec, vec::Vec};
+    use std::{
+        string::{String, ToString},
+        vec,
+        vec::Vec,
+    };
     use xteink_epub::{EpubError, EpubSource};
 
     const PAGINATION_EPUB_BYTES: &[u8] =
@@ -935,10 +954,7 @@ mod tests {
     }
 
     impl SpiDevice for FakeSpi {
-        fn transaction(
-            &mut self,
-            operations: &mut [Operation<'_, u8>],
-        ) -> Result<(), Self::Error> {
+        fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), Self::Error> {
             for operation in operations {
                 match operation {
                     Operation::Read(words) => {
@@ -1095,7 +1111,10 @@ mod tests {
         .unwrap();
 
         assert!(!done);
-        assert_eq!(renderer.draws, vec![(0, "one".to_string()), (10, "two".to_string())]);
+        assert_eq!(
+            renderer.draws,
+            vec![(0, "one".to_string()), (10, "two".to_string())]
+        );
     }
 
     #[test]
@@ -1141,7 +1160,9 @@ mod tests {
         let next_y = display.draw_wrapped_text(
             0,
             0,
-            "ALPHA BETA GAMMA DELTA EPSILON ZETA ETA THETA IOTA KAPPA ".repeat(20).as_str(),
+            "ALPHA BETA GAMMA DELTA EPSILON ZETA ETA THETA IOTA KAPPA "
+                .repeat(20)
+                .as_str(),
             line_height * 2,
         );
 
@@ -1166,7 +1187,12 @@ mod tests {
         let mut display = new_display();
 
         let rendered_page = display
-            .render_epub_page(SliceSource { bytes: PAGINATION_EPUB_BYTES }, 1)
+            .render_epub_page(
+                SliceSource {
+                    bytes: PAGINATION_EPUB_BYTES,
+                },
+                1,
+            )
             .unwrap();
 
         assert!(rendered_page <= 1);
@@ -1327,8 +1353,7 @@ mod tests {
     }
 
     fn new_display()
-    -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay>
-    {
+    -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay> {
         SSD1677Display::new(
             FakeSpi::default(),
             FakeOutputPin::default(),

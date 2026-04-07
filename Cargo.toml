@@ -1,5 +1,8 @@
 [workspace]
 members = [
+    "simulator",
+    "crates/xteink-app",
+    "crates/xteink-render",
     "crates/xteink-controller",
     "crates/xteink-buttons",
     "crates/xteink-input",

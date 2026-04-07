@@ -5,8 +5,8 @@ use xteink_epub::EpubSource;
 
 use crate::{
     cache::{
-        cache_paths_for_epub_candidates, parse_meta, serialize_meta, CacheMeta, CachePaths,
-        CACHE_VERSION,
+        CACHE_VERSION, CacheMeta, CachePaths, cache_paths_for_epub_candidates, parse_meta,
+        serialize_meta,
     },
     directory::ListedEntry,
     log::logln,
@@ -117,7 +117,15 @@ where
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    render_epub_page_from_entry_with_cancel(fs, display, current_path, entry, page_index, fast_refresh, || false)
+    render_epub_page_from_entry_with_cancel(
+        fs,
+        display,
+        current_path,
+        entry,
+        page_index,
+        fast_refresh,
+        || false,
+    )
 }
 
 pub fn render_epub_page_from_entry_with_cancel<SD, SPI, DC, RST, BUSY, DELAY, C>(
@@ -138,7 +146,8 @@ where
     DELAY: embedded_hal::delay::DelayNs,
     C: FnMut() -> bool,
 {
-    let source_path = join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
+    let source_path =
+        join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
     let cache_paths = cache_paths_for_epub_candidates(current_path, entry.fs_name.as_str());
     let mut should_cancel = should_cancel;
     logln!("EPUB source open begin: {}", source_path.as_str());
@@ -158,7 +167,9 @@ where
     );
 
     let mut cache_paths_for_work: Option<CachePaths> = None;
-    let rendered_page = if let Some((paths, meta)) = select_valid_cache(fs, &cache_paths, source_size) {
+    let rendered_page = if let Some((paths, meta)) =
+        select_valid_cache(fs, &cache_paths, source_size)
+    {
         cache_paths_for_work = Some(paths);
         logln!(
             "EPUB cache hit: {} v{} source_size={} content_length={}",
@@ -177,10 +188,16 @@ where
         let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
             content.read(buffer).map_err(|_| EpubError::Io)
         };
-        display.render_cached_text_page_with_cancel(&mut read_text, page_index, &mut should_cancel)?
+        display.render_cached_text_page_with_cancel(
+            &mut read_text,
+            page_index,
+            &mut should_cancel,
+        )?
     } else {
         logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
-        let source = fs.open_epub_source(source_path.as_str()).map_err(|_| EpubError::Io)?;
+        let source = fs
+            .open_epub_source(source_path.as_str())
+            .map_err(|_| EpubError::Io)?;
         let chosen = choose_cache_root(fs, &cache_paths).or_else(|| cache_paths.first().cloned());
         if let Some(chosen) = chosen {
             cache_paths_for_work = Some(chosen);
@@ -256,7 +273,10 @@ fn select_valid_cache<SD: SdFilesystem>(
     None
 }
 
-fn choose_cache_root<SD: SdFilesystem>(fs: &SD, candidates: &[CachePaths; 2]) -> Option<CachePaths> {
+fn choose_cache_root<SD: SdFilesystem>(
+    fs: &SD,
+    candidates: &[CachePaths; 2],
+) -> Option<CachePaths> {
     candidates
         .iter()
         .find(|paths| fs.ensure_directory(paths.directory.as_str()).is_ok())
@@ -290,8 +310,16 @@ fn read_cached_progress<SD: SdFilesystem>(fs: &SD, paths: &CachePaths) -> Option
         .and_then(|value| usize::try_from(value).ok())
 }
 
-fn write_cached_progress<SD: SdFilesystem>(fs: &SD, path: &str, page: usize) -> Result<(), EpubError> {
-    write_u32_le(fs, path, u32::try_from(page).map_err(|_| EpubError::OutOfSpace)?)
+fn write_cached_progress<SD: SdFilesystem>(
+    fs: &SD,
+    path: &str,
+    page: usize,
+) -> Result<(), EpubError> {
+    write_u32_le(
+        fs,
+        path,
+        u32::try_from(page).map_err(|_| EpubError::OutOfSpace)?,
+    )
 }
 
 fn read_u32_le<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<Option<u32>, EpubError> {

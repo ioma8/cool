@@ -35,7 +35,9 @@ pub fn normalize_path(path: &str) -> Result<String<PATH_CAPACITY>, PathError> {
         if normalized.as_str() != "/" && !normalized.is_empty() {
             normalized.push('/').map_err(|_| PathError::TooLong)?;
         }
-        normalized.push_str(component).map_err(|_| PathError::TooLong)?;
+        normalized
+            .push_str(component)
+            .map_err(|_| PathError::TooLong)?;
     }
 
     if normalized.is_empty() {
@@ -100,7 +102,9 @@ mod tests {
     #[test]
     fn strips_duplicate_slashes() {
         assert_eq!(
-            join_child_path("/books/", "/chapter.epub").unwrap().as_str(),
+            join_child_path("/books/", "/chapter.epub")
+                .unwrap()
+                .as_str(),
             "/books/chapter.epub"
         );
     }
@@ -116,7 +120,9 @@ mod tests {
     #[test]
     fn normalizes_parent_directory_segments() {
         assert_eq!(
-            normalize_path("/MYBOOKS/CH1/../WHEN_I~1.EPU").unwrap().as_str(),
+            normalize_path("/MYBOOKS/CH1/../WHEN_I~1.EPU")
+                .unwrap()
+                .as_str(),
             "/MYBOOKS/WHEN_I~1.EPU"
         );
     }

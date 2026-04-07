@@ -1,6 +1,7 @@
 # Cool
 
 Rust `no_std` e-reader firmware for the Xteink X4 device (ESP32-C3 + SSD1677 e-ink display).
+The repo now also includes a native desktop simulator that reuses the same monochrome framebuffer and Bookerly text rendering path as the device.
 
 ## Features
 
@@ -41,15 +42,18 @@ The firmware uses calibrated raw ADC thresholds from `xteink-buttons`. The front
 ├── crates/
 │   ├── xteink-browser/  # Paged browser state machine for SD directory navigation
 │   ├── xteink-buttons/  # ADC threshold mapping and button-state logic
+│   ├── xteink-app/      # Shared browse/reader session orchestration
 │   ├── xteink-controller/ # Host-testable app/controller state transitions
 │   ├── xteink-display/  # SSD1677 framebuffer, text layout, render helpers
 │   ├── xteink-epub/     # EPUB and ZIP parsing for embedded use
+│   ├── xteink-render/   # Shared framebuffer, Bookerly text, and EPUB page rendering
 │   ├── xteink-fs/       # SD filesystem access and reader/browser orchestration
 │   ├── xteink-input/    # Debouncing and button event tracking
 │   ├── xteink-power/    # Wakeup classification and idle-timeout policy
 │   └── xteink-sdspi/    # SD-over-SPI transport and protocol layer
 ├── docs/                # Hardware behavior documentation
-└── firmware/            # ESP32-C3 application crate using esp-hal
+├── firmware/            # ESP32-C3 application crate using esp-hal
+└── simulator/           # Native desktop simulator binary and host-backed SD root
 ```
 
 ## Architecture
@@ -62,6 +66,8 @@ firmware/src/
 Custom logic now lives in dedicated crates:
 
 - `xteink-display` drives the e-ink panel and rendering pipeline
+- `xteink-render` owns the shared framebuffer, font rendering, wrapping, and EPUB page composition
+- `xteink-app` owns shared browse/reader session flow for non-hardware runtimes
 - `xteink-fs` and `xteink-sdspi` provide SD-backed browsing and file access
 - `xteink-epub` parses EPUB content for on-device rendering
 - `xteink-buttons` and `xteink-input` handle raw input mapping and button events
@@ -96,6 +102,21 @@ For a full host-side workspace test run:
 ```bash
 cargo test --workspace --target aarch64-apple-darwin
 ```
+
+## Simulator
+
+The desktop simulator renders the same 1-bit framebuffer the device uses and reads books from `simulator/sdcard/`.
+
+```bash
+bash scripts/run-simulator.sh
+```
+
+Keyboard mapping:
+
+- `Left` / `Right` / `Up` / `Down`: navigation
+- `Enter`: open selected entry
+- `Backspace`: go to parent / back
+- `Escape`: power
 
 ## Flashing
 

@@ -68,7 +68,13 @@ impl PagedBrowser {
         self.selected = selected.min(page_len.saturating_sub(1));
     }
 
-    pub fn handle(&mut self, input: Input, page_len: usize, has_prev: bool, has_next: bool) -> PagedAction {
+    pub fn handle(
+        &mut self,
+        input: Input,
+        page_len: usize,
+        has_prev: bool,
+        has_next: bool,
+    ) -> PagedAction {
         if page_len == 0 {
             return PagedAction::None;
         }
@@ -140,7 +146,8 @@ impl Browser {
     }
 
     pub fn selected_entry<'a>(&self, entries: &'a [Entry<'a>]) -> Option<&'a Entry<'a>> {
-        self.selected_index(entries.len()).and_then(|index| entries.get(index))
+        self.selected_index(entries.len())
+            .and_then(|index| entries.get(index))
     }
 
     pub fn handle(&mut self, input: Input, len: usize) -> Action {
@@ -218,9 +225,15 @@ mod tests {
     fn down_returns_the_selected_entry() {
         let mut browser = Browser::new();
 
-        assert_eq!(browser.handle(Input::Down, ENTRIES.len()), Action::Selected(0));
+        assert_eq!(
+            browser.handle(Input::Down, ENTRIES.len()),
+            Action::Selected(0)
+        );
         assert_eq!(browser.handle(Input::Right, ENTRIES.len()), Action::None);
-        assert_eq!(browser.handle(Input::Down, ENTRIES.len()), Action::Selected(1));
+        assert_eq!(
+            browser.handle(Input::Down, ENTRIES.len()),
+            Action::Selected(1)
+        );
     }
 
     #[test]
@@ -239,9 +252,15 @@ mod tests {
         let mut browser = PagedBrowser::new(3);
         browser.set_page(0, 3, 0);
 
-        assert_eq!(browser.handle(Input::Right, 3, false, true), PagedAction::Redraw);
+        assert_eq!(
+            browser.handle(Input::Right, 3, false, true),
+            PagedAction::Redraw
+        );
         assert_eq!(browser.selected_index(3), Some(1));
-        assert_eq!(browser.handle(Input::Right, 3, false, true), PagedAction::Redraw);
+        assert_eq!(
+            browser.handle(Input::Right, 3, false, true),
+            PagedAction::Redraw
+        );
         assert_eq!(browser.selected_index(3), Some(2));
         assert_eq!(
             browser.handle(Input::Right, 3, false, true),
@@ -285,7 +304,10 @@ mod tests {
         let mut browser = PagedBrowser::new(3);
         browser.set_page(6, 3, 1);
 
-        assert_eq!(browser.handle(Input::Down, 3, true, true), PagedAction::OpenSelected(7));
+        assert_eq!(
+            browser.handle(Input::Down, 3, true, true),
+            PagedAction::OpenSelected(7)
+        );
     }
 
     #[test]

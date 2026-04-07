@@ -1,21 +1,75 @@
 // Auto-generated from pandoc -t plain for fixtures pandoc can parse.
 pub const EPUB_REFERENCE_CASES: &[(&str, &str)] = &[
-    ("Data-Oriented Programming_ Reduce software complexity - Yehonathan Sharvit.epub", "inside front cover Principles of data-oriented programming Data-Oriented Programming Reduce software complexity Yehonathan Sharvit Forewords by Michael T. Nygard and Ryan Singer To comment go to liveBook Manning Shelter Island For more information on this "),
-    ("Domain-Driven Design - Eric Evans.epub", "Domain-Driven Design Tackling Complexity in the Heart of Software Eric Evans Upper Saddle River, NJ • Boston • Indianapolis • San Francisco New York • Toronto • Montreal • London • Munich • Paris • Madrid Capetown • Sydney • Tokyo • Singapore • Mexico City"),
-    ("Gödel, Escher, Bach_ An Eternal Golden Braid - Douglas R. Hofstadter.epub", "Contents Overview viii List of Illustrations xiv Words of Thanks xix Part I: GEB Introduction: A Musico-Logical Offering 3 Three-Part Invention 29 Chapter I: The MU-puzzle 33 Two-Part Invention 43 Chapter II: Meaning and Form in Mathematics 46 Sonata for U"),
-    ("Happiness Trap, The - Russ Harris.epub", "The cases mentioned in this book are all based on real people. However, their names and key distinguishing details have been changed to prevent identification. First published 2007 Exisle Publishing Limited ‘Moonrising’, Narone Creek Road, Wollombi, NSW 23"),
-    ("Idiomatic Rust - Brenden Matthews.epub", "Idiomatic Rust Code like a Rustacean Brenden Matthews To comment go to livebook. Manning Shelter Island For more information on this and other Manning titles go to manning.com. copyright For online information and ordering of this and other Manning books, "),
-    ("Radical Acceptance - Tara Brach.epub", "RADICAL ACCEPTANCE Embracing Your Life with the Heart of a Buddha TARA BRACH, PH.D. BANTAM BOOKS NEW YORK TORONTO LONDON SYDNEY AUCKLAND RADICAL ACCEPTANCE A Bantam Book PUBLISHING HISTORY Bantam hardcover edition published June 2003 Bantam trade paperback"),
-    ("Rust for Rustaceans - Jon Gjengset.epub", "List of Listings 1. Listing 1-1: Values, variables, and pointers 2. Listing 1-2: Illegal flows that the borrow checker will catch 3. Listing 1-3: Moving and copying semantics 4. Listing 1-4: Rust assumes that shared references are immutable. 5. Listing 1-5"),
-    ("Rádce pravého muže - Glover, Robert A_.epub", "------------------------------------------------------------------------ Kniha byla zakoupena na serveru alza.cz. Kupující: Jakub Kolcar Adresa: Cihelni 575, 73801 Frydek-Mistek 1, cz ID 2067-46336263466732336622-13573-652 Upozorňujeme, že kniha je určena "),
-    ("Scout Mindset_ Why Some People See Things Clearly and Others Don't, The - Julia Galef.epub", "Portfolio / Penguin An imprint of Penguin Random House LLC penguinrandomhouse.com Copyright © 2021 by Julia Galef Penguin supports copyright. Copyright fuels creativity, encourages diverse voices, promotes free speech, and creates a vibrant culture. Thank "),
-    ("The Scout Mindset Why Some People See Things Clearly and Others Dont (Julia Galef) (z-library.sk, 1lib.sk, z-lib.sk).epub", "Portfolio / Penguin An imprint of Penguin Random House LLC penguinrandomhouse.com Copyright © 2021 by Julia Galef Penguin supports copyright. Copyright fuels creativity, encourages diverse voices, promotes free speech, and creates a vibrant culture. Thank "),
-    ("Tiny Experiments_ How to Live Freely in a Goal-Obsessed World - Anne-Laure Le Cunff.epub", "Praise for Tiny Experiments “I loved this profound, practical, and generous book. Through the ingenious lens of the tiny experiment, Anne-Laure Le Cunff shows how we can jettison arduous and dispiriting attempts at self-improvement in favor of achievable a"),
-    ("Zero To Production In Rust - Luca Palmieri.epub", "1. Title Page 2. Cover 3. Table of Contents Zero To Production In Rust Foreword When you read these lines, Rust has achieved its biggest goal: make an offer to programmers to write their production systems in a different language. By the end of the book, i"),
-    ("test_display_none.epub", "CSS display:none Test EPUB This EPUB tests that elements with CSS display:none are correctly hidden during rendering. Each chapter exercises a different scenario. For each chapter, the PASS/FAIL criteria are listed. Hidden content is marked with in the sou"),
-    ("test_jpeg_images.epub", "JPEG Image Tests This EPUB tests JPEG image rendering. Navigate through chapters to verify each test case. Test Plan: - Grayscale rendering (4 levels) - Image centering - Large image scaling - Cache performance JPEG Format Test Basic JPEG decoding test. If"),
-    ("test_kerning_ligature.epub", "Kerning & Ligature Edge Cases Chapter 1 The Typographer’s Affliction AVERY WATT always wanted to be a typographer. Years of careful study at Yale had taught him that every typeface holds a secret: the negative space between letters matters as much as the s"),
-    ("test_mixed_images.epub", "Mixed Image Format Tests This EPUB contains both JPEG and PNG images. Tests format detection and mixed rendering. JPEG in Mixed EPUB This is a JPEG image: PNG in Mixed EPUB This is a PNG image: Both Formats on One Page JPEG image: PNG image: Both should re"),
-    ("test_png_images.epub", "PNG Image Tests This EPUB tests PNG image rendering. Navigate through chapters to verify each test case. Test Plan: - PNG decoding (no crash) - Grayscale rendering (4 levels) - Image centering - Large image scaling PNG Format Test Basic PNG decoding test. "),
-    ("test_tables.epub", "Some small tables 2 columns, 2 rows Col 1 Col 2 ------- ------- Some Text 3 columns, 2 rows Col 1 Col 2 Col 3 ------- ------- ------- Some Text Oho Some big tables 2 columns, 1 row ---------------------------------------------------------------------------"),
+    (
+        "Data-Oriented Programming_ Reduce software complexity - Yehonathan Sharvit.epub",
+        "inside front cover Principles of data-oriented programming Data-Oriented Programming Reduce software complexity Yehonathan Sharvit Forewords by Michael T. Nygard and Ryan Singer To comment go to liveBook Manning Shelter Island For more information on this ",
+    ),
+    (
+        "Domain-Driven Design - Eric Evans.epub",
+        "Domain-Driven Design Tackling Complexity in the Heart of Software Eric Evans Upper Saddle River, NJ • Boston • Indianapolis • San Francisco New York • Toronto • Montreal • London • Munich • Paris • Madrid Capetown • Sydney • Tokyo • Singapore • Mexico City",
+    ),
+    (
+        "Gödel, Escher, Bach_ An Eternal Golden Braid - Douglas R. Hofstadter.epub",
+        "Contents Overview viii List of Illustrations xiv Words of Thanks xix Part I: GEB Introduction: A Musico-Logical Offering 3 Three-Part Invention 29 Chapter I: The MU-puzzle 33 Two-Part Invention 43 Chapter II: Meaning and Form in Mathematics 46 Sonata for U",
+    ),
+    (
+        "Happiness Trap, The - Russ Harris.epub",
+        "The cases mentioned in this book are all based on real people. However, their names and key distinguishing details have been changed to prevent identification. First published 2007 Exisle Publishing Limited ‘Moonrising’, Narone Creek Road, Wollombi, NSW 23",
+    ),
+    (
+        "Idiomatic Rust - Brenden Matthews.epub",
+        "Idiomatic Rust Code like a Rustacean Brenden Matthews To comment go to livebook. Manning Shelter Island For more information on this and other Manning titles go to manning.com. copyright For online information and ordering of this and other Manning books, ",
+    ),
+    (
+        "Radical Acceptance - Tara Brach.epub",
+        "RADICAL ACCEPTANCE Embracing Your Life with the Heart of a Buddha TARA BRACH, PH.D. BANTAM BOOKS NEW YORK TORONTO LONDON SYDNEY AUCKLAND RADICAL ACCEPTANCE A Bantam Book PUBLISHING HISTORY Bantam hardcover edition published June 2003 Bantam trade paperback",
+    ),
+    (
+        "Rust for Rustaceans - Jon Gjengset.epub",
+        "List of Listings 1. Listing 1-1: Values, variables, and pointers 2. Listing 1-2: Illegal flows that the borrow checker will catch 3. Listing 1-3: Moving and copying semantics 4. Listing 1-4: Rust assumes that shared references are immutable. 5. Listing 1-5",
+    ),
+    (
+        "Rádce pravého muže - Glover, Robert A_.epub",
+        "------------------------------------------------------------------------ Kniha byla zakoupena na serveru alza.cz. Kupující: Jakub Kolcar Adresa: Cihelni 575, 73801 Frydek-Mistek 1, cz ID 2067-46336263466732336622-13573-652 Upozorňujeme, že kniha je určena ",
+    ),
+    (
+        "Scout Mindset_ Why Some People See Things Clearly and Others Don't, The - Julia Galef.epub",
+        "Portfolio / Penguin An imprint of Penguin Random House LLC penguinrandomhouse.com Copyright © 2021 by Julia Galef Penguin supports copyright. Copyright fuels creativity, encourages diverse voices, promotes free speech, and creates a vibrant culture. Thank ",
+    ),
+    (
+        "The Scout Mindset Why Some People See Things Clearly and Others Dont (Julia Galef) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+        "Portfolio / Penguin An imprint of Penguin Random House LLC penguinrandomhouse.com Copyright © 2021 by Julia Galef Penguin supports copyright. Copyright fuels creativity, encourages diverse voices, promotes free speech, and creates a vibrant culture. Thank ",
+    ),
+    (
+        "Tiny Experiments_ How to Live Freely in a Goal-Obsessed World - Anne-Laure Le Cunff.epub",
+        "Praise for Tiny Experiments “I loved this profound, practical, and generous book. Through the ingenious lens of the tiny experiment, Anne-Laure Le Cunff shows how we can jettison arduous and dispiriting attempts at self-improvement in favor of achievable a",
+    ),
+    (
+        "Zero To Production In Rust - Luca Palmieri.epub",
+        "1. Title Page 2. Cover 3. Table of Contents Zero To Production In Rust Foreword When you read these lines, Rust has achieved its biggest goal: make an offer to programmers to write their production systems in a different language. By the end of the book, i",
+    ),
+    (
+        "test_display_none.epub",
+        "CSS display:none Test EPUB This EPUB tests that elements with CSS display:none are correctly hidden during rendering. Each chapter exercises a different scenario. For each chapter, the PASS/FAIL criteria are listed. Hidden content is marked with in the sou",
+    ),
+    (
+        "test_jpeg_images.epub",
+        "JPEG Image Tests This EPUB tests JPEG image rendering. Navigate through chapters to verify each test case. Test Plan: - Grayscale rendering (4 levels) - Image centering - Large image scaling - Cache performance JPEG Format Test Basic JPEG decoding test. If",
+    ),
+    (
+        "test_kerning_ligature.epub",
+        "Kerning & Ligature Edge Cases Chapter 1 The Typographer’s Affliction AVERY WATT always wanted to be a typographer. Years of careful study at Yale had taught him that every typeface holds a secret: the negative space between letters matters as much as the s",
+    ),
+    (
+        "test_mixed_images.epub",
+        "Mixed Image Format Tests This EPUB contains both JPEG and PNG images. Tests format detection and mixed rendering. JPEG in Mixed EPUB This is a JPEG image: PNG in Mixed EPUB This is a PNG image: Both Formats on One Page JPEG image: PNG image: Both should re",
+    ),
+    (
+        "test_png_images.epub",
+        "PNG Image Tests This EPUB tests PNG image rendering. Navigate through chapters to verify each test case. Test Plan: - PNG decoding (no crash) - Grayscale rendering (4 levels) - Image centering - Large image scaling PNG Format Test Basic PNG decoding test. ",
+    ),
+    (
+        "test_tables.epub",
+        "Some small tables 2 columns, 2 rows Col 1 Col 2 ------- ------- Some Text 3 columns, 2 rows Col 1 Col 2 Col 3 ------- ------- ------- Some Text Oho Some big tables 2 columns, 1 row ---------------------------------------------------------------------------",
+    ),
 ];

@@ -1,0 +1,149 @@
+use xteink_app::{AppStorage, DirectoryPage, DirectoryPageInfo, ListedEntry, Session};
+use xteink_browser::EntryKind;
+use xteink_buttons::Button;
+
+struct FakeStorage;
+
+impl AppStorage for FakeStorage {
+    type Error = ();
+
+    fn list_directory_page(
+        &self,
+        _path: &str,
+        _page_start: usize,
+        _page_size: usize,
+    ) -> Result<DirectoryPage, Self::Error> {
+        Ok(DirectoryPage {
+            entries: heapless::Vec::from_slice(&[ListedEntry::epub("book.epub")]).expect("entry"),
+            info: DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        })
+    }
+
+    fn render_epub_from_entry(
+        &self,
+        _framebuffer: &mut xteink_render::Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+    ) -> Result<usize, Self::Error> {
+        Ok(0)
+    }
+
+    fn render_epub_page_from_entry(
+        &self,
+        _framebuffer: &mut xteink_render::Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<usize, Self::Error> {
+        Ok(target_page)
+    }
+}
+
+struct MultiStorage;
+
+impl AppStorage for MultiStorage {
+    type Error = ();
+
+    fn list_directory_page(
+        &self,
+        path: &str,
+        _page_start: usize,
+        page_size: usize,
+    ) -> Result<DirectoryPage, Self::Error> {
+        let entries = if path == "/" {
+            [
+                ListedEntry::directory("Books"),
+                ListedEntry::epub("a.epub"),
+                ListedEntry::epub("b.epub"),
+            ]
+        } else {
+            [
+                ListedEntry::epub("inside.epub"),
+                ListedEntry::epub("tail.epub"),
+                ListedEntry::epub("extra.epub"),
+            ]
+        };
+        let mut listed = heapless::Vec::new();
+        for entry in entries.into_iter().take(page_size) {
+            let _ = listed.push(entry);
+        }
+        Ok(DirectoryPage {
+            entries: listed,
+            info: DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        })
+    }
+
+    fn render_epub_from_entry(
+        &self,
+        framebuffer: &mut xteink_render::Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+    ) -> Result<usize, Self::Error> {
+        framebuffer.draw_text(4, 4, "epub");
+        Ok(0)
+    }
+
+    fn render_epub_page_from_entry(
+        &self,
+        _framebuffer: &mut xteink_render::Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<usize, Self::Error> {
+        Ok(target_page)
+    }
+}
+
+#[test]
+fn opening_an_epub_from_loaded_directory_transitions_to_reader_page_zero() {
+    let mut session = Session::new(FakeStorage, 8);
+    session.bootstrap().expect("bootstrap should work");
+
+    session
+        .handle_button(Button::Back)
+        .expect("open should work");
+
+    assert_eq!(
+        session.screen_mode(),
+        xteink_controller::ScreenMode::Reading
+    );
+    assert_eq!(session.reader_page(), 0);
+    assert!(
+        session
+            .framebuffer()
+            .bytes()
+            .iter()
+            .any(|byte| *byte != 0xFF)
+    );
+    assert_eq!(session.current_entries()[0].kind, EntryKind::Epub);
+}
+
+#[test]
+fn bootstrap_uses_configured_page_size_instead_of_single_entry() {
+    let mut session = Session::new(MultiStorage, 8);
+
+    session.bootstrap().expect("bootstrap should work");
+
+    assert_eq!(session.current_entries().len(), 3);
+}
+
+#[test]
+fn opening_directory_updates_current_path_and_loads_child_entries() {
+    let mut session = Session::new(MultiStorage, 8);
+    session.bootstrap().expect("bootstrap should work");
+
+    session
+        .handle_button(Button::Back)
+        .expect("directory open should work");
+
+    assert_eq!(session.current_path(), "/Books");
+    assert_eq!(session.current_entries()[0].label.as_str(), "inside.epub");
+}

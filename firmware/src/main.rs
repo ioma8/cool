@@ -1,33 +1,31 @@
 #![no_std]
 #![no_main]
 
-use core::{
-    cell::RefCell,
-};
+use core::cell::RefCell;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
+use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex, raw::NoopRawMutex};
 use embassy_sync::channel::{Channel, Receiver, Sender};
-use embassy_futures::yield_now;
 use esp_backtrace as _;
 use esp_hal::{
     analog::adc::{Adc, AdcConfig, Attenuation},
     clock::CpuClock,
     delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPinWithResistors},
-    spi::master::{Config as SpiConfig, Spi},
     peripherals::APB_SARADC,
+    spi::master::{Config as SpiConfig, Spi},
     time::Rate,
 };
 use heapless::String;
-use xteink_controller::{AppController, BrowserRefresh, ControllerCommand, UiEntry};
-use xteink_fs::{
-    init_sd, render_epub_from_entry, render_epub_page_from_entry, EpubRefreshMode, ListedEntry,
-    MAX_ENTRIES, SdFilesystem,
-};
-use xteink_display::{bookerly, DISPLAY_HEIGHT, DISPLAY_WIDTH, SSD1677Display};
 use xteink_buttons::{
     Button as RawButton, ButtonState, get_button_from_adc_1, get_button_from_adc_2,
+};
+use xteink_controller::{AppController, BrowserRefresh, ControllerCommand, UiEntry};
+use xteink_display::{DISPLAY_HEIGHT, DISPLAY_WIDTH, SSD1677Display, bookerly};
+use xteink_fs::{
+    EpubRefreshMode, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
+    render_epub_page_from_entry,
 };
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
@@ -35,18 +33,20 @@ use embedded_hal::spi::{SpiBus, SpiDevice};
 esp_bootloader_esp_idf::esp_app_desc!();
 const BUTTON_EVENT_CHANNEL_CAPACITY: usize = 8;
 
-static BUTTON_EVENT_CHANNEL: Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY> =
-    Channel::new();
-static APP_DIRECTORY_PAGE: Mutex<CriticalSectionRawMutex, xteink_fs::DirectoryPage> = Mutex::new(
-    xteink_fs::DirectoryPage {
+static BUTTON_EVENT_CHANNEL: Channel<
+    CriticalSectionRawMutex,
+    RawButton,
+    BUTTON_EVENT_CHANNEL_CAPACITY,
+> = Channel::new();
+static APP_DIRECTORY_PAGE: Mutex<CriticalSectionRawMutex, xteink_fs::DirectoryPage> =
+    Mutex::new(xteink_fs::DirectoryPage {
         entries: heapless::Vec::new(),
         info: xteink_fs::DirectoryPageInfo {
             page_start: 0,
             has_prev: false,
             has_next: false,
         },
-    },
-);
+    });
 #[inline]
 fn app_directory_page_with<R>(f: impl FnOnce(&xteink_fs::DirectoryPage) -> R) -> R {
     APP_DIRECTORY_PAGE.lock(|page| f(page))
@@ -65,7 +65,8 @@ fn load_browser_directory_page<SD: SdFilesystem>(
 ) -> Result<(), xteink_fs::FsError> {
     app_directory_page_with_mut(|page| {
         page.entries.clear();
-        let info = sd.list_directory_page(current_path, page_start, page_size, &mut page.entries)?;
+        let info =
+            sd.list_directory_page(current_path, page_start, page_size, &mut page.entries)?;
         page.info = info;
         Ok(())
     })
@@ -137,9 +138,9 @@ fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
         w.onetime_channel().bits(channel);
         w.onetime_atten().bits(masked)
     });
-    APB_SARADC::regs().onetime_sample().modify(|_, w| {
-        w.onetime_start().set_bit()
-    });
+    APB_SARADC::regs()
+        .onetime_sample()
+        .modify(|_, w| w.onetime_start().set_bit());
 
     while !APB_SARADC::regs().int_raw().read().adc1_done().bit() {}
 
@@ -225,11 +226,7 @@ async fn main(spawner: Spawner) -> ! {
         let mut display = display;
         let mut pending_display_refresh = PendingDisplayRefresh::None;
         display.init();
-        render_error_screen(
-            &mut display,
-            "SD init failed",
-            &mut pending_display_refresh,
-        );
+        render_error_screen(&mut display, "SD init failed", &mut pending_display_refresh);
         service_display_refresh(&mut display, &mut pending_display_refresh);
         loop {
             yield_now().await;
@@ -279,25 +276,13 @@ async fn main(spawner: Spawner) -> ! {
     let mut init_display = display;
     init_display.init();
     spawner.must_spawn(input_task(sender, power_button));
-    ui_task(
-        sd,
-        init_display,
-        page_size,
-        controller,
-        receiver,
-    )
-    .await;
+    ui_task(sd, init_display, page_size, controller, receiver).await;
     loop {}
 }
 
 #[embassy_executor::task]
 async fn input_task(
-    sender: Sender<
-        'static,
-        CriticalSectionRawMutex,
-        RawButton,
-        BUTTON_EVENT_CHANNEL_CAPACITY,
-    >,
+    sender: Sender<'static, CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
     power_button: Input<'static>,
 ) {
     let mut last_raw_state = ButtonState::default();
@@ -367,12 +352,7 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
     mut display: SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     page_size: usize,
     mut controller: AppController,
-    receiver: Receiver<
-        'static,
-        CriticalSectionRawMutex,
-        RawButton,
-        BUTTON_EVENT_CHANNEL_CAPACITY,
-    >,
+    receiver: Receiver<'static, CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
 ) where
     SD: xteink_fs::SdFilesystem,
     SPI: SpiDevice,
@@ -401,7 +381,11 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
             for entry in page.entries.iter() {
                 let _ = ui_entries.push(listed_entry_to_ui_entry(entry));
             }
-            controller.handle_button(button, ui_entries.as_slice(), controller_page_info(page.info))
+            controller.handle_button(
+                button,
+                ui_entries.as_slice(),
+                controller_page_info(page.info),
+            )
         });
 
         handle_controller_command(
@@ -485,8 +469,12 @@ fn handle_controller_command<SD, SPI, DC, RST, BUSY, DELAY>(
                 Ok(result) => {
                     controller.apply_epub_opened(result.rendered_page);
                     match result.refresh {
-                        EpubRefreshMode::Full => pending_display_refresh.request(BrowserRefresh::Full),
-                        EpubRefreshMode::Fast => pending_display_refresh.request(BrowserRefresh::Fast),
+                        EpubRefreshMode::Full => {
+                            pending_display_refresh.request(BrowserRefresh::Full)
+                        }
+                        EpubRefreshMode::Fast => {
+                            pending_display_refresh.request(BrowserRefresh::Fast)
+                        }
                     }
                 }
                 Err(err) => {
@@ -513,8 +501,12 @@ fn handle_controller_command<SD, SPI, DC, RST, BUSY, DELAY>(
                 Ok(result) => {
                     controller.apply_reader_page_rendered(result.rendered_page);
                     match result.refresh {
-                        EpubRefreshMode::Full => pending_display_refresh.request(BrowserRefresh::Full),
-                        EpubRefreshMode::Fast => pending_display_refresh.request(BrowserRefresh::Fast),
+                        EpubRefreshMode::Full => {
+                            pending_display_refresh.request(BrowserRefresh::Full)
+                        }
+                        EpubRefreshMode::Fast => {
+                            pending_display_refresh.request(BrowserRefresh::Fast)
+                        }
                     }
                 }
                 Err(err) => {
@@ -547,7 +539,9 @@ fn ui_entry_to_listed_entry(entry: &UiEntry) -> ListedEntry {
     }
 }
 
-fn controller_page_info(info: xteink_fs::DirectoryPageInfo) -> xteink_controller::DirectoryPageInfo {
+fn controller_page_info(
+    info: xteink_fs::DirectoryPageInfo,
+) -> xteink_controller::DirectoryPageInfo {
     xteink_controller::DirectoryPageInfo {
         page_start: info.page_start,
         has_prev: info.has_prev,
@@ -651,7 +645,11 @@ fn render_loading_popover<SPI, DC, RST, BUSY, DELAY>(
     }
 
     display.draw_text(left + 16, top + 16, title);
-    display.draw_text(left + 16, top + 16 + bookerly::BOOKERLY.line_height_px() + 8, subtitle);
+    display.draw_text(
+        left + 16,
+        top + 16 + bookerly::BOOKERLY.line_height_px() + 8,
+        subtitle,
+    );
     pending_display_refresh.request(BrowserRefresh::Fast);
 }
 
@@ -679,7 +677,10 @@ fn service_display_refresh<SPI, DC, RST, BUSY, DELAY>(
     }
 }
 
-fn pressed_button_from_state(previous_state: ButtonState, current_state: ButtonState) -> Option<RawButton> {
+fn pressed_button_from_state(
+    previous_state: ButtonState,
+    current_state: ButtonState,
+) -> Option<RawButton> {
     let new_press = ButtonState {
         state: current_state.state & !previous_state.state,
     };

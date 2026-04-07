@@ -1,5 +1,7 @@
 /target
 .cool/
 test/epubs/
+simulator/sdcard/*
+!simulator/sdcard/.gitkeep
 .DS_Store
 test/.DS_Store

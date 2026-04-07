@@ -247,7 +247,8 @@ fn join_child_path(parent: &str, child: &str) -> Result<String<PATH_CAPACITY>, (
         path.push('/').map_err(|_| ())?;
     }
 
-    path.push_str(child.trim_start_matches('/')).map_err(|_| ())?;
+    path.push_str(child.trim_start_matches('/'))
+        .map_err(|_| ())?;
     Ok(path)
 }
 

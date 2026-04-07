@@ -1,10 +1,13 @@
 use core::{cell::RefCell, convert::Infallible, fmt::Write};
 
 use embassy_embedded_hal::SetConfig;
-use embassy_sync::blocking_mutex::{raw::NoopRawMutex, Mutex};
+use embassy_sync::blocking_mutex::{Mutex, raw::NoopRawMutex};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::spi::{ErrorType as SpiErrorType, SpiBus};
-use embedded_sdmmc::{DirEntry, File, LfnBuffer, Mode, RawDirectory, RawVolume, ShortFileName, TimeSource, Timestamp, VolumeIdx, VolumeManager};
+use embedded_sdmmc::{
+    DirEntry, File, LfnBuffer, Mode, RawDirectory, RawVolume, ShortFileName, TimeSource, Timestamp,
+    VolumeIdx, VolumeManager,
+};
 use heapless::{String, Vec};
 use xteink_browser::EntryKind;
 use xteink_epub::{EpubError, EpubSource};
@@ -90,10 +93,13 @@ where
     type Error = SdTransportError<SPI::Error>;
 
     fn set_clock_hz(&mut self, hz: u32) -> Result<(), Self::Error> {
-        let config = self.base_config.with_frequency(esp_hal::time::Rate::from_hz(hz));
+        let config = self
+            .base_config
+            .with_frequency(esp_hal::time::Rate::from_hz(hz));
         self.bus.lock(|cell| {
             let mut bus = cell.borrow_mut();
-            bus.set_config(&config).map_err(|_| SdTransportError::SetConfig)
+            bus.set_config(&config)
+                .map_err(|_| SdTransportError::SetConfig)
         })
     }
 
@@ -101,8 +107,7 @@ where
         self.bus.lock(|cell| {
             let mut bus = cell.borrow_mut();
             let mut word = [byte];
-            SpiBus::transfer_in_place(&mut *bus, &mut word)
-                .map_err(SdTransportError::Spi)?;
+            SpiBus::transfer_in_place(&mut *bus, &mut word).map_err(SdTransportError::Spi)?;
             Ok(word[0])
         })
     }
@@ -193,11 +198,9 @@ where
         })
     }
 
-    fn open_directory_at_path<'fs>(
-        &'fs self,
-        path: &str,
-    ) -> Result<RawDirectory, FsError> {
-        let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
+    fn open_directory_at_path<'fs>(&'fs self, path: &str) -> Result<RawDirectory, FsError> {
+        let path =
+            normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
         esp_println::println!("SD open_directory_at_path start: {}", path.as_str());
         let mut raw_directory = self
             .volume_mgr
@@ -234,7 +237,8 @@ where
         path: &str,
         mode: Mode,
     ) -> Result<SdRawFile<'fs, 'bus, SPI, DELAY>, FsError> {
-        let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
+        let path =
+            normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
         esp_println::println!("SD open_file_at_path start: {}", path.as_str());
         let (parent_path, file_name) = split_parent_path(path.as_str())?;
         esp_println::println!(
@@ -267,7 +271,8 @@ where
     }
 
     pub fn ensure_directory_internal(&self, path: &str) -> Result<(), FsError> {
-        let path = normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
+        let path =
+            normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
         if path.as_str() == "/" {
             return Ok(());
         }
@@ -281,17 +286,12 @@ where
                     current = next;
                 }
                 Err(open_err) => {
-                    if !matches!(
-                        open_err,
-                        embedded_sdmmc::Error::NotFound
-                    ) {
+                    if !matches!(open_err, embedded_sdmmc::Error::NotFound) {
                         return Err(FsError::OpenFailed(error_string(&open_err)));
                     }
                     self.volume_mgr
                         .make_dir_in_dir(current, component)
-                        .map_err(|err| {
-                            FsError::OpenFailed(error_string(&err))
-                        })?;
+                        .map_err(|err| FsError::OpenFailed(error_string(&err)))?;
                     current = self
                         .volume_mgr
                         .open_dir(current, component)
@@ -308,8 +308,14 @@ where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
     DELAY: DelayNs + 'bus,
 {
-    type EpubSource<'a> = SdEpubSource<'a, 'bus, SPI, DELAY> where Self: 'a;
-    type File<'a> = SdRawFile<'a, 'bus, SPI, DELAY> where Self: 'a;
+    type EpubSource<'a>
+        = SdEpubSource<'a, 'bus, SPI, DELAY>
+    where
+        Self: 'a;
+    type File<'a>
+        = SdRawFile<'a, 'bus, SPI, DELAY>
+    where
+        Self: 'a;
 
     fn list_directory_page(
         &self,
@@ -435,7 +441,9 @@ where
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, EpubError> {
         let offset = u32::try_from(offset).map_err(|_| EpubError::InvalidFormat)?;
-        self.file.seek_from_start(offset).map_err(|_| EpubError::Io)?;
+        self.file
+            .seek_from_start(offset)
+            .map_err(|_| EpubError::Io)?;
         self.file.read(buffer).map_err(|_| EpubError::Io)
     }
 }
@@ -468,7 +476,11 @@ pub(crate) fn listed_entry_from_dir_entry(
         Some(name) => heapless_string(name)?,
         None => fs_name.clone(),
     };
-    listed_entry_from_parts(label.as_str(), fs_name.as_str(), entry.attributes.is_directory())
+    listed_entry_from_parts(
+        label.as_str(),
+        fs_name.as_str(),
+        entry.attributes.is_directory(),
+    )
 }
 
 pub(crate) fn listed_entry_from_parts(
@@ -479,7 +491,9 @@ pub(crate) fn listed_entry_from_parts(
     let mut out = String::<LABEL_CAPACITY>::new();
     out.push_str(label).map_err(|_| FsError::TooManyEntries)?;
     let mut fs_out = String::<LABEL_CAPACITY>::new();
-    fs_out.push_str(fs_name).map_err(|_| FsError::TooManyEntries)?;
+    fs_out
+        .push_str(fs_name)
+        .map_err(|_| FsError::TooManyEntries)?;
     let kind = if is_directory {
         EntryKind::Directory
     } else if is_epub_label(label) {
@@ -531,7 +545,10 @@ fn heapless_string(label: &str) -> Result<String<LABEL_CAPACITY>, FsError> {
     Ok(out)
 }
 
-fn push_listed_entry(entries: &mut Vec<ListedEntry, MAX_ENTRIES>, entry: ListedEntry) -> Option<()> {
+fn push_listed_entry(
+    entries: &mut Vec<ListedEntry, MAX_ENTRIES>,
+    entry: ListedEntry,
+) -> Option<()> {
     entries.push(entry).ok()
 }
 
@@ -602,7 +619,8 @@ mod tests {
 
     #[test]
     fn path_components_ignore_current_directory_segments() {
-        let components: heapless::Vec<&str, 4> = path_components("/MYBOOKS/./WHEN_I~1.EPU").collect();
+        let components: heapless::Vec<&str, 4> =
+            path_components("/MYBOOKS/./WHEN_I~1.EPU").collect();
 
         assert_eq!(components.as_slice(), &["MYBOOKS", "WHEN_I~1.EPU"]);
     }

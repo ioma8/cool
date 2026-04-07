@@ -106,7 +106,8 @@ impl InputManager {
             }
             now_ms.saturating_sub(self.button_press_start)
         } else {
-            self.button_press_finish.saturating_sub(self.button_press_start)
+            self.button_press_finish
+                .saturating_sub(self.button_press_start)
         }
     }
 
