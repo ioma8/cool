@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+critical-section.workspace = true
 miniz_oxide = { version = "0.8", default-features = false }
 xteink-epub = { path = "../xteink-epub" }
 xteink-memory.workspace = true

@@ -18,14 +18,14 @@ use esp_hal::{
     spi::master::{Config as SpiConfig, Spi},
     time::Rate,
 };
-use heapless::String;
+use xteink_app::{AppStorage, ListedEntry as AppListedEntry, Session};
 use xteink_buttons::{
     Button as RawButton, ButtonState, get_button_from_adc_1, get_button_from_adc_2,
 };
-use xteink_controller::{AppController, BrowserRefresh, ControllerCommand, UiEntry};
-use xteink_display::{DISPLAY_HEIGHT, DISPLAY_WIDTH, SSD1677Display, bookerly};
+use xteink_controller::BrowserRefresh;
+use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
 use xteink_fs::{
-    EpubRefreshMode, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
+    FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
     render_epub_page_from_entry,
 };
 use xteink_memory::{
@@ -44,15 +44,6 @@ static BUTTON_EVENT_CHANNEL: Channel<
     RawButton,
     BUTTON_EVENT_CHANNEL_CAPACITY,
 > = Channel::new();
-static APP_DIRECTORY_PAGE: Mutex<CriticalSectionRawMutex, xteink_fs::DirectoryPage> =
-    Mutex::new(xteink_fs::DirectoryPage {
-        entries: heapless::Vec::new(),
-        info: xteink_fs::DirectoryPageInfo {
-            page_start: 0,
-            has_prev: false,
-            has_next: false,
-        },
-    });
 static UI_TASK_STACK_PROBE: Mutex<CriticalSectionRawMutex, StackProbe> =
     Mutex::new(StackProbe::new());
 static INPUT_TASK_STACK_PROBE: Mutex<CriticalSectionRawMutex, StackProbe> =
@@ -74,60 +65,170 @@ impl StackProbe {
         }
     }
 }
-#[inline]
-fn app_directory_page_with<R>(f: impl FnOnce(&xteink_fs::DirectoryPage) -> R) -> R {
-    APP_DIRECTORY_PAGE.lock(|page| f(page))
-}
-
-#[inline]
-fn app_directory_page_with_mut<R>(f: impl FnOnce(&mut xteink_fs::DirectoryPage) -> R) -> R {
-    unsafe { APP_DIRECTORY_PAGE.lock_mut(|page| f(page)) }
-}
-
-const FIRMWARE_STATIC_DEVICE_BYTES: usize =
-    size_of::<Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>>()
-        + size_of::<Mutex<CriticalSectionRawMutex, xteink_fs::DirectoryPage>>()
-        + xteink_display::EPUB_RENDER_WORKSPACE_BYTES;
+const FIRMWARE_STATIC_DEVICE_BYTES: usize = size_of::<
+    Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
+>() + xteink_display::EPUB_RENDER_WORKSPACE_BYTES;
 
 const _: [(); 1] = [(); (FIRMWARE_STATIC_DEVICE_BYTES <= DEVICE_PERSISTENT_BUDGET_BYTES) as usize];
 
-fn firmware_memory_footprint<SD, SPIBUS, SPIDEV, DC, RST, BUSY, DELAY>(
+#[derive(Debug)]
+enum FirmwareStorageError {
+    Fs(FsError),
+    Epub(xteink_epub::EpubError),
+}
+
+impl core::fmt::Display for FirmwareStorageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Fs(error) => write!(f, "filesystem error: {:?}", error),
+            Self::Epub(error) => write!(f, "epub error: {:?}", error),
+        }
+    }
+}
+
+impl From<FsError> for FirmwareStorageError {
+    fn from(error: FsError) -> Self {
+        Self::Fs(error)
+    }
+}
+
+impl From<xteink_epub::EpubError> for FirmwareStorageError {
+    fn from(error: xteink_epub::EpubError) -> Self {
+        Self::Epub(error)
+    }
+}
+
+struct FirmwareStorage<'a, SD> {
+    sd: &'a SD,
+}
+
+impl<'a, SD> FirmwareStorage<'a, SD> {
+    fn new(sd: &'a SD) -> Self {
+        Self { sd }
+    }
+}
+
+fn fs_entry_to_app_entry(entry: &ListedEntry) -> AppListedEntry {
+    let mut label = heapless::String::new();
+    let mut fs_name = heapless::String::new();
+    let _ = label.push_str(entry.label.as_str());
+    let _ = fs_name.push_str(entry.fs_name.as_str());
+    AppListedEntry {
+        label,
+        fs_name,
+        kind: entry.kind,
+    }
+}
+
+fn app_entry_to_fs_entry(entry: &AppListedEntry) -> ListedEntry {
+    let mut label = heapless::String::new();
+    let mut fs_name = heapless::String::new();
+    let _ = label.push_str(entry.label.as_str());
+    let _ = fs_name.push_str(entry.fs_name.as_str());
+    ListedEntry {
+        label,
+        fs_name,
+        kind: entry.kind,
+    }
+}
+
+impl<'a, SD, SPI, DC, RST, BUSY, DELAY> AppStorage<SSD1677Display<SPI, DC, RST, BUSY, DELAY>>
+    for FirmwareStorage<'a, SD>
+where
+    SD: SdFilesystem,
+    SPI: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    type Error = FirmwareStorageError;
+
+    fn list_directory_page(
+        &self,
+        path: &str,
+        page_start: usize,
+        page_size: usize,
+    ) -> Result<xteink_app::DirectoryPage, Self::Error> {
+        let mut entries = heapless::Vec::new();
+        let info = self
+            .sd
+            .list_directory_page(path, page_start, page_size, &mut entries)?;
+        let mut app_entries = heapless::Vec::new();
+        for entry in entries.iter() {
+            let _ = app_entries.push(fs_entry_to_app_entry(entry));
+        }
+        Ok(xteink_app::DirectoryPage {
+            entries: app_entries,
+            info: xteink_app::DirectoryPageInfo {
+                page_start: info.page_start,
+                has_prev: info.has_prev,
+                has_next: info.has_next,
+            },
+        })
+    }
+
+    fn render_epub_from_entry(
+        &self,
+        renderer: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+        current_path: &str,
+        entry: &AppListedEntry,
+    ) -> Result<usize, Self::Error> {
+        let rendered = render_epub_from_entry(
+            self.sd,
+            renderer,
+            current_path,
+            &app_entry_to_fs_entry(entry),
+        )?;
+        Ok(rendered.rendered_page)
+    }
+
+    fn render_epub_page_from_entry(
+        &self,
+        renderer: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+        current_path: &str,
+        entry: &AppListedEntry,
+        target_page: usize,
+    ) -> Result<usize, Self::Error> {
+        let rendered = render_epub_page_from_entry(
+            self.sd,
+            renderer,
+            current_path,
+            &app_entry_to_fs_entry(entry),
+            target_page,
+            true,
+        )?;
+        Ok(rendered.rendered_page)
+    }
+}
+
+fn firmware_memory_footprint<SD, SPIBUS, SPI, DC, RST, BUSY, DELAY>(
     spi_bus: &Mutex<NoopRawMutex, RefCell<SPIBUS>>,
-    sd: &SD,
-    display: &SSD1677Display<SPIDEV, DC, RST, BUSY, DELAY>,
-    current_path: &String<256>,
-    controller: &AppController,
+    session: &Session<FirmwareStorage<'_, SD>, SSD1677Display<SPI, DC, RST, BUSY, DELAY>>,
 ) -> DeviceMemoryFootprint
 where
-    SPIDEV: SpiDevice,
+    SPI: SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin,
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
     DeviceMemoryFootprint::new(
-        FIRMWARE_STATIC_DEVICE_BYTES
-            + size_of_val(spi_bus)
-            + size_of_val(sd)
-            + size_of_val(display)
-            + size_of_val(current_path)
-            + size_of_val(controller),
+        FIRMWARE_STATIC_DEVICE_BYTES + size_of_val(spi_bus) + size_of_val(session),
     )
 }
 
-fn enforce_firmware_memory_budget<SD, SPI, DC, RST, BUSY, DELAY>(
+fn enforce_firmware_memory_budget<SD, SPIBUS, SPI, DC, RST, BUSY, DELAY>(
     spi_bus: &Mutex<NoopRawMutex, RefCell<SPI>>,
-    sd: &SD,
-    display: &SSD1677Display<impl SpiDevice, DC, RST, BUSY, DELAY>,
-    current_path: &String<256>,
-    controller: &AppController,
+    session: &Session<FirmwareStorage<'_, SD>, SSD1677Display<SPIBUS, DC, RST, BUSY, DELAY>>,
 ) where
+    SPIBUS: SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin,
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    let footprint = firmware_memory_footprint(spi_bus, sd, display, current_path, controller);
+    let footprint = firmware_memory_footprint(spi_bus, session);
     assert!(
         footprint.fits_device_budget(),
         "firmware device memory footprint {} exceeds budget {}",
@@ -149,6 +250,22 @@ fn log_firmware_memory_report(footprint: DeviceMemoryFootprint) {
         DEVICE_STACK_RESERVE_BYTES,
         DEVICE_TRANSIENT_HEADROOM_BYTES,
     );
+}
+
+fn apply_refresh<SPI, DC, RST, BUSY, DELAY>(
+    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    refresh: BrowserRefresh,
+) where
+    SPI: SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    match refresh {
+        BrowserRefresh::Full => display.refresh_full(),
+        BrowserRefresh::Fast => display.refresh_fast(),
+    }
 }
 
 #[inline]
@@ -187,47 +304,6 @@ fn observe_task_stack(task_name: &str, probe: &'static Mutex<CriticalSectionRawM
         }
     })
     };
-}
-
-fn load_browser_directory_page<SD: SdFilesystem>(
-    sd: &SD,
-    current_path: &str,
-    page_start: usize,
-    page_size: usize,
-) -> Result<(), xteink_fs::FsError> {
-    app_directory_page_with_mut(|page| {
-        page.entries.clear();
-        let info =
-            sd.list_directory_page(current_path, page_start, page_size, &mut page.entries)?;
-        page.info = info;
-        Ok(())
-    })
-}
-
-#[inline]
-fn render_current_browser_screen<SPI, DC, RST, BUSY, DELAY>(
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
-    current_path: &str,
-    controller: &AppController,
-    refresh: BrowserRefresh,
-    pending_display_refresh: &mut PendingDisplayRefresh,
-) where
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
-{
-    app_directory_page_with(|page| {
-        render_browser_screen(
-            display,
-            current_path,
-            &page.entries,
-            controller.browser().selected_index(page.entries.len()),
-            refresh,
-            pending_display_refresh,
-        );
-    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -350,8 +426,6 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     esp_println::println!("Initializing display and SD browser...");
-    let mut current_path: String<256> = String::new();
-    let _ = current_path.push('/');
     let page_size = browser_page_size();
 
     let Some(sd) = sd else {
@@ -364,30 +438,6 @@ async fn main(spawner: Spawner) -> ! {
             yield_now().await;
         }
     };
-
-    if let Err(err) = load_browser_directory_page(&sd, current_path.as_str(), 0, page_size) {
-        let mut display = display;
-        let mut pending_display_refresh = PendingDisplayRefresh::None;
-        esp_println::println!("Directory listing failed: {:?}", err);
-        display.init();
-        render_error_screen(
-            &mut display,
-            "Directory listing error",
-            &mut pending_display_refresh,
-        );
-        service_display_refresh(&mut display, &mut pending_display_refresh);
-        loop {
-            yield_now().await;
-        }
-    }
-
-    let mut controller = AppController::new(page_size);
-    app_directory_page_with(|page| {
-        controller.apply_directory_loaded(page.info.page_start, page.entries.len(), 0);
-    });
-    let footprint = firmware_memory_footprint(&spi_bus, &sd, &display, &current_path, &controller);
-    log_firmware_memory_report(footprint);
-    enforce_firmware_memory_budget(&spi_bus, &sd, &display, &current_path, &controller);
 
     let sender = BUTTON_EVENT_CHANNEL.sender();
     let receiver = BUTTON_EVENT_CHANNEL.receiver();
@@ -408,10 +458,32 @@ async fn main(spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Down),
     );
 
-    let mut init_display = display;
-    init_display.init();
+    let mut session = Session::new(FirmwareStorage::new(&sd), display, page_size);
+    session.renderer_mut().init();
+    match session.bootstrap() {
+        Ok(refresh) => {
+            let footprint = firmware_memory_footprint(&spi_bus, &session);
+            log_firmware_memory_report(footprint);
+            enforce_firmware_memory_budget(&spi_bus, &session);
+            apply_refresh(session.renderer_mut(), refresh);
+        }
+        Err(err) => {
+            esp_println::println!("Session bootstrap failed: {:?}", err);
+            let mut pending_display_refresh = PendingDisplayRefresh::None;
+            render_error_screen(
+                session.renderer_mut(),
+                "Directory listing error",
+                &mut pending_display_refresh,
+            );
+            service_display_refresh(session.renderer_mut(), &mut pending_display_refresh);
+            loop {
+                yield_now().await;
+            }
+        }
+    }
+
     spawner.must_spawn(input_task(sender, power_button));
-    ui_task(sd, init_display, page_size, controller, receiver).await;
+    ui_task(session, receiver).await;
     loop {}
 }
 
@@ -485,10 +557,7 @@ async fn input_task(
 }
 
 async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
-    sd: SD,
-    mut display: SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
-    page_size: usize,
-    mut controller: AppController,
+    mut session: Session<FirmwareStorage<'_, SD>, SSD1677Display<SPI, DC, RST, BUSY, DELAY>>,
     receiver: Receiver<'static, CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
 ) where
     SD: xteink_fs::SdFilesystem,
@@ -499,46 +568,23 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
     DELAY: embedded_hal::delay::DelayNs,
 {
     observe_task_stack("ui_task", &UI_TASK_STACK_PROBE);
-    let mut pending_display_refresh = PendingDisplayRefresh::None;
-    app_directory_page_with(|page| {
-        render_browser_screen(
-            &mut display,
-            controller.current_path(),
-            &page.entries,
-            controller.browser().selected_index(page.entries.len()),
-            BrowserRefresh::Full,
-            &mut pending_display_refresh,
-        );
-    });
-    service_display_refresh(&mut display, &mut pending_display_refresh);
-
     loop {
         observe_task_stack("ui_task", &UI_TASK_STACK_PROBE);
         let button = receiver.receive().await;
-        let command = app_directory_page_with(|page| {
-            let selected_entry = controller
-                .browser()
-                .selected_index(page.entries.len())
-                .and_then(|index| page.entries.get(index))
-                .map(listed_entry_to_ui_entry);
-            controller.handle_button_with_selected_entry(
-                button,
-                page.entries.len(),
-                controller_page_info(page.info),
-                selected_entry,
-            )
-        });
-
-        handle_controller_command(
-            &sd,
-            &mut display,
-            page_size,
-            &mut controller,
-            command,
-            &mut pending_display_refresh,
-        );
-
-        service_display_refresh(&mut display, &mut pending_display_refresh);
+        match session.handle_button(button) {
+            Ok(Some(refresh)) => apply_refresh(session.renderer_mut(), refresh),
+            Ok(None) => {}
+            Err(err) => {
+                esp_println::println!("Session button handling failed: {:?}", err);
+                let mut pending_display_refresh = PendingDisplayRefresh::None;
+                render_error_screen(
+                    session.renderer_mut(),
+                    "Session error",
+                    &mut pending_display_refresh,
+                );
+                service_display_refresh(session.renderer_mut(), &mut pending_display_refresh);
+            }
+        }
     }
 }
 
@@ -547,192 +593,6 @@ fn browser_page_size() -> usize {
     let used_top = 4 + line_height * 2;
     let visible = usize::from(DISPLAY_HEIGHT).saturating_sub(used_top) / line_height.max(1);
     visible.clamp(1, MAX_ENTRIES)
-}
-
-fn handle_controller_command<SD, SPI, DC, RST, BUSY, DELAY>(
-    sd: &SD,
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
-    page_size: usize,
-    controller: &mut AppController,
-    command: ControllerCommand,
-    pending_display_refresh: &mut PendingDisplayRefresh,
-) where
-    SD: xteink_fs::SdFilesystem,
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
-{
-    match command {
-        ControllerCommand::None => {}
-        ControllerCommand::RenderBrowser { refresh } => {
-            render_current_browser_screen(
-                display,
-                controller.current_path(),
-                controller,
-                refresh,
-                pending_display_refresh,
-            );
-        }
-        ControllerCommand::LoadDirectory {
-            path,
-            page_start,
-            selected,
-            refresh,
-        } => match load_browser_directory_page(sd, path.as_str(), page_start, page_size) {
-            Ok(()) => {
-                let next_len = app_directory_page_with(|page| page.entries.len());
-                controller.apply_directory_loaded(page_start, next_len, selected);
-                render_current_browser_screen(
-                    display,
-                    controller.current_path(),
-                    controller,
-                    refresh,
-                    pending_display_refresh,
-                );
-            }
-            Err(err) => {
-                esp_println::println!("Directory listing failed: {:?}", err);
-                render_error_screen(display, "Directory listing error", pending_display_refresh);
-            }
-        },
-        ControllerCommand::OpenEpub { path, entry } => {
-            render_loading_popover(
-                display,
-                "Loading book...",
-                "Please wait",
-                pending_display_refresh,
-            );
-            service_display_refresh(display, pending_display_refresh);
-            let listed_entry = ui_entry_to_listed_entry(&entry);
-            match render_epub_from_entry(sd, display, path.as_str(), &listed_entry) {
-                Ok(result) => {
-                    controller.apply_epub_opened(result.rendered_page);
-                    match result.refresh {
-                        EpubRefreshMode::Full => {
-                            pending_display_refresh.request(BrowserRefresh::Full)
-                        }
-                        EpubRefreshMode::Fast => {
-                            pending_display_refresh.request(BrowserRefresh::Fast)
-                        }
-                    }
-                }
-                Err(err) => {
-                    esp_println::println!("EPUB render failed: {:?}", err);
-                    render_error_screen(display, "EPUB render error", pending_display_refresh);
-                }
-            }
-        }
-        ControllerCommand::RenderReaderPage {
-            path,
-            entry,
-            target_page,
-            fast,
-        } => {
-            let listed_entry = ui_entry_to_listed_entry(&entry);
-            match render_epub_page_from_entry(
-                sd,
-                display,
-                path.as_str(),
-                &listed_entry,
-                target_page,
-                fast,
-            ) {
-                Ok(result) => {
-                    controller.apply_reader_page_rendered(result.rendered_page);
-                    match result.refresh {
-                        EpubRefreshMode::Full => {
-                            pending_display_refresh.request(BrowserRefresh::Full)
-                        }
-                        EpubRefreshMode::Fast => {
-                            pending_display_refresh.request(BrowserRefresh::Fast)
-                        }
-                    }
-                }
-                Err(err) => {
-                    esp_println::println!("EPUB page render failed: {:?}", err);
-                    render_error_screen(display, "EPUB render error", pending_display_refresh);
-                }
-            }
-        }
-    }
-}
-
-fn listed_entry_to_ui_entry(entry: &ListedEntry) -> UiEntry {
-    let mut name = heapless::String::new();
-    let _ = name.push_str(entry.fs_name.as_str());
-    UiEntry {
-        name,
-        kind: entry.kind,
-    }
-}
-
-fn ui_entry_to_listed_entry(entry: &UiEntry) -> ListedEntry {
-    let mut label = heapless::String::new();
-    let mut fs_name = heapless::String::new();
-    let _ = label.push_str(entry.name.as_str());
-    let _ = fs_name.push_str(entry.name.as_str());
-    ListedEntry {
-        label,
-        fs_name,
-        kind: entry.kind,
-    }
-}
-
-fn controller_page_info(
-    info: xteink_fs::DirectoryPageInfo,
-) -> xteink_controller::DirectoryPageInfo {
-    xteink_controller::DirectoryPageInfo {
-        page_start: info.page_start,
-        has_prev: info.has_prev,
-        has_next: info.has_next,
-    }
-}
-
-fn render_browser_screen<SPI, DC, RST, BUSY, DELAY>(
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
-    title: &str,
-    entries: &[ListedEntry],
-    selected: Option<usize>,
-    refresh: BrowserRefresh,
-    pending_display_refresh: &mut PendingDisplayRefresh,
-) where
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
-{
-    display.clear(0xFF);
-    display.draw_text(4, 4, title);
-
-    let line_height = bookerly::BOOKERLY.line_height_px();
-    let mut cursor_y = 4 + line_height * 2;
-
-    for (index, entry) in entries.iter().enumerate() {
-        if cursor_y.saturating_add(line_height) > DISPLAY_HEIGHT {
-            break;
-        }
-
-        let mut line = String::<96>::new();
-        if Some(index) == selected {
-            let _ = line.push('>');
-        } else {
-            let _ = line.push(' ');
-        }
-        let _ = line.push(' ');
-        let prefix = match entry.kind {
-            xteink_browser::EntryKind::Directory => "[D] ",
-            xteink_browser::EntryKind::Epub => "[E] ",
-            xteink_browser::EntryKind::Other => "[ ] ",
-        };
-        let _ = line.push_str(prefix);
-        let _ = line.push_str(entry.label.as_str());
-        display.draw_text(4, cursor_y, line.as_str());
-        cursor_y = cursor_y.saturating_add(line_height);
-    }
-    pending_display_refresh.request(refresh);
 }
 
 fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
@@ -749,49 +609,6 @@ fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
     display.clear(0xFF);
     display.draw_wrapped_text(4, 4, message, DISPLAY_HEIGHT);
     pending_display_refresh.request(BrowserRefresh::Full);
-}
-
-fn render_loading_popover<SPI, DC, RST, BUSY, DELAY>(
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
-    title: &str,
-    subtitle: &str,
-    pending_display_refresh: &mut PendingDisplayRefresh,
-) where
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
-{
-    let box_width = 240u16;
-    let box_height = 96u16;
-    let left = (DISPLAY_WIDTH.saturating_sub(box_width)) / 2;
-    let top = (DISPLAY_HEIGHT.saturating_sub(box_height)) / 2;
-    let right = left.saturating_add(box_width).min(DISPLAY_WIDTH);
-    let bottom = top.saturating_add(box_height).min(DISPLAY_HEIGHT);
-
-    for y in top..bottom {
-        for x in left..right {
-            display.set_pixel(x, y, false);
-        }
-    }
-
-    for x in left..right {
-        display.set_pixel(x, top, true);
-        display.set_pixel(x, bottom.saturating_sub(1), true);
-    }
-    for y in top..bottom {
-        display.set_pixel(left, y, true);
-        display.set_pixel(right.saturating_sub(1), y, true);
-    }
-
-    display.draw_text(left + 16, top + 16, title);
-    display.draw_text(
-        left + 16,
-        top + 16 + bookerly::BOOKERLY.line_height_px() + 8,
-        subtitle,
-    );
-    pending_display_refresh.request(BrowserRefresh::Fast);
 }
 
 fn service_display_refresh<SPI, DC, RST, BUSY, DELAY>(

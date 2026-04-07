@@ -13,13 +13,7 @@ fn runtime_boots_root_directory_and_renders_first_browser_screen() {
 
     let session = bootstrap_session(HostStorage::new(tmp.path()), 8).expect("bootstrap");
 
-    assert!(
-        session
-            .framebuffer()
-            .bytes()
-            .iter()
-            .any(|byte| *byte != 0xFF)
-    );
+    assert!(session.renderer().bytes().iter().any(|byte| *byte != 0xFF));
     assert_eq!(session.current_entries().len(), 1);
 }
 

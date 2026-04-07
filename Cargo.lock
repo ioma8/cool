@@ -2112,10 +2112,12 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 name = "xteink-app"
 version = "0.1.0"
 dependencies = [
+ "embedded-hal 1.0.0",
  "heapless 0.8.0",
  "xteink-browser",
  "xteink-buttons",
  "xteink-controller",
+ "xteink-display",
  "xteink-render",
 ]
 
@@ -2213,6 +2215,7 @@ dependencies = [
  "esp32c3",
  "heapless 0.8.0",
  "nb 1.1.0",
+ "xteink-app",
  "xteink-browser",
  "xteink-buttons",
  "xteink-controller",
@@ -2221,12 +2224,14 @@ dependencies = [
  "xteink-fs",
  "xteink-input",
  "xteink-memory",
+ "xteink-render",
 ]
 
 [[package]]
 name = "xteink-render"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "fontdue",
  "miniz_oxide",
  "xteink-epub",

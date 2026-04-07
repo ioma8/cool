@@ -114,7 +114,7 @@ impl xteink_epub::EpubSource for FileSource {
     }
 }
 
-impl AppStorage for HostStorage {
+impl AppStorage<Framebuffer> for HostStorage {
     type Error = StorageError;
 
     fn list_directory_page(
@@ -166,16 +166,16 @@ impl AppStorage for HostStorage {
 
     fn render_epub_from_entry(
         &self,
-        framebuffer: &mut Framebuffer,
+        renderer: &mut Framebuffer,
         current_path: &str,
         entry: &ListedEntry,
     ) -> Result<usize, Self::Error> {
-        self.render_epub_page_from_entry(framebuffer, current_path, entry, 0)
+        self.render_epub_page_from_entry(renderer, current_path, entry, 0)
     }
 
     fn render_epub_page_from_entry(
         &self,
-        framebuffer: &mut Framebuffer,
+        renderer: &mut Framebuffer,
         current_path: &str,
         entry: &ListedEntry,
         target_page: usize,
@@ -183,7 +183,7 @@ impl AppStorage for HostStorage {
         let mut full_path = self.resolve(current_path);
         full_path.push(entry.fs_name.as_str());
         let source = FileSource::open(&full_path)?;
-        framebuffer
+        renderer
             .render_epub_page(source, target_page)
             .map_err(StorageError::Render)
     }

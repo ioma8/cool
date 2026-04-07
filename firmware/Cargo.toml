@@ -24,12 +24,14 @@ critical-section.workspace = true
 nb.workspace = true
 heapless = { version = "0.8", default-features = false }
 xteink-buttons = { path = "../crates/xteink-buttons" }
+xteink-app = { path = "../crates/xteink-app" }
 xteink-input = { path = "../crates/xteink-input" }
 xteink-browser = { path = "../crates/xteink-browser" }
 xteink-controller = { path = "../crates/xteink-controller" }
 xteink-epub = { path = "../crates/xteink-epub" }
 xteink-fs = { path = "../crates/xteink-fs", features = ["embedded"] }
 xteink-display = { path = "../crates/xteink-display" }
+xteink-render = { path = "../crates/xteink-render" }
 xteink-memory.workspace = true
 embedded-hal-bus = "0.3"
 

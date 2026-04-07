@@ -7,19 +7,19 @@ use xteink_memory::{
     DEVICE_PERSISTENT_BUDGET_BYTES, DEVICE_STACK_RESERVE_BYTES, DEVICE_TOTAL_RAM_BYTES,
     DEVICE_TRANSIENT_HEADROOM_BYTES, DeviceMemoryFootprint,
 };
-use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, EPUB_RENDER_WORKSPACE_BYTES};
+use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, EPUB_RENDER_WORKSPACE_BYTES, Framebuffer};
 
-pub fn bootstrap_session<S: AppStorage>(
+pub fn bootstrap_session<S: AppStorage<Framebuffer>>(
     storage: S,
     page_size: usize,
-) -> Result<Session<S>, S::Error> {
-    let mut session = Session::new(storage, page_size);
-    session.bootstrap()?;
+) -> Result<Session<S, Framebuffer>, S::Error> {
+    let mut session = Session::new(storage, Framebuffer::new(), page_size);
+    let _ = session.bootstrap()?;
     Ok(session)
 }
 
 pub fn simulator_device_memory_footprint(scale: usize) -> DeviceMemoryFootprint {
-    let device_bytes = size_of::<Session<HostStorage>>() + EPUB_RENDER_WORKSPACE_BYTES;
+    let device_bytes = size_of::<Session<HostStorage, Framebuffer>>() + EPUB_RENDER_WORKSPACE_BYTES;
     let host_only_bytes =
         usize::from(DISPLAY_WIDTH) * usize::from(DISPLAY_HEIGHT) * scale * scale * size_of::<u32>();
     DeviceMemoryFootprint::with_host_overhead(device_bytes, host_only_bytes)
@@ -57,7 +57,7 @@ pub fn run(root: &Path, page_size: usize, scale: usize) -> Result<(), Box<dyn st
         for button in pressed_buttons(window.window()) {
             let _ = session.handle_button(button);
         }
-        window.update(session.framebuffer())?;
+        window.update(session.renderer())?;
     }
 
     Ok(())

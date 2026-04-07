@@ -2,4 +2,6 @@
 
 mod session;
 
-pub use session::{AppStorage, DirectoryPage, DirectoryPageInfo, ListedEntry, Session};
+pub use session::{
+    AppRenderer, AppStorage, DirectoryPage, DirectoryPageInfo, ListedEntry, Session,
+};

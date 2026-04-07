@@ -5,7 +5,7 @@ use xteink_controller::{
     AppController, BrowserRefresh, ControllerCommand, DirectoryPageInfo as ControllerPageInfo,
     ScreenMode, UiEntry,
 };
-use xteink_render::{DISPLAY_HEIGHT, Framebuffer, bookerly};
+use xteink_render::bookerly;
 
 const PATH_CAPACITY: usize = 256;
 const MAX_ENTRIES: usize = 24;
@@ -56,7 +56,40 @@ pub struct DirectoryPage {
     pub info: DirectoryPageInfo,
 }
 
-pub trait AppStorage {
+pub trait AppRenderer {
+    fn clear(&mut self, color: u8);
+    fn draw_text(&mut self, x: u16, y: u16, text: &str);
+}
+
+impl AppRenderer for xteink_render::Framebuffer {
+    fn clear(&mut self, color: u8) {
+        xteink_render::Framebuffer::clear(self, color);
+    }
+
+    fn draw_text(&mut self, x: u16, y: u16, text: &str) {
+        xteink_render::Framebuffer::draw_text(self, x, y, text);
+    }
+}
+
+impl<SPI, DC, RST, BUSY, DELAY> AppRenderer
+    for xteink_display::SSD1677Display<SPI, DC, RST, BUSY, DELAY>
+where
+    SPI: embedded_hal::spi::SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin,
+    BUSY: embedded_hal::digital::InputPin,
+    DELAY: embedded_hal::delay::DelayNs,
+{
+    fn clear(&mut self, color: u8) {
+        xteink_display::SSD1677Display::clear(self, color);
+    }
+
+    fn draw_text(&mut self, x: u16, y: u16, text: &str) {
+        xteink_display::SSD1677Display::draw_text(self, x, y, text);
+    }
+}
+
+pub trait AppStorage<R: AppRenderer> {
     type Error;
 
     fn list_directory_page(
@@ -67,35 +100,39 @@ pub trait AppStorage {
     ) -> Result<DirectoryPage, Self::Error>;
     fn render_epub_from_entry(
         &self,
-        framebuffer: &mut Framebuffer,
+        renderer: &mut R,
         current_path: &str,
         entry: &ListedEntry,
     ) -> Result<usize, Self::Error>;
     fn render_epub_page_from_entry(
         &self,
-        framebuffer: &mut Framebuffer,
+        renderer: &mut R,
         current_path: &str,
         entry: &ListedEntry,
         target_page: usize,
     ) -> Result<usize, Self::Error>;
 }
 
-pub struct Session<S> {
+pub struct Session<S, R> {
     storage: S,
-    framebuffer: Framebuffer,
+    renderer: R,
     controller: AppController,
     current_path: String<PATH_CAPACITY>,
     page: DirectoryPage,
     page_size: usize,
 }
 
-impl<S: AppStorage> Session<S> {
-    pub fn new(storage: S, page_size: usize) -> Self {
+impl<S, R> Session<S, R>
+where
+    S: AppStorage<R>,
+    R: AppRenderer,
+{
+    pub fn new(storage: S, renderer: R, page_size: usize) -> Self {
         let mut current_path = String::new();
         let _ = current_path.push('/');
         Self {
             storage,
-            framebuffer: Framebuffer::new(),
+            renderer,
             controller: AppController::new(page_size),
             current_path,
             page_size,
@@ -110,17 +147,36 @@ impl<S: AppStorage> Session<S> {
         }
     }
 
-    pub fn bootstrap(&mut self) -> Result<(), S::Error> {
+    pub fn bootstrap(&mut self) -> Result<BrowserRefresh, S::Error> {
         self.load_directory(0, 0, BrowserRefresh::Full)
     }
 
-    pub fn handle_button(&mut self, button: Button) -> Result<(), S::Error> {
-        let command =
-            self.controller
-                .handle_button(button, &self.ui_entries(), self.controller_page_info());
+    pub fn handle_button(&mut self, button: Button) -> Result<Option<BrowserRefresh>, S::Error> {
+        let selected_entry = self
+            .controller
+            .browser()
+            .selected_index(self.page.entries.len())
+            .and_then(|index| self.page.entries.get(index))
+            .map(|entry| {
+                let mut name = String::new();
+                let _ = name.push_str(entry.fs_name.as_str());
+                UiEntry {
+                    name,
+                    kind: entry.kind,
+                }
+            });
+        let command = self.controller.handle_button_with_selected_entry(
+            button,
+            self.page.entries.len(),
+            self.controller_page_info(),
+            selected_entry,
+        );
         match command {
-            ControllerCommand::None => {}
-            ControllerCommand::RenderBrowser { refresh } => self.render_browser(refresh),
+            ControllerCommand::None => Ok(None),
+            ControllerCommand::RenderBrowser { refresh } => {
+                self.render_browser();
+                Ok(Some(refresh))
+            }
             ControllerCommand::LoadDirectory {
                 path,
                 page_start,
@@ -129,45 +185,61 @@ impl<S: AppStorage> Session<S> {
                 ..
             } => {
                 self.current_path = path;
-                self.load_directory(page_start, selected, refresh)?;
+                self.load_directory(page_start, selected, refresh).map(Some)
             }
             ControllerCommand::OpenEpub { entry, .. } => {
                 let listed = self.ui_entry_to_listed(&entry);
                 let rendered = self.storage.render_epub_from_entry(
-                    &mut self.framebuffer,
+                    &mut self.renderer,
                     self.current_path.as_str(),
                     &listed,
                 )?;
                 self.controller.apply_epub_opened(rendered);
+                Ok(Some(BrowserRefresh::Full))
             }
             ControllerCommand::RenderReaderPage {
-                entry, target_page, ..
+                entry,
+                target_page,
+                fast,
+                ..
             } => {
                 let listed = self.ui_entry_to_listed(&entry);
                 let rendered = self.storage.render_epub_page_from_entry(
-                    &mut self.framebuffer,
+                    &mut self.renderer,
                     self.current_path.as_str(),
                     &listed,
                     target_page,
                 )?;
                 self.controller.apply_reader_page_rendered(rendered);
+                Ok(Some(if fast {
+                    BrowserRefresh::Fast
+                } else {
+                    BrowserRefresh::Full
+                }))
             }
         }
-        Ok(())
     }
 
-    pub fn framebuffer(&self) -> &Framebuffer {
-        &self.framebuffer
+    pub fn renderer(&self) -> &R {
+        &self.renderer
     }
+
+    pub fn renderer_mut(&mut self) -> &mut R {
+        &mut self.renderer
+    }
+
     pub fn screen_mode(&self) -> ScreenMode {
         self.controller.screen_mode()
     }
+
     pub fn reader_page(&self) -> usize {
         self.controller.reader_page()
     }
+
     pub fn current_entries(&self) -> &[ListedEntry] {
         self.page.entries.as_slice()
     }
+
     pub fn current_path(&self) -> &str {
         self.current_path.as_str()
     }
@@ -177,7 +249,7 @@ impl<S: AppStorage> Session<S> {
         page_start: usize,
         selected: usize,
         refresh: BrowserRefresh,
-    ) -> Result<(), S::Error> {
+    ) -> Result<BrowserRefresh, S::Error> {
         self.page = self.storage.list_directory_page(
             self.current_path.as_str(),
             page_start,
@@ -188,17 +260,17 @@ impl<S: AppStorage> Session<S> {
             self.page.entries.len(),
             selected,
         );
-        self.render_browser(refresh);
-        Ok(())
+        self.render_browser();
+        Ok(refresh)
     }
 
-    fn render_browser(&mut self, _refresh: BrowserRefresh) {
-        self.framebuffer.clear(0xFF);
-        self.framebuffer.draw_text(4, 4, self.current_path.as_str());
+    fn render_browser(&mut self) {
+        self.renderer.clear(0xFF);
+        self.renderer.draw_text(4, 4, self.current_path.as_str());
         let line_height = bookerly::BOOKERLY.line_height_px();
         let mut cursor_y = 4 + line_height * 2;
         for (index, entry) in self.page.entries.iter().enumerate() {
-            if cursor_y.saturating_add(line_height) > DISPLAY_HEIGHT {
+            if cursor_y.saturating_add(line_height) > xteink_render::DISPLAY_HEIGHT {
                 break;
             }
             let mut line = String::<96>::new();
@@ -221,22 +293,9 @@ impl<S: AppStorage> Session<S> {
                 EntryKind::Other => "[ ] ",
             });
             let _ = line.push_str(entry.label.as_str());
-            self.framebuffer.draw_text(4, cursor_y, line.as_str());
+            self.renderer.draw_text(4, cursor_y, line.as_str());
             cursor_y = cursor_y.saturating_add(line_height);
         }
-    }
-
-    fn ui_entries(&self) -> Vec<UiEntry, MAX_ENTRIES> {
-        let mut entries = Vec::new();
-        for entry in self.page.entries.iter() {
-            let mut name = String::new();
-            let _ = name.push_str(entry.fs_name.as_str());
-            let _ = entries.push(UiEntry {
-                name,
-                kind: entry.kind,
-            });
-        }
-        entries
     }
 
     fn ui_entry_to_listed(&self, entry: &UiEntry) -> ListedEntry {

@@ -1,10 +1,11 @@
 use xteink_app::{AppStorage, DirectoryPage, DirectoryPageInfo, ListedEntry, Session};
 use xteink_browser::EntryKind;
 use xteink_buttons::Button;
+use xteink_render::Framebuffer;
 
 struct FakeStorage;
 
-impl AppStorage for FakeStorage {
+impl AppStorage<Framebuffer> for FakeStorage {
     type Error = ();
 
     fn list_directory_page(
@@ -45,7 +46,7 @@ impl AppStorage for FakeStorage {
 
 struct MultiStorage;
 
-impl AppStorage for MultiStorage {
+impl AppStorage<Framebuffer> for MultiStorage {
     type Error = ();
 
     fn list_directory_page(
@@ -104,7 +105,7 @@ impl AppStorage for MultiStorage {
 
 #[test]
 fn opening_an_epub_from_loaded_directory_transitions_to_reader_page_zero() {
-    let mut session = Session::new(FakeStorage, 8);
+    let mut session = Session::new(FakeStorage, Framebuffer::new(), 8);
     session.bootstrap().expect("bootstrap should work");
 
     session
@@ -116,19 +117,13 @@ fn opening_an_epub_from_loaded_directory_transitions_to_reader_page_zero() {
         xteink_controller::ScreenMode::Reading
     );
     assert_eq!(session.reader_page(), 0);
-    assert!(
-        session
-            .framebuffer()
-            .bytes()
-            .iter()
-            .any(|byte| *byte != 0xFF)
-    );
+    assert!(session.renderer().bytes().iter().any(|byte| *byte != 0xFF));
     assert_eq!(session.current_entries()[0].kind, EntryKind::Epub);
 }
 
 #[test]
 fn bootstrap_uses_configured_page_size_instead_of_single_entry() {
-    let mut session = Session::new(MultiStorage, 8);
+    let mut session = Session::new(MultiStorage, Framebuffer::new(), 8);
 
     session.bootstrap().expect("bootstrap should work");
 
@@ -137,7 +132,7 @@ fn bootstrap_uses_configured_page_size_instead_of_single_entry() {
 
 #[test]
 fn opening_directory_updates_current_path_and_loads_child_entries() {
-    let mut session = Session::new(MultiStorage, 8);
+    let mut session = Session::new(MultiStorage, Framebuffer::new(), 8);
     session.bootstrap().expect("bootstrap should work");
 
     session
