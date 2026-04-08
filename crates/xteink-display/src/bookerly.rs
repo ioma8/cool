@@ -17,11 +17,21 @@ pub struct Interval {
     pub offset: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PairPositioning {
+    pub key: u64,
+    pub pen_adjust: i16,
+    pub x_offset: i16,
+    pub y_offset: i16,
+    pub advance_adjust: i16,
+}
+
 #[derive(Debug)]
 pub struct Font {
     pub bitmap: &'static [u8],
     pub glyphs: &'static [Glyph],
     pub intervals: &'static [Interval],
+    pub pair_positioning: &'static [PairPositioning],
     pub ascender: i16,
     pub descender: i16,
     pub line_height: u16,
@@ -49,6 +59,15 @@ impl Font {
         self.glyphs.get(index)
     }
 
+    pub fn positioning_for_pair(&self, left: char, right: char) -> PairPositioning {
+        let key = pair_key(left as u32, right as u32);
+        self.pair_positioning
+            .binary_search_by_key(&key, |pair| pair.key)
+            .ok()
+            .map(|index| self.pair_positioning[index])
+            .unwrap_or_default()
+    }
+
     fn glyph_index_for_codepoint(&self, codepoint: u32) -> Option<usize> {
         let mut left = 0usize;
         let mut right = self.intervals.len();
@@ -68,4 +87,8 @@ impl Font {
 
         None
     }
+}
+
+const fn pair_key(left: u32, right: u32) -> u64 {
+    ((left as u64) << 32) | (right as u64)
 }

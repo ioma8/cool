@@ -90,7 +90,21 @@ impl<const N: usize> WrappedLine<N> {
 }
 
 pub(crate) fn measure_text_width(text: &str) -> i32 {
-    text.chars()
-        .map(|ch| i32::from(bookerly::BOOKERLY.glyph_for_char(ch).advance_x))
-        .sum()
+    let mut width = 0;
+    let mut previous = None;
+
+    for ch in text.chars() {
+        let pair = previous.map(|previous_ch| bookerly::BOOKERLY.positioning_for_pair(previous_ch, ch));
+        if let Some(pair) = pair {
+            width += i32::from(pair.pen_adjust);
+        }
+
+        width += i32::from(bookerly::BOOKERLY.glyph_for_char(ch).advance_x);
+        if let Some(pair) = pair {
+            width += i32::from(pair.advance_adjust);
+        }
+        previous = Some(ch);
+    }
+
+    width
 }

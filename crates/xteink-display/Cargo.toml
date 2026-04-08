@@ -18,6 +18,8 @@ esp-println = { version = "0.16", default-features = false, features = ["esp32c3
 
 [build-dependencies]
 fontdue = "0.9"
+rustybuzz = "0.20"
+freetype-rs = "0.38"
 
 [lib]
 path = "src/lib.rs"

@@ -62,19 +62,26 @@ impl Framebuffer {
         let mut cursor_x = i32::from(x);
         let mut cursor_y = i32::from(y);
         let line_height = i32::from(bookerly::BOOKERLY.line_height_px());
+        let mut previous = None;
 
         for ch in text.chars() {
             if ch == '\n' {
                 cursor_x = i32::from(x);
                 cursor_y += line_height;
+                previous = None;
                 continue;
             }
 
+            let pair = previous
+                .map(|previous_ch| bookerly::BOOKERLY.positioning_for_pair(previous_ch, ch))
+                .unwrap_or_default();
+            cursor_x += i32::from(pair.pen_adjust);
             let glyph = bookerly::BOOKERLY.glyph_for_char(ch);
-            let left = cursor_x + i32::from(glyph.left);
-            let top = cursor_y + i32::from(glyph.top);
+            let left = cursor_x + i32::from(glyph.left) + i32::from(pair.x_offset);
+            let top = cursor_y + i32::from(glyph.top) + i32::from(pair.y_offset);
             self.draw_glyph(glyph, left, top);
-            cursor_x += i32::from(glyph.advance_x);
+            cursor_x += i32::from(glyph.advance_x) + i32::from(pair.advance_adjust);
+            previous = Some(ch);
         }
     }
 
