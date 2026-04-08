@@ -163,7 +163,7 @@ impl AppController {
                             path: next_path,
                             page_start: 0,
                             selected: 0,
-                            refresh: BrowserRefresh::Full,
+                            refresh: BrowserRefresh::Fast,
                         }
                     }
                     EntryKind::Epub => {
@@ -186,7 +186,7 @@ impl AppController {
                     path: parent,
                     page_start: 0,
                     selected: 0,
-                    refresh: BrowserRefresh::Full,
+                    refresh: BrowserRefresh::Fast,
                 }
             }
             (ScreenMode::Reading, RawButton::Right | RawButton::Down) => {
@@ -216,7 +216,7 @@ impl AppController {
             (ScreenMode::Reading, RawButton::Back) => {
                 self.screen_mode = ScreenMode::Browse;
                 ControllerCommand::RenderBrowser {
-                    refresh: BrowserRefresh::Full,
+                    refresh: BrowserRefresh::Fast,
                 }
             }
             _ => ControllerCommand::None,
@@ -329,7 +329,7 @@ mod tests {
                 path: String::try_from("/books").unwrap(),
                 page_start: 0,
                 selected: 0,
-                refresh: BrowserRefresh::Full,
+                refresh: BrowserRefresh::Fast,
             }
         );
         assert_eq!(controller.current_path(), "/books");
@@ -359,7 +359,7 @@ mod tests {
                 path: String::try_from("/books").unwrap(),
                 page_start: 0,
                 selected: 0,
-                refresh: BrowserRefresh::Full,
+                refresh: BrowserRefresh::Fast,
             }
         );
         assert_eq!(controller.current_path(), "/books");
@@ -475,7 +475,7 @@ mod tests {
         assert_eq!(
             command,
             ControllerCommand::RenderBrowser {
-                refresh: BrowserRefresh::Full,
+                refresh: BrowserRefresh::Fast,
             }
         );
         assert_eq!(controller.screen_mode(), ScreenMode::Browse);
