@@ -12,24 +12,32 @@ pub const SHARED_RENDER_EPUB_WORKSPACE_LIMIT_BYTES: usize = 128 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceMemoryFootprint {
     pub device_bytes: usize,
+    pub device_heap_bytes: usize,
     pub host_only_bytes: usize,
 }
 
 impl DeviceMemoryFootprint {
     #[must_use]
     pub const fn new(device_bytes: usize) -> Self {
+        Self::with_breakdown(device_bytes, 0, 0)
+    }
+
+    #[must_use]
+    pub const fn with_breakdown(
+        device_bytes: usize,
+        device_heap_bytes: usize,
+        host_only_bytes: usize,
+    ) -> Self {
         Self {
             device_bytes,
-            host_only_bytes: 0,
+            device_heap_bytes,
+            host_only_bytes,
         }
     }
 
     #[must_use]
     pub const fn with_host_overhead(device_bytes: usize, host_only_bytes: usize) -> Self {
-        Self {
-            device_bytes,
-            host_only_bytes,
-        }
+        Self::with_breakdown(device_bytes, 0, host_only_bytes)
     }
 
     #[must_use]
@@ -67,11 +75,13 @@ mod tests {
 
     #[test]
     fn footprint_reports_remaining_device_bytes() {
-        let footprint = DeviceMemoryFootprint::with_host_overhead(100 * 1024, 512 * 1024);
+        let footprint =
+            DeviceMemoryFootprint::with_breakdown(100 * 1024, 32 * 1024, 512 * 1024);
         assert!(footprint.fits_device_budget());
         assert_eq!(
             footprint.remaining_device_bytes(),
             DEVICE_PERSISTENT_BUDGET_BYTES - 100 * 1024
         );
+        assert_eq!(footprint.device_heap_bytes, 32 * 1024);
     }
 }

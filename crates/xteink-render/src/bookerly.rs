@@ -1,3 +1,4 @@
+use core_maths::CoreFloat;
 use rustybuzz::{Face, Feature, UnicodeBuffer};
 use rustybuzz::ttf_parser::Tag;
 
@@ -90,11 +91,11 @@ impl Font {
             let scale = FONT_SIZE_PX / face.units_per_em() as f32;
             let mut pen_x = 0i32;
             for (ch, position) in text.chars().zip(shaped.glyph_positions()) {
-                let x_offset = (position.x_offset as f32 * scale).round() as i32;
-                let y_offset = -((position.y_offset as f32 * scale).round() as i32);
+                let x_offset = CoreFloat::round(position.x_offset as f32 * scale) as i32;
+                let y_offset = -(CoreFloat::round(position.y_offset as f32 * scale) as i32);
                 let glyph = self.glyph_for_char(ch);
                 on_glyph(glyph, pen_x + x_offset, y_offset);
-                pen_x += (position.x_advance as f32 * scale).round() as i32;
+                pen_x += CoreFloat::round(position.x_advance as f32 * scale) as i32;
             }
 
             pen_x

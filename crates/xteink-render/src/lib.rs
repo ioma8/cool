@@ -126,6 +126,19 @@ impl Framebuffer {
     where
         R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
     {
+        self.render_cached_text_page_with_cancel(read_text, target_page, || false)
+    }
+
+    pub fn render_cached_text_page_with_cancel<R, C>(
+        &mut self,
+        read_text: &mut R,
+        target_page: usize,
+        mut should_cancel: C,
+    ) -> Result<usize, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+        C: FnMut() -> bool,
+    {
         let mut cursor_y = 0u16;
         let mut current_page = 0usize;
         let line_height = bookerly::BOOKERLY.line_height_px();
@@ -136,6 +149,9 @@ impl Framebuffer {
         self.clear(0xFF);
 
         loop {
+            if should_cancel() {
+                return Err(xteink_epub::EpubError::Cancelled);
+            }
             let read_len = read_text(&mut read_buffer)?;
             if read_len == 0 {
                 break;

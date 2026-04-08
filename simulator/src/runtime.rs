@@ -9,6 +9,8 @@ use xteink_memory::{
 };
 use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, EPUB_RENDER_WORKSPACE_BYTES, Framebuffer};
 
+const SIMULATOR_DEVICE_HEAP_BYTES: usize = 32 * 1024;
+
 pub fn bootstrap_session<S: AppStorage<Framebuffer>>(
     storage: S,
     page_size: usize,
@@ -19,19 +21,22 @@ pub fn bootstrap_session<S: AppStorage<Framebuffer>>(
 }
 
 pub fn simulator_device_memory_footprint(scale: usize) -> DeviceMemoryFootprint {
-    let device_bytes = size_of::<Session<HostStorage, Framebuffer>>() + EPUB_RENDER_WORKSPACE_BYTES;
+    let device_bytes =
+        size_of::<Session<HostStorage, Framebuffer>>() + EPUB_RENDER_WORKSPACE_BYTES + SIMULATOR_DEVICE_HEAP_BYTES;
     let host_only_bytes =
         usize::from(DISPLAY_WIDTH) * usize::from(DISPLAY_HEIGHT) * scale * scale * size_of::<u32>();
-    DeviceMemoryFootprint::with_host_overhead(device_bytes, host_only_bytes)
+    DeviceMemoryFootprint::with_breakdown(device_bytes, SIMULATOR_DEVICE_HEAP_BYTES, host_only_bytes)
 }
 
 fn print_simulator_memory_report(footprint: DeviceMemoryFootprint, scale: usize) {
     let used_permille = footprint.used_device_permille();
     println!(
-        "simulator memory: device={}B/{DEVICE_PERSISTENT_BUDGET_BYTES}B ({}.{}%), remaining={}B, host_window={}B, scale={scale}, total_ram={}B, stack_reserve={}B, transient_headroom={}B",
+        "simulator memory: device={}B/{DEVICE_PERSISTENT_BUDGET_BYTES}B ({}.{}%), heap={}B, non_heap={}B, remaining={}B, host_window={}B, scale={scale}, total_ram={}B, stack_reserve={}B, transient_headroom={}B",
         footprint.device_bytes,
         used_permille / 10,
         used_permille % 10,
+        footprint.device_heap_bytes,
+        footprint.device_bytes.saturating_sub(footprint.device_heap_bytes),
         footprint.remaining_device_bytes(),
         footprint.host_only_bytes,
         DEVICE_TOTAL_RAM_BYTES,

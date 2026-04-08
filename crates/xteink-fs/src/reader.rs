@@ -1,7 +1,6 @@
-use embedded_hal::spi::SpiDevice;
-use xteink_display::SSD1677Display;
 use xteink_epub::EpubError;
 use xteink_epub::EpubSource;
+use xteink_render::Framebuffer;
 
 use crate::{
     cache::{
@@ -26,37 +25,27 @@ pub struct EpubRenderResult {
     pub refresh: EpubRefreshMode,
 }
 
-pub fn render_epub_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
+pub fn render_epub_from_entry<SD>(
     fs: &SD,
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    display: &mut Framebuffer,
     current_path: &str,
     entry: &ListedEntry,
 ) -> Result<EpubRenderResult, EpubError>
 where
     SD: SdFilesystem,
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
 {
     render_epub_from_entry_with_cancel(fs, display, current_path, entry, || false)
 }
 
-pub fn render_epub_from_entry_with_cancel<SD, SPI, DC, RST, BUSY, DELAY, C>(
+pub fn render_epub_from_entry_with_cancel<SD, C>(
     fs: &SD,
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    display: &mut Framebuffer,
     current_path: &str,
     entry: &ListedEntry,
     should_cancel: C,
 ) -> Result<EpubRenderResult, EpubError>
 where
     SD: SdFilesystem,
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
     C: FnMut() -> bool,
 {
     logln!(
@@ -101,9 +90,9 @@ where
     )
 }
 
-pub fn render_epub_page_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
+pub fn render_epub_page_from_entry<SD>(
     fs: &SD,
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    display: &mut Framebuffer,
     current_path: &str,
     entry: &ListedEntry,
     page_index: usize,
@@ -111,11 +100,6 @@ pub fn render_epub_page_from_entry<SD, SPI, DC, RST, BUSY, DELAY>(
 ) -> Result<EpubRenderResult, EpubError>
 where
     SD: SdFilesystem,
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
 {
     render_epub_page_from_entry_with_cancel(
         fs,
@@ -128,9 +112,9 @@ where
     )
 }
 
-pub fn render_epub_page_from_entry_with_cancel<SD, SPI, DC, RST, BUSY, DELAY, C>(
+pub fn render_epub_page_from_entry_with_cancel<SD, C>(
     fs: &SD,
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    display: &mut Framebuffer,
     current_path: &str,
     entry: &ListedEntry,
     page_index: usize,
@@ -139,11 +123,6 @@ pub fn render_epub_page_from_entry_with_cancel<SD, SPI, DC, RST, BUSY, DELAY, C>
 ) -> Result<EpubRenderResult, EpubError>
 where
     SD: SdFilesystem,
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
     C: FnMut() -> bool,
 {
     let source_path =
@@ -372,9 +351,9 @@ fn write_meta<SD: SdFilesystem>(
     write_bytes(fs, paths.meta.as_str(), serialized.as_bytes())
 }
 
-fn read_epub_source_to_cache_and_render<SD, SPI, DC, RST, BUSY, DELAY>(
+fn read_epub_source_to_cache_and_render<SD>(
     fs: &SD,
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    display: &mut Framebuffer,
     source: SD::EpubSource<'_>,
     source_size: u32,
     source_path: &str,
@@ -384,11 +363,6 @@ fn read_epub_source_to_cache_and_render<SD, SPI, DC, RST, BUSY, DELAY>(
 ) -> Result<usize, EpubError>
 where
     SD: SdFilesystem,
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
 {
     logln!(
         "EPUB cache write start: directory={} content={}",

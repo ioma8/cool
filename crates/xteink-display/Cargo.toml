@@ -5,22 +5,7 @@ edition.workspace = true
 
 [dependencies]
 embedded-hal.workspace = true
-heapless = { version = "0.8", default-features = false }
-critical-section = "1.2"
-xteink-epub = { path = "../xteink-epub" }
-miniz_oxide = { version = "0.8", default-features = false }
-xteink-memory.workspace = true
-rustybuzz = "0.20"
-
-[target.'cfg(target_arch = "riscv32")'.dependencies]
-esp-hal = { version = "1.0.0", features = ["esp32c3", "unstable"] }
-esp-rtos = { version = "0.2.0", features = ["esp32c3"] }
-esp-println = { version = "0.16", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
-
-[build-dependencies]
-fontdue = "0.9"
-rustybuzz = "0.20"
-freetype-rs = "0.38"
+xteink-render = { path = "../xteink-render" }
 
 [lib]
 path = "src/lib.rs"

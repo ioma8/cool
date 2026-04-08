@@ -3,6 +3,7 @@
 
 use core::cell::RefCell;
 use core::mem::{size_of, size_of_val};
+use core::mem::MaybeUninit;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
@@ -23,7 +24,7 @@ use xteink_buttons::{
     Button as RawButton, ButtonState, get_button_from_adc_1, get_button_from_adc_2,
 };
 use xteink_controller::BrowserRefresh;
-use xteink_display::{DISPLAY_HEIGHT, SSD1677Display, bookerly};
+use xteink_display::{DISPLAY_HEIGHT, SSD1677Display};
 use xteink_fs::{
     FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
     render_epub_page_from_entry,
@@ -32,12 +33,15 @@ use xteink_memory::{
     DEVICE_PERSISTENT_BUDGET_BYTES, DEVICE_STACK_RESERVE_BYTES, DEVICE_TOTAL_RAM_BYTES,
     DEVICE_TRANSIENT_HEADROOM_BYTES, DeviceMemoryFootprint,
 };
+use xteink_render::{Framebuffer, bookerly};
 
 use embedded_hal::spi::{SpiBus, SpiDevice};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 const BUTTON_EVENT_CHANNEL_CAPACITY: usize = 8;
 const STACK_REPORT_GRANULARITY_BYTES: usize = 256;
+const FIRMWARE_HEAP_BYTES: usize = 32 * 1024;
+static mut HEAP: MaybeUninit<[u8; FIRMWARE_HEAP_BYTES]> = MaybeUninit::uninit();
 
 static BUTTON_EVENT_CHANNEL: Channel<
     CriticalSectionRawMutex,
@@ -67,7 +71,7 @@ impl StackProbe {
 }
 const FIRMWARE_STATIC_DEVICE_BYTES: usize = size_of::<
     Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
->() + xteink_display::EPUB_RENDER_WORKSPACE_BYTES;
+>() + xteink_render::EPUB_RENDER_WORKSPACE_BYTES + FIRMWARE_HEAP_BYTES;
 
 const _: [(); 1] = [(); (FIRMWARE_STATIC_DEVICE_BYTES <= DEVICE_PERSISTENT_BUDGET_BYTES) as usize];
 
@@ -132,15 +136,9 @@ fn app_entry_to_fs_entry(entry: &AppListedEntry) -> ListedEntry {
     }
 }
 
-impl<'a, SD, SPI, DC, RST, BUSY, DELAY> AppStorage<SSD1677Display<SPI, DC, RST, BUSY, DELAY>>
-    for FirmwareStorage<'a, SD>
+impl<'a, SD> AppStorage<Framebuffer> for FirmwareStorage<'a, SD>
 where
     SD: SdFilesystem,
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
 {
     type Error = FirmwareStorageError;
 
@@ -170,7 +168,7 @@ where
 
     fn render_epub_from_entry(
         &self,
-        renderer: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+        renderer: &mut Framebuffer,
         current_path: &str,
         entry: &AppListedEntry,
     ) -> Result<usize, Self::Error> {
@@ -185,7 +183,7 @@ where
 
     fn render_epub_page_from_entry(
         &self,
-        renderer: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+        renderer: &mut Framebuffer,
         current_path: &str,
         entry: &AppListedEntry,
         target_page: usize,
@@ -204,31 +202,40 @@ where
 
 fn firmware_memory_footprint<SD, SPIBUS, SPI, DC, RST, BUSY, DELAY>(
     spi_bus: &Mutex<NoopRawMutex, RefCell<SPIBUS>>,
-    session: &Session<FirmwareStorage<'_, SD>, SSD1677Display<SPI, DC, RST, BUSY, DELAY>>,
+    session: &Session<FirmwareStorage<'_, SD>, Framebuffer>,
+    display: &SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
 ) -> DeviceMemoryFootprint
 where
+    SPIBUS: SpiBus,
     SPI: SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin,
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    DeviceMemoryFootprint::new(
-        FIRMWARE_STATIC_DEVICE_BYTES + size_of_val(spi_bus) + size_of_val(session),
+    DeviceMemoryFootprint::with_breakdown(
+        FIRMWARE_STATIC_DEVICE_BYTES
+            + size_of_val(spi_bus)
+            + size_of_val(session)
+            + size_of_val(display),
+        FIRMWARE_HEAP_BYTES,
+        0,
     )
 }
 
 fn enforce_firmware_memory_budget<SD, SPIBUS, SPI, DC, RST, BUSY, DELAY>(
-    spi_bus: &Mutex<NoopRawMutex, RefCell<SPI>>,
-    session: &Session<FirmwareStorage<'_, SD>, SSD1677Display<SPIBUS, DC, RST, BUSY, DELAY>>,
+    spi_bus: &Mutex<NoopRawMutex, RefCell<SPIBUS>>,
+    session: &Session<FirmwareStorage<'_, SD>, Framebuffer>,
+    display: &SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
 ) where
-    SPIBUS: SpiDevice,
+    SPIBUS: SpiBus,
+    SPI: SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin,
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    let footprint = firmware_memory_footprint(spi_bus, session);
+    let footprint = firmware_memory_footprint(spi_bus, session, display);
     assert!(
         footprint.fits_device_budget(),
         "firmware device memory footprint {} exceeds budget {}",
@@ -240,16 +247,28 @@ fn enforce_firmware_memory_budget<SD, SPIBUS, SPI, DC, RST, BUSY, DELAY>(
 fn log_firmware_memory_report(footprint: DeviceMemoryFootprint) {
     let used_permille = footprint.used_device_permille();
     esp_println::println!(
-        "Memory footprint: device={}B/{}B ({}.{}%), remaining={}B, total_ram={}B, stack_reserve={}B, transient_headroom={}B",
+        "Memory footprint: device={}B/{}B ({}.{}%), heap={}B, non_heap={}B, remaining={}B, total_ram={}B, stack_reserve={}B, transient_headroom={}B",
         footprint.device_bytes,
         DEVICE_PERSISTENT_BUDGET_BYTES,
         used_permille / 10,
         used_permille % 10,
+        footprint.device_heap_bytes,
+        footprint.device_bytes.saturating_sub(footprint.device_heap_bytes),
         footprint.remaining_device_bytes(),
         DEVICE_TOTAL_RAM_BYTES,
         DEVICE_STACK_RESERVE_BYTES,
         DEVICE_TRANSIENT_HEADROOM_BYTES,
     );
+}
+
+fn init_heap() {
+    unsafe {
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            core::ptr::addr_of_mut!(HEAP) as *mut u8,
+            FIRMWARE_HEAP_BYTES,
+            esp_alloc::MemoryCapability::Internal.into(),
+        ));
+    }
 }
 
 fn apply_refresh<SPI, DC, RST, BUSY, DELAY>(
@@ -370,6 +389,7 @@ fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    init_heap();
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
     let boot_delay = Delay::new();
@@ -430,9 +450,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let Some(sd) = sd else {
         let mut display = display;
+        let mut framebuffer = Framebuffer::new();
         let mut pending_display_refresh = PendingDisplayRefresh::None;
         display.init();
-        render_error_screen(&mut display, "SD init failed", &mut pending_display_refresh);
+        render_error_screen(&mut framebuffer, "SD init failed", &mut pending_display_refresh);
+        display.set_framebuffer(framebuffer.bytes());
         service_display_refresh(&mut display, &mut pending_display_refresh);
         loop {
             yield_now().await;
@@ -458,14 +480,16 @@ async fn main(spawner: Spawner) -> ! {
         InputConfig::default().with_pull(Pull::Down),
     );
 
-    let mut session = Session::new(FirmwareStorage::new(&sd), display, page_size);
-    session.renderer_mut().init();
+    let mut display = display;
+    display.init();
+    let mut session = Session::new(FirmwareStorage::new(&sd), Framebuffer::new(), page_size);
     match session.bootstrap() {
         Ok(refresh) => {
-            let footprint = firmware_memory_footprint(&spi_bus, &session);
+            display.set_framebuffer(session.renderer().bytes());
+            let footprint = firmware_memory_footprint(&spi_bus, &session, &display);
             log_firmware_memory_report(footprint);
-            enforce_firmware_memory_budget(&spi_bus, &session);
-            apply_refresh(session.renderer_mut(), refresh);
+            enforce_firmware_memory_budget(&spi_bus, &session, &display);
+            apply_refresh(&mut display, refresh);
         }
         Err(err) => {
             esp_println::println!("Session bootstrap failed: {:?}", err);
@@ -475,7 +499,8 @@ async fn main(spawner: Spawner) -> ! {
                 "Directory listing error",
                 &mut pending_display_refresh,
             );
-            service_display_refresh(session.renderer_mut(), &mut pending_display_refresh);
+            display.set_framebuffer(session.renderer().bytes());
+            service_display_refresh(&mut display, &mut pending_display_refresh);
             loop {
                 yield_now().await;
             }
@@ -483,7 +508,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     spawner.must_spawn(input_task(sender, power_button));
-    ui_task(session, receiver).await;
+    ui_task(session, display, receiver).await;
     loop {}
 }
 
@@ -557,7 +582,8 @@ async fn input_task(
 }
 
 async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
-    mut session: Session<FirmwareStorage<'_, SD>, SSD1677Display<SPI, DC, RST, BUSY, DELAY>>,
+    mut session: Session<FirmwareStorage<'_, SD>, Framebuffer>,
+    mut display: SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     receiver: Receiver<'static, CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
 ) where
     SD: xteink_fs::SdFilesystem,
@@ -572,7 +598,10 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
         observe_task_stack("ui_task", &UI_TASK_STACK_PROBE);
         let button = receiver.receive().await;
         match session.handle_button(button) {
-            Ok(Some(refresh)) => apply_refresh(session.renderer_mut(), refresh),
+            Ok(Some(refresh)) => {
+                display.set_framebuffer(session.renderer().bytes());
+                apply_refresh(&mut display, refresh);
+            }
             Ok(None) => {}
             Err(err) => {
                 esp_println::println!("Session button handling failed: {:?}", err);
@@ -582,7 +611,8 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
                     "Session error",
                     &mut pending_display_refresh,
                 );
-                service_display_refresh(session.renderer_mut(), &mut pending_display_refresh);
+                display.set_framebuffer(session.renderer().bytes());
+                service_display_refresh(&mut display, &mut pending_display_refresh);
             }
         }
     }
@@ -595,17 +625,11 @@ fn browser_page_size() -> usize {
     visible.clamp(1, MAX_ENTRIES)
 }
 
-fn render_error_screen<SPI, DC, RST, BUSY, DELAY>(
-    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+fn render_error_screen(
+    display: &mut Framebuffer,
     message: &str,
     pending_display_refresh: &mut PendingDisplayRefresh,
-) where
-    SPI: SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
-{
+) {
     display.clear(0xFF);
     display.draw_wrapped_text(4, 4, message, DISPLAY_HEIGHT);
     pending_display_refresh.request(BrowserRefresh::Full);

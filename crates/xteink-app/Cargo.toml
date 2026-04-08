@@ -4,12 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-embedded-hal.workspace = true
 heapless = { version = "0.8", default-features = false }
 xteink-browser = { path = "../xteink-browser" }
 xteink-buttons = { path = "../xteink-buttons" }
 xteink-controller = { path = "../xteink-controller" }
-xteink-display = { path = "../xteink-display" }
 xteink-render = { path = "../xteink-render" }
 
 [lib]

@@ -71,24 +71,6 @@ impl AppRenderer for xteink_render::Framebuffer {
     }
 }
 
-impl<SPI, DC, RST, BUSY, DELAY> AppRenderer
-    for xteink_display::SSD1677Display<SPI, DC, RST, BUSY, DELAY>
-where
-    SPI: embedded_hal::spi::SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin,
-    BUSY: embedded_hal::digital::InputPin,
-    DELAY: embedded_hal::delay::DelayNs,
-{
-    fn clear(&mut self, color: u8) {
-        xteink_display::SSD1677Display::clear(self, color);
-    }
-
-    fn draw_text(&mut self, x: u16, y: u16, text: &str) {
-        xteink_display::SSD1677Display::draw_text(self, x, y, text);
-    }
-}
-
 pub trait AppStorage<R: AppRenderer> {
     type Error;
 

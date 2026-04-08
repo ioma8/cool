@@ -12,8 +12,8 @@ embedded-hal.workspace = true
 embedded-sdmmc = { version = "0.9.0", default-features = false }
 heapless = { version = "0.8", default-features = false }
 xteink-browser = { path = "../xteink-browser" }
-xteink-display = { path = "../xteink-display" }
 xteink-epub = { path = "../xteink-epub" }
+xteink-render = { path = "../xteink-render" }
 xteink-sdspi = { path = "../xteink-sdspi" }
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
