@@ -1,6 +1,7 @@
 use fontdue::{Font, FontSettings};
 use freetype::Library;
-use rustybuzz::{Face, UnicodeBuffer};
+use rustybuzz::{Face, Feature, UnicodeBuffer};
+use rustybuzz::ttf_parser::Tag;
 use xteink_render::{Framebuffer, bookerly};
 
 #[test]
@@ -82,6 +83,24 @@ fn generated_bookerly_pair_positioning_matches_gpos_for_common_pairs() {
     }
 
     assert!(matched_any, "expected at least one common pair to use GPOS positioning");
+}
+
+#[test]
+fn renderer_positions_match_full_shaping_for_office() {
+    const FONT_SIZE: f32 = 32.0;
+    let font_bytes = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../xteink-display/assets/Bookerly-Regular.ttf"
+    )) as &[u8];
+    let face = Face::from_slice(font_bytes, 0).expect("Bookerly shaping face should parse");
+    let scale = FONT_SIZE / face.units_per_em() as f32;
+    let text = "office";
+
+    assert_eq!(
+        renderer_positions(text),
+        shaped_positions(&face, scale, text),
+        "renderer should match full shaping positions"
+    );
 }
 
 #[test]
@@ -187,6 +206,34 @@ fn shape_pair_positioning(
         y_offset,
         advance_adjust,
     })
+}
+
+fn renderer_positions(text: &str) -> Vec<i32> {
+    let mut positions = Vec::new();
+    bookerly::BOOKERLY.shape_text(text, |glyph, glyph_x, _| {
+        positions.push(glyph_x + i32::from(glyph.left));
+    });
+    positions
+}
+
+fn shaped_positions(face: &Face<'_>, scale: f32, text: &str) -> Vec<i32> {
+    let features = [
+        Feature::new(Tag::from_bytes(b"liga"), 0, ..),
+        Feature::new(Tag::from_bytes(b"clig"), 0, ..),
+        Feature::new(Tag::from_bytes(b"calt"), 0, ..),
+    ];
+    let mut buffer = UnicodeBuffer::new();
+    buffer.push_str(text);
+    let output = rustybuzz::shape(face, &features, buffer);
+    let mut pen = 0i32;
+    let mut positions = Vec::with_capacity(output.glyph_positions().len());
+    for (ch, position) in text.chars().zip(output.glyph_positions()) {
+        let glyph = bookerly::BOOKERLY.glyph_for_char(ch);
+        positions.push(pen + (position.x_offset as f32 * scale).round() as i32 + i32::from(glyph.left));
+        pen += (position.x_advance as f32 * scale).round() as i32;
+    }
+
+    positions
 }
 
 fn unpack_bookerly_bitmap(glyph: &bookerly::Glyph) -> Vec<bool> {

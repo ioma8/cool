@@ -155,7 +155,7 @@ fn main() {
             };
 
             let Some(pair) =
-                shape_pair_positioning(&shape_face, left_char, right_char, left_glyph, right_glyph)
+                shape_pair_positioning(left_glyph.codepoint, right_glyph.codepoint, &shape_face, left_char, right_char, left_glyph, right_glyph)
             else {
                 continue;
             };
@@ -266,6 +266,8 @@ fn render_generated_file(
 }
 
 fn shape_pair_positioning(
+    left_codepoint: u32,
+    right_codepoint: u32,
     face: &Face<'_>,
     left_char: char,
     right_char: char,
@@ -297,8 +299,8 @@ fn shape_pair_positioning(
     }
 
     Some(PairPositioningMeta {
-        left: left_glyph.codepoint,
-        right: right_glyph.codepoint,
+        left: left_codepoint,
+        right: right_codepoint,
         pen_adjust,
         x_offset,
         y_offset,
