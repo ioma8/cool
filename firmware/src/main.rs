@@ -3,7 +3,6 @@
 
 use core::cell::RefCell;
 use core::mem::{size_of, size_of_val};
-use core::mem::MaybeUninit;
 use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
@@ -40,8 +39,6 @@ use embedded_hal::spi::{SpiBus, SpiDevice};
 esp_bootloader_esp_idf::esp_app_desc!();
 const BUTTON_EVENT_CHANNEL_CAPACITY: usize = 8;
 const STACK_REPORT_GRANULARITY_BYTES: usize = 256;
-const FIRMWARE_HEAP_BYTES: usize = 32 * 1024;
-static mut HEAP: MaybeUninit<[u8; FIRMWARE_HEAP_BYTES]> = MaybeUninit::uninit();
 
 static BUTTON_EVENT_CHANNEL: Channel<
     CriticalSectionRawMutex,
@@ -58,6 +55,7 @@ struct StackProbe {
     top: usize,
     low: usize,
     reported_usage: usize,
+    has_reported: bool,
 }
 
 impl StackProbe {
@@ -66,12 +64,13 @@ impl StackProbe {
             top: 0,
             low: usize::MAX,
             reported_usage: 0,
+            has_reported: false,
         }
     }
 }
 const FIRMWARE_STATIC_DEVICE_BYTES: usize = size_of::<
     Channel<CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
->() + xteink_render::EPUB_RENDER_WORKSPACE_BYTES + FIRMWARE_HEAP_BYTES;
+>() + xteink_render::EPUB_RENDER_WORKSPACE_BYTES;
 
 const _: [(); 1] = [(); (FIRMWARE_STATIC_DEVICE_BYTES <= DEVICE_PERSISTENT_BUDGET_BYTES) as usize];
 
@@ -213,13 +212,11 @@ where
     BUSY: embedded_hal::digital::InputPin,
     DELAY: embedded_hal::delay::DelayNs,
 {
-    DeviceMemoryFootprint::with_breakdown(
+    DeviceMemoryFootprint::new(
         FIRMWARE_STATIC_DEVICE_BYTES
             + size_of_val(spi_bus)
             + size_of_val(session)
             + size_of_val(display),
-        FIRMWARE_HEAP_BYTES,
-        0,
     )
 }
 
@@ -261,18 +258,9 @@ fn log_firmware_memory_report(footprint: DeviceMemoryFootprint) {
     );
 }
 
-fn init_heap() {
-    unsafe {
-        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-            core::ptr::addr_of_mut!(HEAP) as *mut u8,
-            FIRMWARE_HEAP_BYTES,
-            esp_alloc::MemoryCapability::Internal.into(),
-        ));
-    }
-}
-
 fn apply_refresh<SPI, DC, RST, BUSY, DELAY>(
     display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    framebuffer: &[u8; xteink_display::BUFFER_SIZE],
     refresh: BrowserRefresh,
 ) where
     SPI: SpiDevice,
@@ -282,8 +270,8 @@ fn apply_refresh<SPI, DC, RST, BUSY, DELAY>(
     DELAY: embedded_hal::delay::DelayNs,
 {
     match refresh {
-        BrowserRefresh::Full => display.refresh_full(),
-        BrowserRefresh::Fast => display.refresh_fast(),
+        BrowserRefresh::Full => display.refresh_full(framebuffer),
+        BrowserRefresh::Fast => display.refresh_fast(framebuffer),
     }
 }
 
@@ -308,17 +296,19 @@ fn observe_task_stack(task_name: &str, probe: &'static Mutex<CriticalSectionRawM
         }
 
         let used = state.top.saturating_sub(state.low);
-        if used >= state.reported_usage.saturating_add(STACK_REPORT_GRANULARITY_BYTES)
-            || state.reported_usage == 0
-        {
+        let should_report = if !state.has_reported {
+            true
+        } else {
+            used >= state.reported_usage.saturating_add(STACK_REPORT_GRANULARITY_BYTES)
+        };
+
+        if should_report {
             state.reported_usage = used;
+            state.has_reported = true;
             esp_println::println!(
-                "Stack usage: task={} observed_used={}B current_sp=0x{:08x} stack_top=0x{:08x} stack_low=0x{:08x}",
+                "Stack usage: task={} observed_used={}B",
                 task_name,
                 used,
-                sp as u32,
-                state.top as u32,
-                state.low as u32
             );
         }
     })
@@ -389,7 +379,6 @@ fn read_adc1_oneshot_raw(channel: u8, attenuation_bits: u8) -> u16 {
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    init_heap();
     let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
 
     let boot_delay = Delay::new();
@@ -454,8 +443,7 @@ async fn main(spawner: Spawner) -> ! {
         let mut pending_display_refresh = PendingDisplayRefresh::None;
         display.init();
         render_error_screen(&mut framebuffer, "SD init failed", &mut pending_display_refresh);
-        display.set_framebuffer(framebuffer.bytes());
-        service_display_refresh(&mut display, &mut pending_display_refresh);
+        service_display_refresh(&mut display, framebuffer.bytes(), &mut pending_display_refresh);
         loop {
             yield_now().await;
         }
@@ -485,11 +473,10 @@ async fn main(spawner: Spawner) -> ! {
     let mut session = Session::new(FirmwareStorage::new(&sd), Framebuffer::new(), page_size);
     match session.bootstrap() {
         Ok(refresh) => {
-            display.set_framebuffer(session.renderer().bytes());
             let footprint = firmware_memory_footprint(&spi_bus, &session, &display);
             log_firmware_memory_report(footprint);
             enforce_firmware_memory_budget(&spi_bus, &session, &display);
-            apply_refresh(&mut display, refresh);
+            apply_refresh(&mut display, session.renderer().bytes(), refresh);
         }
         Err(err) => {
             esp_println::println!("Session bootstrap failed: {:?}", err);
@@ -499,8 +486,11 @@ async fn main(spawner: Spawner) -> ! {
                 "Directory listing error",
                 &mut pending_display_refresh,
             );
-            display.set_framebuffer(session.renderer().bytes());
-            service_display_refresh(&mut display, &mut pending_display_refresh);
+            service_display_refresh(
+                &mut display,
+                session.renderer().bytes(),
+                &mut pending_display_refresh,
+            );
             loop {
                 yield_now().await;
             }
@@ -508,7 +498,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     spawner.must_spawn(input_task(sender, power_button));
-    ui_task(session, display, receiver).await;
+    ui_task(&mut session, &mut display, receiver).await;
     loop {}
 }
 
@@ -582,8 +572,8 @@ async fn input_task(
 }
 
 async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
-    mut session: Session<FirmwareStorage<'_, SD>, Framebuffer>,
-    mut display: SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    session: &mut Session<FirmwareStorage<'_, SD>, Framebuffer>,
+    display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
     receiver: Receiver<'static, CriticalSectionRawMutex, RawButton, BUTTON_EVENT_CHANNEL_CAPACITY>,
 ) where
     SD: xteink_fs::SdFilesystem,
@@ -599,8 +589,7 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
         let button = receiver.receive().await;
         match session.handle_button(button) {
             Ok(Some(refresh)) => {
-                display.set_framebuffer(session.renderer().bytes());
-                apply_refresh(&mut display, refresh);
+                apply_refresh(display, session.renderer().bytes(), refresh);
             }
             Ok(None) => {}
             Err(err) => {
@@ -611,8 +600,11 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
                     "Session error",
                     &mut pending_display_refresh,
                 );
-                display.set_framebuffer(session.renderer().bytes());
-                service_display_refresh(&mut display, &mut pending_display_refresh);
+                service_display_refresh(
+                    display,
+                    session.renderer().bytes(),
+                    &mut pending_display_refresh,
+                );
             }
         }
     }
@@ -637,6 +629,7 @@ fn render_error_screen(
 
 fn service_display_refresh<SPI, DC, RST, BUSY, DELAY>(
     display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
+    framebuffer: &[u8; xteink_display::BUFFER_SIZE],
     pending_display_refresh: &mut PendingDisplayRefresh,
 ) where
     SPI: SpiDevice,
@@ -650,8 +643,8 @@ fn service_display_refresh<SPI, DC, RST, BUSY, DELAY>(
     };
 
     let schedule = match refresh {
-        BrowserRefresh::Full => display.refresh_full_nonblocking(),
-        BrowserRefresh::Fast => display.refresh_fast_nonblocking(),
+        BrowserRefresh::Full => display.refresh_full_nonblocking(framebuffer),
+        BrowserRefresh::Fast => display.refresh_fast_nonblocking(framebuffer),
     };
 
     if schedule.is_ok() {

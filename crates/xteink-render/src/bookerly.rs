@@ -1,19 +1,10 @@
-use core_maths::CoreFloat;
-use rustybuzz::{Face, Feature, UnicodeBuffer};
-use rustybuzz::ttf_parser::Tag;
-
-const FONT_SIZE_PX: f32 = 32.0;
-static BOOKERLY_FONT_BYTES: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../xteink-display/assets/Bookerly-Regular.ttf"
-));
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Glyph {
     pub codepoint: u32,
     pub width: u8,
     pub height: u8,
     pub advance_x: u16,
+    pub layout_advance_x: u16,
     pub left: i16,
     pub top: i16,
     pub data_offset: u32,
@@ -79,27 +70,34 @@ impl Font {
     }
 
     pub fn shape_text(&self, text: &str, mut on_glyph: impl FnMut(&Glyph, i32, i32)) -> i32 {
-        with_bookerly_face(|face| {
-            let mut buffer = UnicodeBuffer::new();
-            buffer.push_str(text);
-            let features = [
-                Feature::new(Tag::from_bytes(b"liga"), 0, ..),
-                Feature::new(Tag::from_bytes(b"clig"), 0, ..),
-                Feature::new(Tag::from_bytes(b"calt"), 0, ..),
-            ];
-            let shaped = rustybuzz::shape(face, &features, buffer);
-            let scale = FONT_SIZE_PX / face.units_per_em() as f32;
-            let mut pen_x = 0i32;
-            for (ch, position) in text.chars().zip(shaped.glyph_positions()) {
-                let x_offset = CoreFloat::round(position.x_offset as f32 * scale) as i32;
-                let y_offset = -(CoreFloat::round(position.y_offset as f32 * scale) as i32);
-                let glyph = self.glyph_for_char(ch);
-                on_glyph(glyph, pen_x + x_offset, y_offset);
-                pen_x += CoreFloat::round(position.x_advance as f32 * scale) as i32;
-            }
+        let mut chars = text.chars();
+        let Some(mut current) = chars.next() else {
+            return 0;
+        };
 
-            pen_x
-        })
+        let mut pen_x = 0i32;
+        let mut incoming_x_offset = 0i32;
+        let mut incoming_y_offset = 0i32;
+        let mut incoming_advance_adjust = 0i32;
+
+        loop {
+            let glyph = self.glyph_for_char(current);
+            on_glyph(glyph, pen_x + incoming_x_offset, incoming_y_offset);
+
+            let Some(next) = chars.next() else {
+                pen_x += i32::from(glyph.layout_advance_x) + incoming_advance_adjust;
+                break;
+            };
+
+            let pair = self.positioning_for_pair(current, next);
+            pen_x += i32::from(glyph.layout_advance_x) + i32::from(pair.pen_adjust);
+            incoming_x_offset = i32::from(pair.x_offset);
+            incoming_y_offset = i32::from(pair.y_offset);
+            incoming_advance_adjust = i32::from(pair.advance_adjust);
+            current = next;
+        }
+
+        pen_x
     }
 
     fn glyph_index_for_codepoint(&self, codepoint: u32) -> Option<usize> {
@@ -125,9 +123,4 @@ impl Font {
 
 const fn pair_key(left: u32, right: u32) -> u64 {
     ((left as u64) << 32) | (right as u64)
-}
-
-fn with_bookerly_face<R>(f: impl FnOnce(&Face<'static>) -> R) -> R {
-    let face = Face::from_slice(BOOKERLY_FONT_BYTES, 0).expect("Bookerly face should parse");
-    f(&face)
 }

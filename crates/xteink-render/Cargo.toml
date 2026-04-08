@@ -4,12 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-core_maths = "0.1"
 critical-section.workspace = true
 miniz_oxide = { version = "0.8", default-features = false }
 xteink-epub = { path = "../xteink-epub" }
 xteink-memory.workspace = true
-rustybuzz = { version = "0.20", default-features = false }
 
 [build-dependencies]
 fontdue = "0.9"

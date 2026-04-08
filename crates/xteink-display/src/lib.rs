@@ -60,7 +60,6 @@ where
     rst: RST,
     busy: BUSY,
     delay: DELAY,
-    framebuffer: [u8; BUFFER_SIZE],
     is_screen_on: bool,
 }
 
@@ -79,7 +78,6 @@ where
             rst,
             busy,
             delay,
-            framebuffer: [0xFF; BUFFER_SIZE],
             is_screen_on: false,
         }
     }
@@ -89,41 +87,13 @@ where
         self.init_display_controller();
     }
 
-    pub fn clear(&mut self, color: u8) {
-        self.framebuffer.fill(color);
-    }
-
-    pub fn framebuffer(&self) -> &[u8; BUFFER_SIZE] {
-        &self.framebuffer
-    }
-
-    pub fn set_framebuffer(&mut self, framebuffer: &[u8; BUFFER_SIZE]) {
-        self.framebuffer.copy_from_slice(framebuffer);
-    }
-
     pub fn spi(&self) -> &SPI {
         &self.spi
     }
 
-    pub fn set_pixel(&mut self, x: u16, y: u16, black: bool) {
-        if x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT {
-            return;
-        }
-
-        let px = y;
-        let py = (DISPLAY_WIDTH - 1) - x;
-        let idx = (py as usize) * (DISPLAY_WIDTH_BYTES as usize) + (px as usize / 8);
-        let bit = 7 - (px % 8);
-
-        if black {
-            self.framebuffer[idx] &= !(1 << bit);
-        } else {
-            self.framebuffer[idx] |= 1 << bit;
-        }
-    }
-
     pub fn display_buffer(
         &mut self,
+        framebuffer: &[u8; BUFFER_SIZE],
         mode: RefreshMode,
         wait_for_ready: bool,
     ) -> Result<(), RefreshScheduleError> {
@@ -135,12 +105,12 @@ where
 
         if mode != RefreshMode::Fast {
             self.send_command(CMD_WRITE_RAM_BW);
-            self.write_framebuffer();
+            self.write_framebuffer(framebuffer);
             self.send_command(CMD_WRITE_RAM_RED);
-            self.write_framebuffer();
+            self.write_framebuffer(framebuffer);
         } else {
             self.send_command(CMD_WRITE_RAM_BW);
-            self.write_framebuffer();
+            self.write_framebuffer(framebuffer);
         }
 
         self.refresh_display(mode, false);
@@ -148,7 +118,7 @@ where
         if mode == RefreshMode::Fast {
             self.set_ram_area(0, 0, PHYSICAL_WIDTH, PHYSICAL_HEIGHT);
             self.send_command(CMD_WRITE_RAM_RED);
-            self.write_framebuffer();
+            self.write_framebuffer(framebuffer);
         }
 
         if wait_for_ready {
@@ -158,20 +128,26 @@ where
         Ok(())
     }
 
-    pub fn refresh_full(&mut self) {
-        let _ = self.display_buffer(RefreshMode::Full, true);
+    pub fn refresh_full(&mut self, framebuffer: &[u8; BUFFER_SIZE]) {
+        let _ = self.display_buffer(framebuffer, RefreshMode::Full, true);
     }
 
-    pub fn refresh_fast(&mut self) {
-        let _ = self.display_buffer(RefreshMode::Fast, true);
+    pub fn refresh_fast(&mut self, framebuffer: &[u8; BUFFER_SIZE]) {
+        let _ = self.display_buffer(framebuffer, RefreshMode::Fast, true);
     }
 
-    pub fn refresh_full_nonblocking(&mut self) -> Result<(), RefreshScheduleError> {
-        self.display_buffer(RefreshMode::Full, false)
+    pub fn refresh_full_nonblocking(
+        &mut self,
+        framebuffer: &[u8; BUFFER_SIZE],
+    ) -> Result<(), RefreshScheduleError> {
+        self.display_buffer(framebuffer, RefreshMode::Full, false)
     }
 
-    pub fn refresh_fast_nonblocking(&mut self) -> Result<(), RefreshScheduleError> {
-        self.display_buffer(RefreshMode::Fast, false)
+    pub fn refresh_fast_nonblocking(
+        &mut self,
+        framebuffer: &[u8; BUFFER_SIZE],
+    ) -> Result<(), RefreshScheduleError> {
+        self.display_buffer(framebuffer, RefreshMode::Fast, false)
     }
 
     pub fn is_busy(&mut self) -> bool {
@@ -316,7 +292,7 @@ where
         let _ = self.spi.write(&[data]);
     }
 
-    fn write_framebuffer(&mut self) {
+    fn write_framebuffer(&mut self, framebuffer: &[u8; BUFFER_SIZE]) {
         let _ = self.dc.set_high();
         for _ in 0..10 {
             core::hint::spin_loop();
@@ -324,7 +300,7 @@ where
         let mut offset = 0;
         while offset < BUFFER_SIZE {
             let end = (offset + 4096).min(BUFFER_SIZE);
-            let _ = self.spi.write(&self.framebuffer[offset..end]);
+            let _ = self.spi.write(&framebuffer[offset..end]);
             offset = end;
         }
     }
@@ -432,35 +408,24 @@ mod tests {
     }
 
     #[test]
-    fn clear_fills_the_framebuffer() {
-        let mut display = new_display();
-        display.clear(0x00);
-        assert!(display.framebuffer().iter().all(|&byte| byte == 0x00));
-    }
-
-    #[test]
-    fn set_pixel_uses_the_rotated_physical_buffer_coordinates() {
-        let mut display = new_display();
-
-        display.clear(0xFF);
-        display.set_pixel(0, 0, true);
-        display.set_pixel(479, 799, true);
-
-        let first_idx = logical_pixel_index(0, 0);
-        let last_idx = logical_pixel_index(479, 799);
-        assert_eq!(display.framebuffer()[first_idx], 0x7F);
-        assert_eq!(display.framebuffer()[last_idx], 0xFE);
-    }
-
-    #[test]
-    fn set_framebuffer_copies_external_bytes() {
+    fn refresh_full_streams_borrowed_framebuffer_bytes() {
         let mut display = new_display();
         let mut framebuffer = [0xFF; BUFFER_SIZE];
         framebuffer[0] = 0x00;
+        framebuffer[BUFFER_SIZE - 1] = 0xAA;
 
-        display.set_framebuffer(&framebuffer);
+        display.refresh_full(&framebuffer);
 
-        assert_eq!(display.framebuffer()[0], 0x00);
+        assert!(display
+            .spi()
+            .writes
+            .iter()
+            .any(|chunk| chunk.first() == Some(&0x00)));
+        assert!(display
+            .spi()
+            .writes
+            .iter()
+            .any(|chunk| chunk.last() == Some(&0xAA)));
     }
 
     #[test]
@@ -517,11 +482,5 @@ mod tests {
             FakeInputPin::default(),
             FakeDelay::default(),
         )
-    }
-
-    fn logical_pixel_index(x: u16, y: u16) -> usize {
-        let px = y;
-        let py = (DISPLAY_WIDTH - 1) - x;
-        (py as usize) * (DISPLAY_WIDTH_BYTES as usize) + (px as usize / 8)
     }
 }

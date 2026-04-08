@@ -8,12 +8,21 @@ const FONT_SIZE: f32 = 32.0;
 const FONT_PATH: &str = "../xteink-display/assets/Bookerly-Regular.ttf";
 const OUTPUT_FILE: &str = "bookerly_generated.rs";
 
+fn shaping_features() -> [rustybuzz::Feature; 3] {
+    [
+        rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"liga"), 0, ..),
+        rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"clig"), 0, ..),
+        rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"calt"), 0, ..),
+    ]
+}
+
 #[derive(Clone, Copy)]
 struct GlyphMeta {
     codepoint: u32,
     width: u8,
     height: u8,
     advance_x: u16,
+    layout_advance_x: u16,
     left: i16,
     top: i16,
     data_offset: u32,
@@ -95,6 +104,7 @@ fn main() {
             width: bitmap.width() as u8,
             height: bitmap.rows() as u8,
             advance_x: (glyph_slot.advance().x >> 6).max(0) as u16,
+            layout_advance_x: shape_single_advance(&shape_face, ch),
             left: glyph_slot.bitmap_left() as i16,
             top: ascender - glyph_slot.bitmap_top() as i16,
             data_offset,
@@ -223,11 +233,12 @@ fn render_generated_file(
     out.push_str("pub static BOOKERLY_GLYPHS: &[Glyph] = &[\n");
     for glyph in glyphs {
         out.push_str(&format!(
-            "    Glyph {{ codepoint: 0x{:X}, width: {}, height: {}, advance_x: {}, left: {}, top: {}, data_offset: {}, data_length: {} }},\n",
+            "    Glyph {{ codepoint: 0x{:X}, width: {}, height: {}, advance_x: {}, layout_advance_x: {}, left: {}, top: {}, data_offset: {}, data_length: {} }},\n",
             glyph.codepoint,
             glyph.width,
             glyph.height,
             glyph.advance_x,
+            glyph.layout_advance_x,
             glyph.left,
             glyph.top,
             glyph.data_offset,
@@ -265,6 +276,22 @@ fn render_generated_file(
     out
 }
 
+fn shape_single_advance(face: &Face<'_>, ch: char) -> u16 {
+    let mut text = String::new();
+    text.push(ch);
+
+    let features = shaping_features();
+    let mut buffer = UnicodeBuffer::new();
+    buffer.push_str(&text);
+    let output = rustybuzz::shape(face, &features, buffer);
+    let Some(position) = output.glyph_positions().first() else {
+        return 0;
+    };
+
+    let scale = FONT_SIZE / face.units_per_em() as f32;
+    ((position.x_advance as f32 * scale).round() as i32).max(0) as u16
+}
+
 fn shape_pair_positioning(
     left_codepoint: u32,
     right_codepoint: u32,
@@ -280,7 +307,8 @@ fn shape_pair_positioning(
 
     let mut buffer = UnicodeBuffer::new();
     buffer.push_str(&text);
-    let output = rustybuzz::shape(face, &[], buffer);
+    let features = shaping_features();
+    let output = rustybuzz::shape(face, &features, buffer);
     let positions = output.glyph_positions();
     if positions.len() != 2 {
         return None;

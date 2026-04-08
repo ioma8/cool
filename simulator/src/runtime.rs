@@ -9,7 +9,7 @@ use xteink_memory::{
 };
 use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, EPUB_RENDER_WORKSPACE_BYTES, Framebuffer};
 
-const SIMULATOR_DEVICE_HEAP_BYTES: usize = 32 * 1024;
+const SIMULATOR_DEVICE_HEAP_BYTES: usize = 0;
 
 pub fn bootstrap_session<S: AppStorage<Framebuffer>>(
     storage: S,
