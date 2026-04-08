@@ -16,15 +16,25 @@ pub const MAX_CHAPTER_DIR_BYTES: usize = 1024;
 pub const MAX_ARCHIVE_ENTRIES: usize = 512;
 pub const MAX_ARCHIVE_NAME_CAPACITY: usize = 16 * 1024;
 const CHAPTER_TAIL_RESERVE: usize = 1024;
-const NEXT_EVENT_PROGRESS_INTERVAL: usize = 256;
+const SPINE_RECORD_METADATA_BYTES: usize = 14;
 
-macro_rules! epub_logln {
-    ($($arg:tt)*) => {{
-        #[cfg(target_arch = "riscv32")]
-        {
-            let _ = esp_println::println!($($arg)*);
-        }
-    }};
+#[cfg(target_arch = "riscv32")]
+macro_rules! epub_diagln {
+    ($($arg:tt)*) => {
+        esp_println::println!($($arg)*);
+    };
+}
+
+#[cfg(all(not(target_arch = "riscv32"), test))]
+macro_rules! epub_diagln {
+    ($($arg:tt)*) => {
+        std::eprintln!($($arg)*);
+    };
+}
+
+#[cfg(all(not(target_arch = "riscv32"), not(test)))]
+macro_rules! epub_diagln {
+    ($($arg:tt)*) => {};
 }
 
 #[derive(Debug)]
@@ -47,7 +57,10 @@ impl From<ZipError> for EpubError {
             ZipError::ShortRead => Self::Io,
             ZipError::InvalidArchive(_) => Self::InvalidFormat,
             ZipError::TooManyEntries => Self::InvalidFormat,
-            ZipError::NameBufferTooSmall => Self::OutOfSpace,
+            ZipError::NameBufferTooSmall => {
+                epub_diagln!("EPUB out_of_space=zip_name_buffer_too_small");
+                Self::OutOfSpace
+            }
             ZipError::ArithmeticOverflow => Self::InvalidFormat,
         }
     }
@@ -161,6 +174,7 @@ struct ParserState {
     catalog_ready: bool,
     spine_count: u16,
     spine_index: u16,
+    spine_cursor: usize,
     chapter_loaded: bool,
     chapter_finished: bool,
     chapter_entry: Option<EpubEntryMetadata>,
@@ -198,6 +212,7 @@ impl Default for ParserState {
             catalog_ready: false,
             spine_count: 0,
             spine_index: 0,
+            spine_cursor: 2,
             chapter_loaded: false,
             chapter_finished: false,
             chapter_entry: None,
@@ -263,7 +278,6 @@ impl<S: EpubSource> Epub<S> {
         }
 
         if !self.state.catalog_ready {
-            epub_logln!("EPUB parser: prepare_catalog begin");
             let (catalog, inflate, zip_cd, path_buf, archive) = unsafe {
                 (
                     &mut *catalog_ptr,
@@ -275,27 +289,9 @@ impl<S: EpubSource> Epub<S> {
             };
             self.prepare_catalog(catalog, inflate, zip_cd, path_buf, archive)?;
             self.state.catalog_ready = true;
-            epub_logln!(
-                "EPUB parser: prepare_catalog end spine_count={}",
-                self.state.spine_count
-            );
         }
 
-        let mut loop_iterations = 0usize;
         loop {
-            loop_iterations = loop_iterations.saturating_add(1);
-            if loop_iterations % NEXT_EVENT_PROGRESS_INTERVAL == 0 {
-                epub_logln!(
-                    "EPUB parser: progress spine_index={} cursor={} chapter_len={} chapter_finished={} compressed_read={} input_cursor={} input_len={}",
-                    self.state.spine_index,
-                    self.state.cursor,
-                    self.state.chapter_len,
-                    self.state.chapter_finished,
-                    self.state.compressed_read,
-                    self.state.input_cursor,
-                    self.state.input_len
-                );
-            }
             if self.state.done {
                 return Ok(None);
             }
@@ -305,10 +301,6 @@ impl<S: EpubSource> Epub<S> {
                     self.state.done = true;
                     return Ok(None);
                 }
-                epub_logln!(
-                    "EPUB parser: load_current_chapter begin spine_index={}",
-                    self.state.spine_index
-                );
                 let (catalog, zip_cd, path_buf, stream_state, archive) = unsafe {
                     (
                         &mut *catalog_ptr,
@@ -319,16 +311,6 @@ impl<S: EpubSource> Epub<S> {
                     )
                 };
                 self.load_current_chapter(catalog, zip_cd, path_buf, stream_state, archive)?;
-                if let Some(_entry) = self.state.chapter_entry {
-                    epub_logln!(
-                        "EPUB parser: load_current_chapter end spine_index={} chapter_dir_len={} compression={:?} compressed_size={} uncompressed_size={}",
-                        self.state.spine_index.saturating_sub(1),
-                        self.state.chapter_dir_len,
-                        _entry.compression,
-                        _entry.compressed_size,
-                        _entry.uncompressed_size
-                    );
-                }
             }
 
             if self.state.cursor >= self.state.chapter_len
@@ -336,15 +318,6 @@ impl<S: EpubSource> Epub<S> {
                     && self.state.chapter_len.saturating_sub(self.state.cursor)
                         <= CHAPTER_TAIL_RESERVE)
             {
-                epub_logln!(
-                    "EPUB parser: refill_current_chapter begin cursor={} chapter_len={} chapter_finished={} compressed_read={} input_cursor={} input_len={}",
-                    self.state.cursor,
-                    self.state.chapter_len,
-                    self.state.chapter_finished,
-                    self.state.compressed_read,
-                    self.state.input_cursor,
-                    self.state.input_len
-                );
                 if !self.state.chapter_finished && self.state.cursor >= self.state.chapter_len {
                     self.state.cursor = self
                         .state
@@ -359,15 +332,6 @@ impl<S: EpubSource> Epub<S> {
                     )
                 };
                 self.refill_current_chapter(inflate, stream_input, stream_state)?;
-                epub_logln!(
-                    "EPUB parser: refill_current_chapter end cursor={} chapter_len={} chapter_finished={} compressed_read={} input_cursor={} input_len={}",
-                    self.state.cursor,
-                    self.state.chapter_len,
-                    self.state.chapter_finished,
-                    self.state.compressed_read,
-                    self.state.input_cursor,
-                    self.state.input_len
-                );
             }
 
             if self.state.cursor >= self.state.chapter_len {
@@ -422,24 +386,21 @@ impl<S: EpubSource> Epub<S> {
         _path_buf: &mut [u8],
         archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
-        epub_logln!("EPUB parser: archive.parse begin [catalog]");
         archive.parse(&self.source)?;
-        epub_logln!("EPUB parser: archive.parse end [catalog]");
 
         let container_entry = archive
             .entry_by_name(&self.source, "META-INF/container.xml", zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
-        epub_logln!(
-            "EPUB parser: read container begin compressed_size={} uncompressed_size={}",
-            container_entry.compressed_size,
-            container_entry.uncompressed_size
-        );
         let container = read_entry(&self.source, &container_entry, inflate, zip_cd)?;
-        epub_logln!("EPUB parser: read container end bytes={}", container.len());
 
         let (opf_path_start, opf_path_len) = parse_container_root(container)?;
         let mut opf_path = [0u8; 512];
         if opf_path_len > opf_path.len() {
+            epub_diagln!(
+                "EPUB out_of_space=opf_path opf_path_len={} opf_path_cap={}",
+                opf_path_len,
+                opf_path.len()
+            );
             return Err(EpubError::OutOfSpace);
         }
         opf_path[..opf_path_len]
@@ -448,47 +409,43 @@ impl<S: EpubSource> Epub<S> {
         let opf_entry = archive
             .entry_by_name_bytes(&self.source, &opf_path[..opf_path_len], zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
-        epub_logln!(
-            "EPUB parser: read opf begin path_len={} compressed_size={} uncompressed_size={}",
-            opf_path_len,
-            opf_entry.compressed_size,
-            opf_entry.uncompressed_size
-        );
         let opf = read_entry(&self.source, &opf_entry, inflate, zip_cd)?;
-        epub_logln!("EPUB parser: read opf end bytes={}", opf.len());
 
-        epub_logln!("EPUB parser: parse_opf begin");
-        let count = parse_opf(opf, &opf_path[..opf_path_len], catalog)?;
-        epub_logln!("EPUB parser: parse_opf end spine_count={}", count);
+        let count = parse_opf(opf, &opf_path[..opf_path_len], catalog, &self.source, zip_cd, archive)?;
         self.state.spine_count = count;
+        self.state.spine_cursor = 2;
         Ok(())
     }
 
     fn load_current_chapter(
         &mut self,
         catalog: &mut [u8],
-        zip_cd: &mut [u8],
+        _zip_cd: &mut [u8],
         _path_buf: &mut [u8],
         stream_state: &mut InflateState,
-        archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
+        _archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
-        let index = self.state.spine_index;
-        let (entry_start, entry_len) = read_spine_entry(catalog, index)?;
+        let (entry_start, entry_len, metadata, next_cursor) =
+            read_spine_entry_at(catalog, self.state.spine_cursor)?;
         let chapter_path = &catalog[entry_start..entry_start + entry_len];
-
-        let entry = archive
-            .entry_by_name_bytes(&self.source, chapter_path, zip_cd)?
-            .ok_or(EpubError::InvalidFormat)?;
-        epub_logln!(
-            "EPUB parser: chapter entry resolved path_len={} compression={:?} compressed_size={} uncompressed_size={}",
-            chapter_path.len(),
-            entry.compression,
-            entry.compressed_size,
-            entry.uncompressed_size
-        );
+        let entry = EpubEntryMetadata {
+            compression: metadata.compression,
+            crc32: 0,
+            compressed_size: metadata.compressed_size,
+            uncompressed_size: metadata.uncompressed_size,
+            local_header_offset: 0,
+            data_offset: metadata.data_offset,
+        };
 
         let base = path_parent(chapter_path);
         if base.len() > self.state.chapter_dir.len() {
+            epub_diagln!(
+                "EPUB out_of_space=chapter_dir base_len={} chapter_dir_cap={} spine_index={} chapter_path_len={}",
+                base.len(),
+                self.state.chapter_dir.len(),
+                self.state.spine_index,
+                chapter_path.len()
+            );
             return Err(EpubError::OutOfSpace);
         }
         self.state.chapter_dir[..base.len()].copy_from_slice(base);
@@ -522,6 +479,7 @@ impl<S: EpubSource> Epub<S> {
         self.state.table_row_cols = 0;
         self.state.chapter_loaded = true;
         self.state.spine_index = self.state.spine_index.saturating_add(1);
+        self.state.spine_cursor = next_cursor;
         stream_state.reset(DataFormat::Raw);
         Ok(())
     }
@@ -534,6 +492,12 @@ impl<S: EpubSource> Epub<S> {
     ) -> Result<(), EpubError> {
         let preserved = self.state.chapter_len.saturating_sub(self.state.cursor);
         if preserved == chapter_buf.len() {
+            epub_diagln!(
+                "EPUB out_of_space=chapter_buf_preserved preserved={} chapter_buf_cap={} spine_index={}",
+                preserved,
+                chapter_buf.len(),
+                self.state.spine_index
+            );
             return Err(EpubError::OutOfSpace);
         }
         if preserved > 0 && self.state.cursor > 0 {
@@ -607,21 +571,6 @@ impl<S: EpubSource> Epub<S> {
                         &mut chapter_buf[self.state.chapter_len..],
                         flush,
                     );
-                    if result.bytes_consumed == 0
-                        && result.bytes_written == 0
-                        && !matches!(result.status, Ok(MZStatus::StreamEnd))
-                    {
-                        epub_logln!(
-                            "EPUB parser: refill stall compressed_read={} compressed_total={} chapter_len={} input_cursor={} input_len={} flush={:?} status={:?}",
-                            self.state.compressed_read,
-                            compressed_total,
-                            self.state.chapter_len,
-                            self.state.input_cursor,
-                            self.state.input_len,
-                            flush,
-                            result.status
-                        );
-                    }
                     self.state.input_cursor = self
                         .state
                         .input_cursor
@@ -656,6 +605,16 @@ impl<S: EpubSource> Epub<S> {
                             {
                                 continue;
                             }
+                            epub_diagln!(
+                                "EPUB out_of_space=inflate_buf chapter_len={} chapter_buf_cap={} compressed_read={} compressed_total={} input_cursor={} input_len={} spine_index={}",
+                                self.state.chapter_len,
+                                chapter_buf.len(),
+                                self.state.compressed_read,
+                                compressed_total,
+                                self.state.input_cursor,
+                                self.state.input_len,
+                                self.state.spine_index
+                            );
                             return Err(EpubError::OutOfSpace);
                         }
                         Err(MZError::Data) => return Err(EpubError::Compression),
@@ -679,40 +638,37 @@ struct ManifestItem {
     media_end: usize,
 }
 
-fn read_spine_entry(catalog: &[u8], index: u16) -> Result<(usize, usize), EpubError> {
+#[derive(Clone, Copy)]
+struct SpineRecordMetadata {
+    compression: CompressionMethod,
+    compressed_size: u32,
+    uncompressed_size: u32,
+    data_offset: u32,
+}
+
+fn read_spine_entry_at(
+    catalog: &[u8],
+    cursor: usize,
+) -> Result<(usize, usize, SpineRecordMetadata, usize), EpubError> {
     if catalog.len() < 2 {
         return Err(EpubError::InvalidFormat);
     }
-    let count = u16::from_le_bytes([catalog[0], catalog[1]]);
-    if index >= count {
-        return Err(EpubError::InvalidFormat);
-    }
-
-    let mut cursor = 2usize;
-    for _ in 0..index {
-        if cursor + 2 > catalog.len() {
-            return Err(EpubError::InvalidFormat);
-        }
-        let len = usize::from(u16::from_le_bytes([catalog[cursor], catalog[cursor + 1]]));
-        cursor = cursor
-            .checked_add(2)
-            .and_then(|v| v.checked_add(len))
-            .ok_or(EpubError::InvalidFormat)?;
-        if cursor > catalog.len() {
-            return Err(EpubError::InvalidFormat);
-        }
-    }
-
     if cursor + 2 > catalog.len() {
         return Err(EpubError::InvalidFormat);
     }
     let len = usize::from(u16::from_le_bytes([catalog[cursor], catalog[cursor + 1]]));
     let start = cursor + 2;
-    let end = start + len;
+    let metadata_start = start + len;
+    let end = metadata_start + SPINE_RECORD_METADATA_BYTES;
     if end > catalog.len() {
         return Err(EpubError::InvalidFormat);
     }
-    Ok((start, len))
+    Ok((
+        start,
+        len,
+        read_spine_record_metadata(&catalog[metadata_start..end])?,
+        end,
+    ))
 }
 
 fn parse_container_root(container: &[u8]) -> Result<(usize, usize), EpubError> {
@@ -735,8 +691,19 @@ fn parse_container_root(container: &[u8]) -> Result<(usize, usize), EpubError> {
     Err(EpubError::InvalidFormat)
 }
 
-fn parse_opf(opf: &[u8], opf_path: &[u8], catalog: &mut [u8]) -> Result<u16, EpubError> {
+fn parse_opf<S: EpubSource>(
+    opf: &[u8],
+    opf_path: &[u8],
+    catalog: &mut [u8],
+    source: &S,
+    zip_cd: &mut [u8],
+    archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
+) -> Result<u16, EpubError> {
     if catalog.len() < 2 {
+        epub_diagln!(
+            "EPUB out_of_space=catalog_header catalog_cap={}",
+            catalog.len()
+        );
         return Err(EpubError::OutOfSpace);
     }
     let mut write = 2usize;
@@ -764,22 +731,71 @@ fn parse_opf(opf: &[u8], opf_path: &[u8], catalog: &mut [u8]) -> Result<u16, Epu
                 let href = &opf[item.href_start..item.href_start + usize::from(item.href_len)];
                 let mut tmp = [0u8; MAX_CHAPTER_DIR_BYTES];
                 let resolved_len = resolve_reference(opf_base, href, &mut tmp)?;
-                if write + 2 + resolved_len > catalog.len() {
+                let entry = archive
+                    .entry_by_name_bytes(source, &tmp[..resolved_len], zip_cd)?
+                    .ok_or(EpubError::InvalidFormat)?;
+                if write + 2 + resolved_len + SPINE_RECORD_METADATA_BYTES > catalog.len() {
+                    epub_diagln!(
+                        "EPUB out_of_space=catalog_record write={} resolved_len={} metadata_bytes={} catalog_cap={} count={} href_len={}",
+                        write,
+                        resolved_len,
+                        SPINE_RECORD_METADATA_BYTES,
+                        catalog.len(),
+                        count,
+                        href.len()
+                    );
                     return Err(EpubError::OutOfSpace);
                 }
                 catalog[write..write + 2].copy_from_slice(
-                    &(u16::try_from(resolved_len).map_err(|_| EpubError::OutOfSpace)?)
+                    &(u16::try_from(resolved_len).map_err(|_| {
+                        epub_diagln!(
+                            "EPUB out_of_space=resolved_len_u16 resolved_len={} count={}",
+                            resolved_len,
+                            count
+                        );
+                        EpubError::OutOfSpace
+                    })?)
                         .to_le_bytes(),
                 );
                 write += 2;
                 catalog[write..write + resolved_len].copy_from_slice(&tmp[..resolved_len]);
                 write += resolved_len;
+                write_spine_record_metadata(&mut catalog[write..write + SPINE_RECORD_METADATA_BYTES], entry);
+                write += SPINE_RECORD_METADATA_BYTES;
                 count = count.saturating_add(1);
             }
         }
     }
     catalog[..2].copy_from_slice(&count.to_le_bytes());
     Ok(count)
+}
+
+fn write_spine_record_metadata(target: &mut [u8], entry: EpubEntryMetadata) {
+    let compression = match entry.compression {
+        CompressionMethod::Stored => 0u16,
+        CompressionMethod::Deflate => 8u16,
+        CompressionMethod::Other(raw) => raw,
+    };
+    target[0..2].copy_from_slice(&compression.to_le_bytes());
+    target[2..6].copy_from_slice(&entry.compressed_size.to_le_bytes());
+    target[6..10].copy_from_slice(&entry.uncompressed_size.to_le_bytes());
+    target[10..14].copy_from_slice(&entry.data_offset.to_le_bytes());
+}
+
+fn read_spine_record_metadata(data: &[u8]) -> Result<SpineRecordMetadata, EpubError> {
+    if data.len() < SPINE_RECORD_METADATA_BYTES {
+        return Err(EpubError::InvalidFormat);
+    }
+    Ok(SpineRecordMetadata {
+        compression: match u16::from_le_bytes([data[0], data[1]]) {
+            0 => CompressionMethod::Stored,
+            8 => CompressionMethod::Deflate,
+            other => CompressionMethod::Other(other),
+        },
+        compressed_size: u32::from_le_bytes([data[2], data[3], data[4], data[5]]),
+        uncompressed_size: u32::from_le_bytes([data[6], data[7], data[8], data[9]]),
+        data_offset: u32::from_le_bytes([data[10], data[11], data[12], data[13]]),
+    })
 }
 
 fn manifest_item_for_id(opf: &[u8], idref: &[u8]) -> Result<ManifestItem, EpubError> {
@@ -803,8 +819,14 @@ fn manifest_item_for_id(opf: &[u8], idref: &[u8]) -> Result<ManifestItem, EpubEr
                             media.as_ptr() as usize - opf_start
                         };
                         return Ok(ManifestItem {
-                            href_len: u16::try_from(href.len())
-                                .map_err(|_| EpubError::OutOfSpace)?,
+                            href_len: u16::try_from(href.len()).map_err(|_| {
+                                epub_diagln!(
+                                    "EPUB out_of_space=href_len href_len={} idref_len={}",
+                                    href.len(),
+                                    idref.len()
+                                );
+                                EpubError::OutOfSpace
+                            })?,
                             href_start,
                             media_start,
                             media_end: media_start + media.len(),
@@ -1932,7 +1954,7 @@ fn read_entry<'a>(
     source: &impl EpubSource,
     entry: &EpubEntryMetadata,
     output: &'a mut [u8],
-    compressed: &'a mut [u8],
+    compressed: &mut [u8],
 ) -> Result<&'a [u8], EpubError> {
     let compressed_size =
         usize::try_from(entry.compressed_size).map_err(|_| EpubError::InvalidFormat)?;
@@ -1943,6 +1965,11 @@ fn read_entry<'a>(
     match entry.compression {
         CompressionMethod::Stored => {
             if uncompressed_size > output.len() {
+                epub_diagln!(
+                    "EPUB out_of_space=read_entry_stored_output uncompressed_size={} output_cap={}",
+                    uncompressed_size,
+                    output.len()
+                );
                 return Err(EpubError::OutOfSpace);
             }
             read_exact(source, data_offset, &mut output[..uncompressed_size])?;
@@ -1950,6 +1977,13 @@ fn read_entry<'a>(
         }
         CompressionMethod::Deflate => {
             if compressed_size > compressed.len() || uncompressed_size > output.len() {
+                epub_diagln!(
+                    "EPUB out_of_space=read_entry_deflate_buffers compressed_size={} compressed_cap={} uncompressed_size={} output_cap={}",
+                    compressed_size,
+                    compressed.len(),
+                    uncompressed_size,
+                    output.len()
+                );
                 return Err(EpubError::OutOfSpace);
             }
             if compressed_size == 0 {
@@ -1993,4 +2027,75 @@ fn read_exact(source: &impl EpubSource, offset: u64, buffer: &mut [u8]) -> Resul
         cursor = cursor.saturating_add(read);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use miniz_oxide::DataFormat;
+    use miniz_oxide::inflate::stream::InflateState;
+    use std::path::PathBuf;
+
+    struct VecSource {
+        bytes: Vec<u8>,
+    }
+
+    impl EpubSource for VecSource {
+        fn len(&self) -> usize {
+            self.bytes.len()
+        }
+
+        fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, EpubError> {
+            let start = offset as usize;
+            if start >= self.bytes.len() {
+                return Ok(0);
+            }
+            let end = (start + buffer.len()).min(self.bytes.len());
+            let chunk = &self.bytes[start..end];
+            buffer[..chunk.len()].copy_from_slice(chunk);
+            Ok(chunk.len())
+        }
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("test")
+            .join("epubs")
+            .join(name)
+    }
+
+    #[test]
+    fn runtime_workspace_handles_happiness_trap_pocketbook_fixture() {
+        let bytes = std::fs::read(fixture_path("Happiness Trap Pocketbook, The - Russ Harris.epub"))
+            .expect("fixture should be readable");
+        let source = VecSource { bytes };
+        let mut epub = Epub::open(source).expect("fixture should open");
+        let mut zip_cd = vec![0; 16 * 1024];
+        let mut inflate = vec![0; 48 * 1024];
+        let mut stream_input = vec![0; 2048];
+        let mut xml = vec![0; 32 * 1024];
+        let mut catalog = vec![0; 8192];
+        let mut path_buf = vec![0; 256];
+        let mut stream_state = InflateState::new(DataFormat::Raw);
+        let mut archive = EpubArchive::new();
+
+        loop {
+            match epub.next_event(ReaderBuffers {
+                zip_cd: &mut zip_cd,
+                inflate: &mut inflate,
+                stream_input: &mut stream_input,
+                xml: &mut xml,
+                catalog: &mut catalog,
+                path_buf: &mut path_buf,
+                stream_state: &mut stream_state,
+                archive: &mut archive,
+            }) {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(err) => panic!("fixture should parse with runtime workspace sizes: {err:?}"),
+            }
+        }
+    }
 }

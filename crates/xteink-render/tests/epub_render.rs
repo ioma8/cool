@@ -85,3 +85,66 @@ fn real_fixture_first_page_does_not_fail_with_out_of_space() {
 
     assert!(!matches!(result, Err(xteink_epub::EpubError::OutOfSpace)));
 }
+
+fn fixture_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("test")
+        .join("epubs")
+}
+
+fn epub_fixture_paths() -> Vec<std::path::PathBuf> {
+    let mut fixtures = std::fs::read_dir(fixture_dir())
+        .expect("fixture directory should exist")
+        .map(|entry| entry.expect("fixture entry should be readable").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("epub")))
+        .collect::<Vec<_>>();
+    fixtures.sort();
+    fixtures
+}
+
+#[test]
+fn all_epub_fixtures_first_page_render_without_out_of_space() {
+    let fixtures = epub_fixture_paths();
+    assert!(!fixtures.is_empty(), "expected at least one epub fixture");
+
+    for fixture in fixtures {
+        let name = fixture
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("fixture file name should be valid utf-8")
+            .to_owned();
+        let bytes = std::fs::read(&fixture).expect("fixture should be readable");
+        let mut framebuffer = Framebuffer::new();
+        let result = framebuffer.render_epub_page(VecSource { bytes }, 0);
+
+        assert!(
+            !matches!(result, Err(xteink_epub::EpubError::OutOfSpace)),
+            "fixture should not exhaust workspace on first-page render: {name}"
+        );
+    }
+}
+
+#[test]
+fn large_fixture_cold_parse_to_cache_without_out_of_space() {
+    let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let bytes = std::fs::read(&fixture).expect("fixture should be readable");
+    let mut framebuffer = Framebuffer::new();
+    let mut emitted_text_bytes = 0usize;
+
+    let result = framebuffer.render_epub_page_with_text_sink_and_cancel(
+        VecSource { bytes },
+        0,
+        |chunk| {
+            emitted_text_bytes = emitted_text_bytes.saturating_add(chunk.len());
+            Ok(())
+        },
+        true,
+        || false,
+    );
+
+    assert!(!matches!(result, Err(xteink_epub::EpubError::OutOfSpace)));
+    assert!(result.is_ok(), "large fixture cold parse should succeed: {result:?}");
+    assert!(emitted_text_bytes > 0);
+}

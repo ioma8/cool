@@ -6,7 +6,7 @@ pub const CACHE_VERSION: u8 = 1;
 pub const META_FILE_NAME: &str = "meta.txt";
 pub const CONTENT_FILE_NAME: &str = "content.txt";
 pub const PROGRESS_FILE_NAME: &str = "progress.bin";
-pub const CACHE_ROOT_DIRS: [&str; 2] = ["/COOL", "/.cool"];
+pub const CACHE_ROOT_DIRS: [&str; 2] = ["/.cool", "/.cool"];
 const PRIMARY_CACHE_ROOT_DIR: &str = CACHE_ROOT_DIRS[0];
 
 const PATH_CAPACITY: usize = 220;
@@ -209,14 +209,29 @@ mod tests {
         let directory = paths.directory.as_str();
         let meta = paths.meta.as_str();
         let content = paths.content.as_str();
+        let progress = paths.progress.as_str();
 
-        assert!(directory.starts_with("/COOL/"));
-        assert!(paths.directory.as_str().starts_with("/COOL/"));
+        assert!(directory.starts_with("/.cool/"));
+        assert!(paths.directory.as_str().starts_with("/.cool/"));
         assert_eq!(directory.split('/').nth(2).unwrap().len(), 8);
         assert!(meta.starts_with(directory));
         assert!(meta.ends_with("/meta.txt"));
         assert!(content.starts_with(directory));
         assert!(content.ends_with("/content.txt"));
+        assert!(progress.starts_with(directory));
+        assert!(progress.ends_with("/progress.bin"));
+    }
+
+    #[test]
+    fn cache_candidates_stay_under_logical_dot_cool_root() {
+        let candidates = cache_paths_for_epub_candidates("/MYBOOKS", "WHEN_I~1.EPU");
+
+        for paths in candidates {
+            assert!(paths.directory.as_str().starts_with("/.cool/"));
+            assert!(paths.meta.as_str().starts_with("/.cool/"));
+            assert!(paths.content.as_str().starts_with("/.cool/"));
+            assert!(paths.progress.as_str().starts_with("/.cool/"));
+        }
     }
 
     #[test]

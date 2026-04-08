@@ -21,6 +21,8 @@ const LFN_CAPACITY: usize = 256;
 const MAX_DIRS: usize = 16;
 const MAX_FILES: usize = 4;
 const MAX_VOLUMES: usize = 1;
+const LOGICAL_CACHE_DIR: &str = ".cool";
+const PHYSICAL_CACHE_DIR: &str = "COOL";
 
 #[derive(Debug, Clone)]
 pub struct ListedEntry {
@@ -218,11 +220,12 @@ where
                 FsError::OpenFailed(error_string(&err))
             })?;
         for component in path_components(path.as_str()) {
+            let fs_component = fs_component_name(component);
             esp_println::println!("SD open_directory_at_path component: {}", component);
             let current = raw_directory;
             let next = self
                 .volume_mgr
-                .open_dir(current, component)
+                .open_dir(current, fs_component)
                 .map_err(|err| {
                     self.close_raw_directory(current);
                     esp_println::println!(
@@ -291,7 +294,8 @@ where
             .open_root_dir(self.raw_volume)
             .map_err(|_| FsError::OpenFailed(error_message("open root")))?;
         for component in path_components(path.as_str()) {
-            match self.volume_mgr.open_dir(current, component) {
+            let fs_component = fs_component_name(component);
+            match self.volume_mgr.open_dir(current, fs_component) {
                 Ok(next) => {
                     self.close_raw_directory(current);
                     current = next;
@@ -302,11 +306,11 @@ where
                         return Err(FsError::OpenFailed(error_string(&open_err)));
                     }
                     self.volume_mgr
-                        .make_dir_in_dir(current, component)
+                        .make_dir_in_dir(current, fs_component)
                         .map_err(|err| FsError::OpenFailed(error_string(&err)))?;
                     let next = self
                         .volume_mgr
-                        .open_dir(current, component)
+                        .open_dir(current, fs_component)
                         .map_err(|err| FsError::OpenFailed(error_string(&err)))?;
                     self.close_raw_directory(current);
                     current = next;
@@ -527,6 +531,14 @@ fn path_components(path: &str) -> impl Iterator<Item = &str> {
     path.split('/').filter(|component| !component.is_empty())
 }
 
+fn fs_component_name(component: &str) -> &str {
+    if component.eq_ignore_ascii_case(LOGICAL_CACHE_DIR) {
+        PHYSICAL_CACHE_DIR
+    } else {
+        component
+    }
+}
+
 fn split_parent_path(path: &str) -> Result<(&str, &str), FsError> {
     let trimmed = path.trim_end_matches('/');
     let Some((parent, name)) = trimmed.rsplit_once('/') else {
@@ -582,7 +594,8 @@ fn error_message(msg: &str) -> String<64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        error_string, is_epub_label, listed_entry_from_parts, path_components, push_listed_entry,
+        error_string, fs_component_name, is_epub_label, listed_entry_from_parts, path_components,
+        push_listed_entry,
     };
 
     #[derive(Debug)]
@@ -638,6 +651,13 @@ mod tests {
             path_components("/MYBOOKS/./WHEN_I~1.EPU").collect();
 
         assert_eq!(components.as_slice(), &["MYBOOKS", "WHEN_I~1.EPU"]);
+    }
+
+    #[test]
+    fn maps_logical_dot_cool_component_to_physical_fat_name() {
+        assert_eq!(fs_component_name(".cool"), "COOL");
+        assert_eq!(fs_component_name(".COOL"), "COOL");
+        assert_eq!(fs_component_name("MYBOOKS"), "MYBOOKS");
     }
 
     #[test]
