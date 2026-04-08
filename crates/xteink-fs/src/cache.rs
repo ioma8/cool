@@ -77,7 +77,7 @@ pub fn sanitize_cache_name(input: &str) -> String<NAME_CAPACITY> {
 fn short_cache_name(hash: u32) -> String<NAME_CAPACITY> {
     let mut out = String::<NAME_CAPACITY>::new();
     let _ = out.push('B');
-    let _ = write!(&mut out, "{hash:07X}");
+    let _ = write!(&mut out, "{:07X}", hash & 0x0FFF_FFFF);
     out
 }
 
@@ -185,6 +185,13 @@ pub fn parse_meta(raw: &str) -> Option<CacheMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_cache_name_fits_component_limit() {
+        let name = short_cache_name(0x11B3_D183);
+        assert_eq!(name.len(), MAX_COMPONENT_LEN);
+        assert_eq!(name.as_str(), "B1B3D183");
+    }
 
     #[test]
     fn sanitize_cache_name_keeps_only_alnum_and_underscore() {

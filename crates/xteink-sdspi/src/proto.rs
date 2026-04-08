@@ -9,6 +9,7 @@ pub const CMD0: u8 = 0x00;
 pub const CMD8: u8 = 0x08;
 pub const CMD9: u8 = 0x09;
 pub const CMD12: u8 = 0x0C;
+pub const CMD13: u8 = 0x0D;
 pub const CMD17: u8 = 0x11;
 pub const CMD18: u8 = 0x12;
 pub const CMD24: u8 = 0x18;

@@ -13,6 +13,62 @@ use crate::{
     path::join_child_path,
 };
 
+const CACHED_TEXT_WRITE_BUFFER: usize = 1024;
+
+struct CacheWriteBuffer {
+    bytes: [u8; CACHED_TEXT_WRITE_BUFFER],
+    len: usize,
+    total_written: usize,
+}
+
+impl CacheWriteBuffer {
+    fn new() -> Self {
+        Self {
+            bytes: [0; CACHED_TEXT_WRITE_BUFFER],
+            len: 0,
+            total_written: 0,
+        }
+    }
+
+    fn total_written(&self) -> usize {
+        self.total_written
+    }
+
+    fn push<F: SdFsFile>(&mut self, file: &mut F, chunk: &[u8]) -> Result<(), EpubError> {
+        let mut remaining = chunk;
+        while !remaining.is_empty() {
+            if self.len == self.bytes.len() {
+                self.flush(file)?;
+            }
+            let capacity = self.bytes.len().saturating_sub(self.len);
+            let copy_len = capacity.min(remaining.len());
+            self.bytes[self.len..self.len + copy_len].copy_from_slice(&remaining[..copy_len]);
+            self.len += copy_len;
+            remaining = &remaining[copy_len..];
+        }
+        Ok(())
+    }
+
+    fn flush<F: SdFsFile>(&mut self, file: &mut F) -> Result<(), EpubError> {
+        if self.len == 0 {
+            return Ok(());
+        }
+        let mut written = 0usize;
+        while written < self.len {
+            let count = file
+                .write(&self.bytes[written..self.len])
+                .map_err(|_| EpubError::Io)?;
+            if count == 0 {
+                return Err(EpubError::Io);
+            }
+            written = written.saturating_add(count);
+        }
+        self.total_written = self.total_written.saturating_add(self.len);
+        self.len = 0;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpubRefreshMode {
     Full,
@@ -54,7 +110,14 @@ where
         entry.fs_name.as_str(),
         entry.kind
     );
+    logln!("EPUB render step: building cache candidate paths");
     let cache_candidates = cache_paths_for_epub_candidates(current_path, entry.fs_name.as_str());
+    logln!("EPUB render step: built cache candidate paths");
+    logln!(
+        "EPUB render step: cache candidate lengths {} | {}",
+        cache_candidates[0].progress.len(),
+        cache_candidates[1].progress.len()
+    );
     logln!(
         "EPUB cache probe begin: {} | {}",
         cache_candidates[0].progress.as_str(),
@@ -209,7 +272,13 @@ where
     };
 
     if let Some(paths) = cache_paths_for_work {
-        let _ = write_cached_progress(fs, paths.progress.as_str(), rendered_page);
+        if let Err(err) = write_cached_progress(fs, paths.progress.as_str(), rendered_page) {
+            logln!(
+                "EPUB progress write failed: {} -> {:?}",
+                paths.progress.as_str(),
+                err
+            );
+        }
     }
 
     Ok(EpubRenderResult {
@@ -369,18 +438,33 @@ where
         paths.directory.as_str(),
         paths.content.as_str()
     );
-    let _ = fs.ensure_directory(paths.directory.as_str());
-    let mut content = fs.open_cache_file_write(paths.content.as_str()).ok();
-    let mut content_length = 0usize;
+    if let Err(err) = fs.ensure_directory(paths.directory.as_str()) {
+        logln!(
+            "EPUB cache ensure_directory failed: {} -> {:?}",
+            paths.directory.as_str(),
+            err
+        );
+    }
+    let mut content = match fs.open_cache_file_write(paths.content.as_str()) {
+        Ok(file) => {
+            logln!("EPUB cache content open ok: {}", paths.content.as_str());
+            Some(file)
+        }
+        Err(err) => {
+            logln!(
+                "EPUB cache content open failed: {} -> {:?}",
+                paths.content.as_str(),
+                err
+            );
+            None
+        }
+    };
+    let mut content_buffer = CacheWriteBuffer::new();
 
     let mut on_text_chunk = |chunk: &str| -> Result<(), EpubError> {
         if let Some(file) = content.as_mut() {
             if !chunk.is_empty() {
-                let written = file.write(chunk.as_bytes()).map_err(|_| EpubError::Io)?;
-                if written != chunk.len() {
-                    return Err(EpubError::Io);
-                }
-                content_length = content_length.saturating_add(written);
+                content_buffer.push(file, chunk.as_bytes())?;
             }
         }
         Ok(())
@@ -395,12 +479,20 @@ where
     )?;
 
     if let Some(mut file) = content {
+        content_buffer.flush(&mut file)?;
         let _ = file.flush();
+        let content_length = content_buffer.total_written();
         if write_meta(fs, paths, source_size, content_length).is_ok() {
             logln!(
                 "EPUB parsed and cached: {} -> bytes={} content_len={}",
                 source_path,
                 source_size,
+                content_length
+            );
+        } else {
+            logln!(
+                "EPUB cache meta write failed: {} content_len={}",
+                paths.meta.as_str(),
                 content_length
             );
         }

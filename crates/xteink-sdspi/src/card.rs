@@ -6,9 +6,10 @@ use embedded_sdmmc::{Block, BlockCount, BlockDevice, BlockIdx};
 use crate::{
     SpiTransport,
     proto::{
-        ACMD41, CMD0, CMD8, CMD9, CMD12, CMD17, CMD18, CMD55, CMD58, CMD59, CardType,
-        DATA_CLOCK_HZ, DATA_START_BLOCK, Error, INIT_CLOCK_HZ, R1_IDLE_STATE, R1_ILLEGAL_COMMAND,
-        R1_READY_STATE, SdSpiOptions, crc7,
+        ACMD23, ACMD41, CMD0, CMD8, CMD9, CMD12, CMD13, CMD17, CMD18, CMD24, CMD25, CMD55,
+        CMD58, CMD59, CardType, DATA_CLOCK_HZ, DATA_RES_ACCEPTED, DATA_RES_MASK,
+        DATA_START_BLOCK, Error, INIT_CLOCK_HZ, R1_IDLE_STATE, R1_ILLEGAL_COMMAND,
+        R1_READY_STATE, STOP_TRAN_TOKEN, SdSpiOptions, WRITE_MULTIPLE_TOKEN, crc7,
     },
 };
 
@@ -90,7 +91,9 @@ where
     }
 
     fn write(&self, _blocks: &[Block], _start_block_idx: BlockIdx) -> Result<(), Self::Error> {
-        Err(Error::Unsupported)
+        let mut inner = self.inner.borrow_mut();
+        inner.ensure_init()?;
+        inner.write_blocks(_blocks, _start_block_idx)
     }
 
     fn num_blocks(&self) -> Result<BlockCount, Self::Error> {
@@ -201,6 +204,40 @@ where
         Ok(())
     }
 
+    fn write_blocks(
+        &mut self,
+        blocks: &[Block],
+        start_block_idx: BlockIdx,
+    ) -> Result<(), Error<SpiE, PinE>> {
+        self.cs.set_low().map_err(Error::Pin)?;
+        let start_idx = self.block_address(start_block_idx)?;
+        let result = if blocks.len() == 1 {
+            self.card_command(CMD24, start_idx)?;
+            self.write_data(DATA_START_BLOCK, &blocks[0].contents)?;
+            self.wait_not_busy(Timeout::new(10_000))?;
+            if self.card_command(CMD13, 0)? != 0x00 {
+                Err(Error::WriteError)
+            } else if self.read_byte()? != 0x00 {
+                Err(Error::WriteError)
+            } else {
+                Ok(())
+            }
+        } else {
+            self.card_acmd(ACMD23, blocks.len() as u32)?;
+            self.wait_not_busy(Timeout::new(10_000))?;
+            self.card_command(CMD25, start_idx)?;
+            for block in blocks.iter() {
+                self.wait_not_busy(Timeout::new(10_000))?;
+                self.write_data(WRITE_MULTIPLE_TOKEN, &block.contents)?;
+            }
+            self.wait_not_busy(Timeout::new(10_000))?;
+            self.write_byte(STOP_TRAN_TOKEN)?;
+            Ok(())
+        };
+        self.cs.set_high().map_err(Error::Pin)?;
+        result
+    }
+
     fn num_blocks(&mut self) -> Result<BlockCount, Error<SpiE, PinE>> {
         let blocks = self.read_csd_blocks()?;
         Ok(BlockCount(blocks))
@@ -277,6 +314,24 @@ where
         self.card_command(command, arg)
     }
 
+    fn write_data(&mut self, token: u8, buffer: &[u8]) -> Result<(), Error<SpiE, PinE>> {
+        self.write_byte(token)?;
+        self.spi.write_bytes(buffer).map_err(Error::Spi)?;
+        let crc_bytes = if self.options.use_crc {
+            crc16(buffer).to_be_bytes()
+        } else {
+            [0xFF, 0xFF]
+        };
+        self.spi.write_bytes(&crc_bytes).map_err(Error::Spi)?;
+
+        let status = self.read_byte()?;
+        if (status & DATA_RES_MASK) != DATA_RES_ACCEPTED {
+            Err(Error::WriteError)
+        } else {
+            Ok(())
+        }
+    }
+
     fn card_command(&mut self, command: u8, arg: u32) -> Result<u8, Error<SpiE, PinE>> {
         if command != CMD0 && command != CMD12 {
             self.wait_not_busy(Timeout::new(10_000))?;
@@ -309,6 +364,11 @@ where
 
     fn read_byte(&mut self) -> Result<u8, Error<SpiE, PinE>> {
         self.spi.transfer_byte(0xFF).map_err(Error::Spi)
+    }
+
+    fn write_byte(&mut self, byte: u8) -> Result<(), Error<SpiE, PinE>> {
+        let _ = self.spi.transfer_byte(byte).map_err(Error::Spi)?;
+        Ok(())
     }
 
     fn wait_not_busy(&mut self, mut delay: Timeout) -> Result<(), Error<SpiE, PinE>> {

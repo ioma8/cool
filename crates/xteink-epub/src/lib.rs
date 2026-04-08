@@ -16,6 +16,16 @@ pub const MAX_CHAPTER_DIR_BYTES: usize = 1024;
 pub const MAX_ARCHIVE_ENTRIES: usize = 512;
 pub const MAX_ARCHIVE_NAME_CAPACITY: usize = 16 * 1024;
 const CHAPTER_TAIL_RESERVE: usize = 1024;
+const NEXT_EVENT_PROGRESS_INTERVAL: usize = 256;
+
+macro_rules! epub_logln {
+    ($($arg:tt)*) => {{
+        #[cfg(target_arch = "riscv32")]
+        {
+            let _ = esp_println::println!($($arg)*);
+        }
+    }};
+}
 
 #[derive(Debug)]
 pub enum EpubError {
@@ -253,6 +263,7 @@ impl<S: EpubSource> Epub<S> {
         }
 
         if !self.state.catalog_ready {
+            epub_logln!("EPUB parser: prepare_catalog begin");
             let (catalog, inflate, zip_cd, path_buf, archive) = unsafe {
                 (
                     &mut *catalog_ptr,
@@ -264,9 +275,27 @@ impl<S: EpubSource> Epub<S> {
             };
             self.prepare_catalog(catalog, inflate, zip_cd, path_buf, archive)?;
             self.state.catalog_ready = true;
+            epub_logln!(
+                "EPUB parser: prepare_catalog end spine_count={}",
+                self.state.spine_count
+            );
         }
 
+        let mut loop_iterations = 0usize;
         loop {
+            loop_iterations = loop_iterations.saturating_add(1);
+            if loop_iterations % NEXT_EVENT_PROGRESS_INTERVAL == 0 {
+                epub_logln!(
+                    "EPUB parser: progress spine_index={} cursor={} chapter_len={} chapter_finished={} compressed_read={} input_cursor={} input_len={}",
+                    self.state.spine_index,
+                    self.state.cursor,
+                    self.state.chapter_len,
+                    self.state.chapter_finished,
+                    self.state.compressed_read,
+                    self.state.input_cursor,
+                    self.state.input_len
+                );
+            }
             if self.state.done {
                 return Ok(None);
             }
@@ -276,6 +305,10 @@ impl<S: EpubSource> Epub<S> {
                     self.state.done = true;
                     return Ok(None);
                 }
+                epub_logln!(
+                    "EPUB parser: load_current_chapter begin spine_index={}",
+                    self.state.spine_index
+                );
                 let (catalog, zip_cd, path_buf, stream_state, archive) = unsafe {
                     (
                         &mut *catalog_ptr,
@@ -286,6 +319,16 @@ impl<S: EpubSource> Epub<S> {
                     )
                 };
                 self.load_current_chapter(catalog, zip_cd, path_buf, stream_state, archive)?;
+                if let Some(_entry) = self.state.chapter_entry {
+                    epub_logln!(
+                        "EPUB parser: load_current_chapter end spine_index={} chapter_dir_len={} compression={:?} compressed_size={} uncompressed_size={}",
+                        self.state.spine_index.saturating_sub(1),
+                        self.state.chapter_dir_len,
+                        _entry.compression,
+                        _entry.compressed_size,
+                        _entry.uncompressed_size
+                    );
+                }
             }
 
             if self.state.cursor >= self.state.chapter_len
@@ -293,6 +336,15 @@ impl<S: EpubSource> Epub<S> {
                     && self.state.chapter_len.saturating_sub(self.state.cursor)
                         <= CHAPTER_TAIL_RESERVE)
             {
+                epub_logln!(
+                    "EPUB parser: refill_current_chapter begin cursor={} chapter_len={} chapter_finished={} compressed_read={} input_cursor={} input_len={}",
+                    self.state.cursor,
+                    self.state.chapter_len,
+                    self.state.chapter_finished,
+                    self.state.compressed_read,
+                    self.state.input_cursor,
+                    self.state.input_len
+                );
                 if !self.state.chapter_finished && self.state.cursor >= self.state.chapter_len {
                     self.state.cursor = self
                         .state
@@ -307,6 +359,15 @@ impl<S: EpubSource> Epub<S> {
                     )
                 };
                 self.refill_current_chapter(inflate, stream_input, stream_state)?;
+                epub_logln!(
+                    "EPUB parser: refill_current_chapter end cursor={} chapter_len={} chapter_finished={} compressed_read={} input_cursor={} input_len={}",
+                    self.state.cursor,
+                    self.state.chapter_len,
+                    self.state.chapter_finished,
+                    self.state.compressed_read,
+                    self.state.input_cursor,
+                    self.state.input_len
+                );
             }
 
             if self.state.cursor >= self.state.chapter_len {
@@ -361,12 +422,20 @@ impl<S: EpubSource> Epub<S> {
         _path_buf: &mut [u8],
         archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
+        epub_logln!("EPUB parser: archive.parse begin [catalog]");
         archive.parse(&self.source)?;
+        epub_logln!("EPUB parser: archive.parse end [catalog]");
 
         let container_entry = archive
             .entry_by_name(&self.source, "META-INF/container.xml", zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
+        epub_logln!(
+            "EPUB parser: read container begin compressed_size={} uncompressed_size={}",
+            container_entry.compressed_size,
+            container_entry.uncompressed_size
+        );
         let container = read_entry(&self.source, &container_entry, inflate, zip_cd)?;
+        epub_logln!("EPUB parser: read container end bytes={}", container.len());
 
         let (opf_path_start, opf_path_len) = parse_container_root(container)?;
         let mut opf_path = [0u8; 512];
@@ -379,9 +448,18 @@ impl<S: EpubSource> Epub<S> {
         let opf_entry = archive
             .entry_by_name_bytes(&self.source, &opf_path[..opf_path_len], zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
+        epub_logln!(
+            "EPUB parser: read opf begin path_len={} compressed_size={} uncompressed_size={}",
+            opf_path_len,
+            opf_entry.compressed_size,
+            opf_entry.uncompressed_size
+        );
         let opf = read_entry(&self.source, &opf_entry, inflate, zip_cd)?;
+        epub_logln!("EPUB parser: read opf end bytes={}", opf.len());
 
+        epub_logln!("EPUB parser: parse_opf begin");
         let count = parse_opf(opf, &opf_path[..opf_path_len], catalog)?;
+        epub_logln!("EPUB parser: parse_opf end spine_count={}", count);
         self.state.spine_count = count;
         Ok(())
     }
@@ -398,10 +476,16 @@ impl<S: EpubSource> Epub<S> {
         let (entry_start, entry_len) = read_spine_entry(catalog, index)?;
         let chapter_path = &catalog[entry_start..entry_start + entry_len];
 
-        archive.parse(&self.source)?;
         let entry = archive
             .entry_by_name_bytes(&self.source, chapter_path, zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
+        epub_logln!(
+            "EPUB parser: chapter entry resolved path_len={} compression={:?} compressed_size={} uncompressed_size={}",
+            chapter_path.len(),
+            entry.compression,
+            entry.compressed_size,
+            entry.uncompressed_size
+        );
 
         let base = path_parent(chapter_path);
         if base.len() > self.state.chapter_dir.len() {
@@ -523,6 +607,21 @@ impl<S: EpubSource> Epub<S> {
                         &mut chapter_buf[self.state.chapter_len..],
                         flush,
                     );
+                    if result.bytes_consumed == 0
+                        && result.bytes_written == 0
+                        && !matches!(result.status, Ok(MZStatus::StreamEnd))
+                    {
+                        epub_logln!(
+                            "EPUB parser: refill stall compressed_read={} compressed_total={} chapter_len={} input_cursor={} input_len={} flush={:?} status={:?}",
+                            self.state.compressed_read,
+                            compressed_total,
+                            self.state.chapter_len,
+                            self.state.input_cursor,
+                            self.state.input_len,
+                            flush,
+                            result.status
+                        );
+                    }
                     self.state.input_cursor = self
                         .state
                         .input_cursor

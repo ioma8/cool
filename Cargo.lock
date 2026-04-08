@@ -2254,6 +2254,7 @@ dependencies = [
 name = "xteink-epub"
 version = "0.1.0"
 dependencies = [
+ "esp-println",
  "miniz_oxide",
 ]
 
@@ -2328,6 +2329,7 @@ name = "xteink-render"
 version = "0.1.0"
 dependencies = [
  "critical-section",
+ "esp-println",
  "fontdue",
  "freetype-rs",
  "miniz_oxide",

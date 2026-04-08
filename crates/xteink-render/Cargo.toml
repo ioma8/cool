@@ -9,6 +9,9 @@ miniz_oxide = { version = "0.8", default-features = false }
 xteink-epub = { path = "../xteink-epub" }
 xteink-memory.workspace = true
 
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+esp-println = { version = "0.16", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
+
 [build-dependencies]
 fontdue = "0.9"
 rustybuzz = "0.20"

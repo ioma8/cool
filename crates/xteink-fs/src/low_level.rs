@@ -172,6 +172,10 @@ where
     SPI: SpiBus + SpiErrorType + SetConfig<Config = esp_hal::spi::master::Config>,
     DELAY: DelayNs + 'bus,
 {
+    fn close_raw_directory(&self, directory: RawDirectory) {
+        let _ = self.volume_mgr.close_dir(directory);
+    }
+
     pub fn begin(
         spi_bus: &'bus Mutex<NoopRawMutex, RefCell<SPI>>,
         base_config: esp_hal::spi::master::Config,
@@ -215,10 +219,12 @@ where
             })?;
         for component in path_components(path.as_str()) {
             esp_println::println!("SD open_directory_at_path component: {}", component);
-            raw_directory = self
+            let current = raw_directory;
+            let next = self
                 .volume_mgr
-                .open_dir(raw_directory, component)
+                .open_dir(current, component)
                 .map_err(|err| {
+                    self.close_raw_directory(current);
                     esp_println::println!(
                         "SD open_directory_at_path component failed: {} / {} -> {:?}",
                         path,
@@ -227,6 +233,8 @@ where
                     );
                     FsError::OpenFailed(error_string(&err))
                 })?;
+            self.close_raw_directory(current);
+            raw_directory = next;
         }
         esp_println::println!("SD open_directory_at_path complete: {}", path.as_str());
         Ok(raw_directory)
@@ -252,6 +260,7 @@ where
             .volume_mgr
             .open_file_in_dir(raw_directory, file_name, mode)
             .map_err(|err| {
+                self.close_raw_directory(raw_directory);
                 esp_println::println!(
                     "SD open_file_at_path open_file_in_dir failed: {} -> {:?}",
                     path.as_str(),
@@ -259,6 +268,7 @@ where
                 );
                 FsError::OpenFailed(error_string(&err))
             })?;
+        self.close_raw_directory(raw_directory);
         esp_println::println!("SD open_file_at_path complete: {}", path.as_str());
         Ok(file.to_file(&self.volume_mgr))
     }
@@ -283,22 +293,27 @@ where
         for component in path_components(path.as_str()) {
             match self.volume_mgr.open_dir(current, component) {
                 Ok(next) => {
+                    self.close_raw_directory(current);
                     current = next;
                 }
                 Err(open_err) => {
                     if !matches!(open_err, embedded_sdmmc::Error::NotFound) {
+                        self.close_raw_directory(current);
                         return Err(FsError::OpenFailed(error_string(&open_err)));
                     }
                     self.volume_mgr
                         .make_dir_in_dir(current, component)
                         .map_err(|err| FsError::OpenFailed(error_string(&err)))?;
-                    current = self
+                    let next = self
                         .volume_mgr
                         .open_dir(current, component)
                         .map_err(|err| FsError::OpenFailed(error_string(&err)))?;
+                    self.close_raw_directory(current);
+                    current = next;
                 }
             }
         }
+        self.close_raw_directory(current);
         Ok(())
     }
 }

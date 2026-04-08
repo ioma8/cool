@@ -9,6 +9,15 @@ use xteink_memory::SHARED_RENDER_EPUB_WORKSPACE_LIMIT_BYTES;
 
 use crate::{DISPLAY_HEIGHT, Framebuffer, bookerly, text::TextBuffer};
 
+macro_rules! render_logln {
+    ($($arg:tt)*) => {{
+        #[cfg(target_arch = "riscv32")]
+        {
+            let _ = esp_println::println!($($arg)*);
+        }
+    }};
+}
+
 const EPUB_WORKSPACE_ZIP_CD: usize = 16 * 1024;
 const EPUB_WORKSPACE_INFLATE: usize = 32 * 1024;
 const EPUB_WORKSPACE_STREAM_INPUT: usize = 1024;
@@ -29,21 +38,6 @@ struct EpubRenderWorkspace {
 }
 
 pub const EPUB_RENDER_WORKSPACE_BYTES: usize = core::mem::size_of::<EpubRenderWorkspace>();
-
-impl EpubRenderWorkspace {
-    fn new() -> Self {
-        Self {
-            zip_cd: [0; EPUB_WORKSPACE_ZIP_CD],
-            inflate: [0; EPUB_WORKSPACE_INFLATE],
-            stream_input: [0; EPUB_WORKSPACE_STREAM_INPUT],
-            xml: [0; EPUB_WORKSPACE_XML],
-            catalog: [0; EPUB_WORKSPACE_CATALOG],
-            path_buf: [0; EPUB_WORKSPACE_PATH_BUF],
-            stream_state: InflateState::new(miniz_oxide::DataFormat::Raw),
-            archive: EpubArchive::new(),
-        }
-    }
-}
 
 const _: [(); 1] =
     [(); (EPUB_RENDER_WORKSPACE_BYTES <= SHARED_RENDER_EPUB_WORKSPACE_LIMIT_BYTES) as usize];
@@ -70,9 +64,37 @@ fn with_epub_render_workspace<R>(f: impl FnOnce(&mut EpubRenderWorkspace) -> R) 
 fn init_epub_render_workspace() -> &'static mut EpubRenderWorkspace {
     unsafe {
         if !EPUB_RENDER_WORKSPACE_READY {
+            let workspace_ptr =
+                core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace;
+            core::ptr::write_bytes(core::ptr::addr_of_mut!((*workspace_ptr).zip_cd).cast::<u8>(), 0, EPUB_WORKSPACE_ZIP_CD);
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!((*workspace_ptr).inflate).cast::<u8>(),
+                0,
+                EPUB_WORKSPACE_INFLATE,
+            );
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!((*workspace_ptr).stream_input).cast::<u8>(),
+                0,
+                EPUB_WORKSPACE_STREAM_INPUT,
+            );
+            core::ptr::write_bytes(core::ptr::addr_of_mut!((*workspace_ptr).xml).cast::<u8>(), 0, EPUB_WORKSPACE_XML);
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!((*workspace_ptr).catalog).cast::<u8>(),
+                0,
+                EPUB_WORKSPACE_CATALOG,
+            );
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!((*workspace_ptr).path_buf).cast::<u8>(),
+                0,
+                EPUB_WORKSPACE_PATH_BUF,
+            );
             core::ptr::write(
-                core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace,
-                EpubRenderWorkspace::new(),
+                core::ptr::addr_of_mut!((*workspace_ptr).stream_state),
+                InflateState::new(miniz_oxide::DataFormat::Raw),
+            );
+            core::ptr::write(
+                core::ptr::addr_of_mut!((*workspace_ptr).archive),
+                EpubArchive::new(),
             );
             EPUB_RENDER_WORKSPACE_READY = true;
         }
@@ -109,17 +131,25 @@ impl Framebuffer {
     {
         with_epub_render_workspace(|workspace| {
             let workspace_ptr = core::ptr::addr_of_mut!(*workspace);
+            render_logln!(
+                "EPUB pipeline: open begin target_page={} parse_full_book={}",
+                target_page,
+                parse_full_book
+            );
             let mut epub = Epub::open(source)?;
+            render_logln!("EPUB pipeline: open ok, first next_event pending");
             let mut text = TextBuffer::<TEXT_LEN>::new();
             let mut cursor_y = 0u16;
             let mut current_page = 0usize;
             let mut render_enabled = true;
             let line_height = bookerly::BOOKERLY.line_height_px();
+            let mut saw_first_event = false;
 
             self.clear(0xFF);
 
             loop {
                 if should_cancel() {
+                    render_logln!("EPUB pipeline: cancelled before next_event");
                     return Err(EpubError::Cancelled);
                 }
 
@@ -134,7 +164,19 @@ impl Framebuffer {
                     archive: unsafe { &mut (*workspace_ptr).archive },
                 })?;
 
-                let Some(event) = event else { break };
+                let Some(event) = event else {
+                    render_logln!(
+                        "EPUB pipeline: next_event reached end current_page={} cursor_y={} render_enabled={}",
+                        current_page,
+                        cursor_y,
+                        render_enabled
+                    );
+                    break;
+                };
+                if !saw_first_event {
+                    render_logln!("EPUB pipeline: first event received");
+                    saw_first_event = true;
+                }
                 match event {
                     EpubEvent::Text(chunk) => {
                         if render_enabled {
@@ -172,6 +214,13 @@ impl Framebuffer {
                 }
 
                 if cursor_y >= DISPLAY_HEIGHT {
+                    render_logln!(
+                        "EPUB pipeline: page boundary current_page={} target_page={} render_enabled={} parse_full_book={}",
+                        current_page,
+                        target_page,
+                        render_enabled,
+                        parse_full_book
+                    );
                     if render_enabled && current_page >= target_page {
                         if parse_full_book {
                             render_enabled = false;
@@ -197,6 +246,12 @@ impl Framebuffer {
             if render_enabled {
                 let _ = self.flush_text_buffer(&mut text, cursor_y);
             }
+            render_logln!(
+                "EPUB pipeline: success rendered_page={} final_cursor_y={} render_enabled={}",
+                current_page,
+                cursor_y,
+                render_enabled
+            );
             Ok(current_page)
         })
     }
