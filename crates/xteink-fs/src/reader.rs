@@ -109,21 +109,20 @@ where
     let source_path =
         join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
     let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
-    let source_size = u32::try_from(
-        fs.open_epub_source(source_path.as_str())
-            .map_err(|_| EpubError::Io)?
-            .len(),
-    )
-    .map_err(|_| EpubError::OutOfSpace)?;
+    let source = fs
+        .open_epub_source(source_path.as_str())
+        .map_err(|_| EpubError::Io)?;
+    let source_size = u32::try_from(source.len()).map_err(|_| EpubError::OutOfSpace)?;
     let saved = read_cached_progress(fs, cache_paths.progress.as_str());
     let start_page = saved.map(|p| p.current_page_hint as usize).unwrap_or(0);
 
-    render_epub_page_from_entry_with_cancel(
+    render_epub_page_from_entry_with_source_and_cancel(
         fs,
         display,
         current_path,
         entry,
         source_size,
+        Some(source),
         start_page,
         false,
         should_cancel,
@@ -149,12 +148,13 @@ where
             .len(),
     )
     .map_err(|_| EpubError::OutOfSpace)?;
-    render_epub_page_from_entry_with_cancel(
+    render_epub_page_from_entry_with_source_and_cancel(
         fs,
         display,
         current_path,
         entry,
         source_size,
+        None,
         page_index,
         fast_refresh,
         || false,
@@ -167,6 +167,34 @@ pub fn render_epub_page_from_entry_with_cancel<SD, C>(
     current_path: &str,
     entry: &ListedEntry,
     source_size: u32,
+    page_index: usize,
+    fast_refresh: bool,
+    should_cancel: C,
+) -> Result<EpubRenderResult, EpubError>
+where
+    SD: SdFilesystem,
+    C: FnMut() -> bool,
+{
+    render_epub_page_from_entry_with_source_and_cancel(
+        fs,
+        display,
+        current_path,
+        entry,
+        source_size,
+        None,
+        page_index,
+        fast_refresh,
+        should_cancel,
+    )
+}
+
+fn render_epub_page_from_entry_with_source_and_cancel<'a, SD, C>(
+    fs: &'a SD,
+    display: &mut Framebuffer,
+    current_path: &str,
+    entry: &ListedEntry,
+    source_size: u32,
+    mut source_for_build: Option<SD::EpubSource<'a>>,
     page_index: usize,
     fast_refresh: bool,
     mut should_cancel: C,
@@ -182,9 +210,12 @@ where
     let mut meta = read_cache_meta_if_valid(fs, &cache_paths, source_size).ok();
     if meta.is_none() {
         logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
-        let source = fs
-            .open_epub_source(source_path.as_str())
-            .map_err(|_| EpubError::Io)?;
+        let source = if let Some(source) = source_for_build.take() {
+            source
+        } else {
+            fs.open_epub_source(source_path.as_str())
+                .map_err(|_| EpubError::Io)?
+        };
         let build = build_content_cache(
             fs,
             display,
@@ -212,6 +243,12 @@ where
         // initialize sidecars
         write_offset_record(fs, cache_paths.pages.as_str(), 0, true)?;
         write_offset_record(fs, cache_paths.chapters.as_str(), 0, true)?;
+        write_chapter_index_record(
+            fs,
+            cache_paths.chapters.as_str(),
+            usize::from(new_meta.next_chapter_index),
+            new_meta.content_length,
+        )?;
         meta = Some(new_meta);
     }
 
@@ -225,6 +262,7 @@ where
         fs,
         display,
         cache_paths.content.as_str(),
+        cache_paths.pages.as_str(),
         page_index,
         saved,
         &mut should_cancel,
@@ -284,6 +322,7 @@ fn render_cached_page<SD, C>(
     fs: &SD,
     display: &mut Framebuffer,
     content_path: &str,
+    pages_path: &str,
     target_page: usize,
     saved: ProgressState,
     should_cancel: &mut C,
@@ -292,28 +331,43 @@ where
     SD: SdFilesystem,
     C: FnMut() -> bool,
 {
-    let (mut page, mut offset) = if target_page >= saved.current_page_hint as usize {
+    let indexed = read_page_offset(fs, pages_path, target_page).or_else(|| {
+        if target_page >= saved.current_page_hint as usize {
+            Some(saved.current_byte_offset)
+        } else {
+            None
+        }
+    });
+
+    let (mut page, mut offset) = if let Some(offset) = indexed {
+        (target_page, offset)
+    } else if target_page >= saved.current_page_hint as usize {
         (saved.current_page_hint as usize, saved.current_byte_offset)
     } else {
         (0usize, 0u64)
     };
 
+    let mut file = fs
+        .open_cache_file_read(content_path)
+        .map_err(|_| EpubError::Io)?;
+
     loop {
-        let mut file = fs
-            .open_cache_file_read(content_path)
+        file.seek_from_start(u32::try_from(offset).map_err(|_| EpubError::OutOfSpace)?)
             .map_err(|_| EpubError::Io)?;
-        file.seek_from_start(0).map_err(|_| EpubError::Io)?;
         let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
             file.read(buffer).map_err(|_| EpubError::Io)
         };
         let rendered = display.render_cached_text_page_from_offset_with_progress(
             &mut read_text,
-            usize::try_from(offset).map_err(|_| EpubError::OutOfSpace)?,
+            0,
             &mut *should_cancel,
         )?;
 
-        let next =
-            u64::try_from(rendered.next_page_start_byte).map_err(|_| EpubError::OutOfSpace)?;
+        let next = offset.saturating_add(
+            u64::try_from(rendered.next_page_start_byte).map_err(|_| EpubError::OutOfSpace)?,
+        );
+        let _ = write_page_index_record(fs, pages_path, page, offset);
+        let _ = write_page_index_record(fs, pages_path, page + 1, next);
         if page >= target_page || next <= offset {
             return Ok((page, offset, next));
         }
@@ -321,6 +375,25 @@ where
         page = page.saturating_add(1);
         offset = next;
     }
+}
+
+fn read_page_offset<SD: SdFilesystem>(fs: &SD, path: &str, page: usize) -> Option<u64> {
+    let mut file = fs.open_cache_file_read(path).ok()?;
+    let mut raw = [0u8; 8];
+    for current in 0..=page {
+        let mut total = 0usize;
+        while total < raw.len() {
+            let n = file.read(&mut raw[total..]).ok()?;
+            if n == 0 {
+                return None;
+            }
+            total += n;
+        }
+        if current == page {
+            return Some(u64::from_le_bytes(raw));
+        }
+    }
+    None
 }
 
 struct BuildResult {
@@ -477,17 +550,72 @@ fn write_page_index_record<SD: SdFilesystem>(
     page: usize,
     offset: u64,
 ) -> Result<(), EpubError> {
-    let mut file = match fs.open_cache_file_read(path) {
-        Ok(file) => {
-            let existing_records = file.len() / 8;
-            if page < existing_records {
-                return Ok(());
-            }
-            fs.open_cache_file_append(path).map_err(|_| EpubError::Io)?
-        }
-        Err(_) => fs.open_cache_file_write(path).map_err(|_| EpubError::Io)?,
+    let existing_records = fs
+        .open_cache_file_read(path)
+        .map(|file| file.len() / 8)
+        .unwrap_or(0);
+
+    if page < existing_records {
+        return Ok(());
+    }
+
+    let mut file = if existing_records == 0 {
+        fs.open_cache_file_write(path).map_err(|_| EpubError::Io)?
+    } else {
+        fs.open_cache_file_append(path).map_err(|_| EpubError::Io)?
     };
 
+    // backfill any gaps to keep pages.idx contiguous
+    let last_offset = if existing_records == 0 {
+        0
+    } else {
+        read_page_offset(fs, path, existing_records - 1).unwrap_or(0)
+    };
+
+    for _ in existing_records..page {
+        write_offset_bytes(&mut file, last_offset)?;
+    }
+    write_offset_bytes(&mut file, offset)?;
+    file.flush().map_err(|_| EpubError::Io)?;
+    Ok(())
+}
+
+fn write_chapter_index_record<SD: SdFilesystem>(
+    fs: &SD,
+    path: &str,
+    chapter: usize,
+    offset: u64,
+) -> Result<(), EpubError> {
+    let existing_records = fs
+        .open_cache_file_read(path)
+        .map(|file| file.len() / 8)
+        .unwrap_or(0);
+
+    if chapter < existing_records {
+        return Ok(());
+    }
+
+    let mut file = if existing_records == 0 {
+        fs.open_cache_file_write(path).map_err(|_| EpubError::Io)?
+    } else {
+        fs.open_cache_file_append(path).map_err(|_| EpubError::Io)?
+    };
+
+    let last_offset = if existing_records == 0 {
+        0
+    } else {
+        read_page_offset(fs, path, existing_records - 1).unwrap_or(0)
+    };
+
+    for _ in existing_records..chapter {
+        write_offset_bytes(&mut file, last_offset)?;
+    }
+    write_offset_bytes(&mut file, offset)?;
+    file.flush().map_err(|_| EpubError::Io)?;
+    Ok(())
+}
+
+fn write_offset_bytes<F: SdFsFile>(file: &mut F, offset: u64) -> Result<(), EpubError> {
     let raw = encode_offset(offset);
     let mut written = 0usize;
     while written < raw.len() {
@@ -497,7 +625,6 @@ fn write_page_index_record<SD: SdFilesystem>(
         }
         written += count;
     }
-    file.flush().map_err(|_| EpubError::Io)?;
     Ok(())
 }
 
@@ -513,4 +640,158 @@ fn write_bytes<SD: SdFilesystem>(fs: &SD, path: &str, data: &[u8]) -> Result<(),
     }
     file.flush().map_err(|_| EpubError::Io)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DirectoryPageInfo, FsError, MAX_ENTRIES};
+    use heapless::Vec;
+    use std::{
+        cell::RefCell,
+        fs,
+        io::{Read, Seek, SeekFrom, Write},
+        path::PathBuf,
+    };
+
+    struct MockFile {
+        file: fs::File,
+        len: usize,
+    }
+
+    impl SdFsFile for MockFile {
+        fn len(&self) -> usize {
+            self.len
+        }
+        fn seek_from_start(&mut self, offset: u32) -> Result<(), FsError> {
+            self.file
+                .seek(SeekFrom::Start(offset.into()))
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+            Ok(())
+        }
+        fn read(&mut self, buffer: &mut [u8]) -> Result<usize, FsError> {
+            self.file
+                .read(buffer)
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))
+        }
+        fn write(&mut self, buffer: &[u8]) -> Result<usize, FsError> {
+            let n = self
+                .file
+                .write(buffer)
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+            self.len = self
+                .len
+                .max(self.file.stream_position().unwrap_or(0) as usize);
+            Ok(n)
+        }
+        fn flush(&mut self) -> Result<(), FsError> {
+            self.file
+                .flush()
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))
+        }
+    }
+
+    struct MockFs {
+        root: RefCell<PathBuf>,
+    }
+
+    impl MockFs {
+        fn new() -> Self {
+            Self {
+                root: RefCell::new(tempfile::tempdir().unwrap().keep()),
+            }
+        }
+        fn path(&self, p: &str) -> PathBuf {
+            self.root.borrow().join(p.trim_start_matches('/'))
+        }
+    }
+
+    impl SdFilesystem for MockFs {
+        type EpubSource<'a>
+            = super::tests::NeverSource
+        where
+            Self: 'a;
+        type File<'a>
+            = MockFile
+        where
+            Self: 'a;
+
+        fn list_directory_page(
+            &self,
+            _path: &str,
+            _page_start: usize,
+            _page_size: usize,
+            _entries: &mut Vec<ListedEntry, MAX_ENTRIES>,
+        ) -> Result<DirectoryPageInfo, FsError> {
+            unreachable!()
+        }
+        fn open_epub_source<'a>(&'a self, _path: &str) -> Result<Self::EpubSource<'a>, FsError> {
+            unreachable!()
+        }
+        fn open_cache_file_read<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError> {
+            let p = self.path(path);
+            let file =
+                fs::File::open(&p).map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+            let len = file
+                .metadata()
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))?
+                .len() as usize;
+            Ok(MockFile { file, len })
+        }
+        fn open_cache_file_write<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError> {
+            let p = self.path(path);
+            if let Some(parent) = p.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&p)
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+            Ok(MockFile { file, len: 0 })
+        }
+        fn open_cache_file_append<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError> {
+            let p = self.path(path);
+            if let Some(parent) = p.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .write(true)
+                .open(&p)
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+            let len = file
+                .metadata()
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))?
+                .len() as usize;
+            Ok(MockFile { file, len })
+        }
+        fn ensure_directory(&self, path: &str) -> Result<(), FsError> {
+            fs::create_dir_all(self.path(path))
+                .map_err(|_| FsError::OpenFailed(heapless::String::new()))
+        }
+    }
+
+    struct NeverSource;
+    impl EpubSource for NeverSource {
+        fn len(&self) -> usize {
+            0
+        }
+        fn read_at(&self, _offset: u64, _buffer: &mut [u8]) -> Result<usize, EpubError> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn page_index_writer_backfills_gaps() {
+        let fs = MockFs::new();
+        write_page_index_record(&fs, "/.cool/book/pages.idx", 0, 0).unwrap();
+        write_page_index_record(&fs, "/.cool/book/pages.idx", 3, 300).unwrap();
+        assert_eq!(read_page_offset(&fs, "/.cool/book/pages.idx", 0), Some(0));
+        assert_eq!(read_page_offset(&fs, "/.cool/book/pages.idx", 1), Some(0));
+        assert_eq!(read_page_offset(&fs, "/.cool/book/pages.idx", 2), Some(0));
+        assert_eq!(read_page_offset(&fs, "/.cool/book/pages.idx", 3), Some(300));
+    }
 }

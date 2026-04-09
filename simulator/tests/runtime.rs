@@ -6,7 +6,22 @@ fn decisive_fixture_path() -> Option<std::path::PathBuf> {
         .parent()
         .expect("workspace root")
         .join("test/epubs/Decisive - Chip Heath.epub");
-    if path.exists() { Some(path) } else { None }
+    if path.exists() {
+        Some(path)
+    } else if fixtures_required() {
+        panic!(
+            "EPUB fixtures required but missing. Set up test/epubs or unset REQUIRE_EPUB_FIXTURES."
+        );
+    } else {
+        None
+    }
+}
+
+fn fixtures_required() -> bool {
+    matches!(
+        std::env::var("REQUIRE_EPUB_FIXTURES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }
 
 use simulator::{

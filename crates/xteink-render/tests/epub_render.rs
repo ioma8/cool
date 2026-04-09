@@ -252,7 +252,22 @@ fn fixture_dir() -> Option<std::path::PathBuf> {
         .join("..")
         .join("test")
         .join("epubs");
-    if dir.exists() { Some(dir) } else { None }
+    if dir.exists() {
+        Some(dir)
+    } else if fixtures_required() {
+        panic!(
+            "EPUB fixtures required but missing. Set up test/epubs or unset REQUIRE_EPUB_FIXTURES."
+        );
+    } else {
+        None
+    }
+}
+
+fn fixtures_required() -> bool {
+    matches!(
+        std::env::var("REQUIRE_EPUB_FIXTURES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }
 
 fn epub_fixture_paths() -> Vec<std::path::PathBuf> {
@@ -276,6 +291,10 @@ fn all_epub_fixtures_first_page_render_without_out_of_space() {
     let _guard = lock_render_mutex();
     let fixtures = epub_fixture_paths();
     if fixtures.is_empty() {
+        assert!(
+            !fixtures_required(),
+            "REQUIRE_EPUB_FIXTURES is set but no .epub files were found under test/epubs"
+        );
         return;
     }
 

@@ -138,7 +138,22 @@ fn fixtures_dir() -> Option<PathBuf> {
         .join("..")
         .join("test")
         .join("epubs");
-    if dir.exists() { Some(dir) } else { None }
+    if dir.exists() {
+        Some(dir)
+    } else if fixtures_required() {
+        panic!(
+            "EPUB fixtures required but missing. Set up test/epubs or unset REQUIRE_EPUB_FIXTURES."
+        );
+    } else {
+        None
+    }
+}
+
+fn fixtures_required() -> bool {
+    matches!(
+        std::env::var("REQUIRE_EPUB_FIXTURES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }
 
 fn load_fixture(name: &str) -> Option<Vec<u8>> {
@@ -256,7 +271,9 @@ fn push_readable_segment(
     pending_space: &mut bool,
     pending_initial: &mut bool,
 ) {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     if text.is_empty() {
         return;
     }
@@ -358,7 +375,9 @@ fn with_missing_opf_reference(mut data: Vec<u8>) -> Vec<u8> {
 
 #[test]
 fn container_discovery_and_opf_parsing_respect_sample_ordering() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let fixtures = [
         (
             "test_display_none.epub",
@@ -402,9 +421,15 @@ fn container_discovery_and_opf_parsing_respect_sample_ordering() {
 
 #[test]
 fn heading_markup_and_line_breaks_are_preserved() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let mut scratch = Scratch::default();
-    let events = collect_events(load_fixture("test_kerning_ligature.epub").expect("fixture"), &mut scratch).unwrap();
+    let events = collect_events(
+        load_fixture("test_kerning_ligature.epub").expect("fixture"),
+        &mut scratch,
+    )
+    .unwrap();
 
     let headings = collect_level1_headings(&events);
     let chapter_one = headings
@@ -425,9 +450,15 @@ fn heading_markup_and_line_breaks_are_preserved() {
 
 #[test]
 fn chapter_text_is_extracted_from_real_fixture_content() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let mut scratch = Scratch::default();
-    let events = collect_events(load_fixture("test_kerning_ligature.epub").expect("fixture"), &mut scratch).unwrap();
+    let events = collect_events(
+        load_fixture("test_kerning_ligature.epub").expect("fixture"),
+        &mut scratch,
+    )
+    .unwrap();
 
     let full_text = events
         .iter()
@@ -451,9 +482,15 @@ fn chapter_text_is_extracted_from_real_fixture_content() {
 
 #[test]
 fn image_events_include_src_and_alt() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let mut scratch = Scratch::default();
-    let events = collect_events(load_fixture("test_png_images.epub").expect("fixture"), &mut scratch).unwrap();
+    let events = collect_events(
+        load_fixture("test_png_images.epub").expect("fixture"),
+        &mut scratch,
+    )
+    .unwrap();
 
     assert!(events.iter().any(|event| match event {
         OwnedEvent::Image { src, alt } => {
@@ -465,9 +502,15 @@ fn image_events_include_src_and_alt() {
 
 #[test]
 fn table_markup_yields_unsupported_tag_events() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let mut scratch = Scratch::default();
-    let events = collect_events(load_fixture("test_tables.epub").expect("fixture"), &mut scratch).unwrap();
+    let events = collect_events(
+        load_fixture("test_tables.epub").expect("fixture"),
+        &mut scratch,
+    )
+    .unwrap();
 
     assert!(
         events
@@ -479,7 +522,9 @@ fn table_markup_yields_unsupported_tag_events() {
 
 #[test]
 fn malformed_or_missing_epub_inputs_are_rejected() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let mut scratch = Scratch::default();
 
     assert!(
@@ -494,16 +539,20 @@ fn malformed_or_missing_epub_inputs_are_rejected() {
         "truncated payload should be rejected"
     );
 
-    let missing_container = with_missing_container_entry(load_fixture("test_png_images.epub").expect("fixture"));
+    let missing_container =
+        with_missing_container_entry(load_fixture("test_png_images.epub").expect("fixture"));
     assert!(collect_events(missing_container, &mut scratch).is_err());
 
-    let missing_content = with_missing_opf_reference(load_fixture("test_png_images.epub").expect("fixture"));
+    let missing_content =
+        with_missing_opf_reference(load_fixture("test_png_images.epub").expect("fixture"));
     assert!(collect_events(missing_content, &mut scratch).is_err());
 }
 
 #[test]
 fn out_of_space_is_reported() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let data = load_fixture("test_png_images.epub").expect("fixture");
     let mut tiny = Scratch::tiny_out_of_space();
     let result = collect_events(data, &mut tiny);
@@ -516,7 +565,9 @@ fn out_of_space_is_reported() {
 
 #[test]
 fn every_epub_fixture_matches_reference_text_prefix() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     assert!(
         !reference_text::EPUB_REFERENCE_CASES.is_empty(),
         "expected pandoc-handled epub fixtures"
@@ -526,9 +577,12 @@ fn every_epub_fixture_matches_reference_text_prefix() {
         let name = *name;
 
         let mut scratch = Scratch::large_for_smoke();
-        let actual =
-            collect_readable_prefix(load_fixture(name).expect("fixture"), &mut scratch, expected.chars().count())
-                .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+        let actual = collect_readable_prefix(
+            load_fixture(name).expect("fixture"),
+            &mut scratch,
+            expected.chars().count(),
+        )
+        .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
 
         assert!(
             actual.starts_with(expected),
@@ -539,7 +593,9 @@ fn every_epub_fixture_matches_reference_text_prefix() {
 
 #[test]
 fn zero_to_production_prefix_matches_reference_text() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let name = "Zero To Production In Rust - Luca Palmieri.epub";
     let expected = reference_text::EPUB_REFERENCE_CASES
         .iter()
@@ -547,9 +603,12 @@ fn zero_to_production_prefix_matches_reference_text() {
         .expect("expected Zero To Production reference text");
 
     let mut scratch = Scratch::large_for_smoke();
-    let actual =
-        collect_readable_prefix(load_fixture(name).expect("fixture"), &mut scratch, expected.chars().count())
-            .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
+    let actual = collect_readable_prefix(
+        load_fixture(name).expect("fixture"),
+        &mut scratch,
+        expected.chars().count(),
+    )
+    .unwrap_or_else(|err| panic!("failed to parse {name}: {err:?}"));
 
     assert!(
         actual.starts_with(expected),
@@ -559,7 +618,9 @@ fn zero_to_production_prefix_matches_reference_text() {
 
 #[test]
 fn every_epub_fixture_matches_reference_text_1024_prefix() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     assert!(
         !reference_text_1024::EPUB_REFERENCE_CASES_1024.is_empty(),
         "expected pandoc-handled epub fixtures"
@@ -584,7 +645,9 @@ fn every_epub_fixture_matches_reference_text_1024_prefix() {
 
 #[test]
 fn resume_from_spine_index_allows_continued_parsing() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let data = load_fixture("Happiness Trap Pocketbook, The - Russ Harris.epub").expect("fixture");
     let mut resumed = Epub::open(MemorySource::new(data)).expect("fixture should reopen");
     let mut resume_scratch = Scratch::default();
@@ -599,7 +662,9 @@ fn resume_from_spine_index_allows_continued_parsing() {
 
 #[test]
 fn prints_large_fixture_parse_baselines() {
-    if fixtures_dir().is_none() { return; }
+    if fixtures_dir().is_none() {
+        return;
+    }
     let data = load_fixture("Happiness Trap Pocketbook, The - Russ Harris.epub").expect("fixture");
 
     let started = Instant::now();
