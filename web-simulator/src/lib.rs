@@ -5,14 +5,13 @@ pub fn not_wasm_build_placeholder() {}
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use js_sys::Uint8ClampedArray;
     use serde::{Deserialize, Serialize};
     use std::{
         cell::RefCell,
         collections::{BTreeMap, BTreeSet},
         rc::Rc,
     };
-    use wasm_bindgen::{JsCast, prelude::*};
+    use wasm_bindgen::{Clamped, JsCast, prelude::*};
     use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
     use xteink_app::{
         AppStorage, DirectoryPage as AppDirectoryPage, DirectoryPageInfo as AppDirectoryPageInfo,
@@ -133,6 +132,19 @@ mod wasm {
             let mut error = heapless::String::<64>::new();
             let _ = error.push_str(message);
             FsError::OpenFailed(error)
+        }
+
+        fn epub_error(error: xteink_epub::EpubError) -> FsError {
+            match error {
+                xteink_epub::EpubError::Io => Self::host_error("epub io"),
+                xteink_epub::EpubError::Zip => Self::host_error("epub zip"),
+                xteink_epub::EpubError::Utf8 => Self::host_error("epub utf8"),
+                xteink_epub::EpubError::InvalidFormat => Self::host_error("epub invalid format"),
+                xteink_epub::EpubError::Compression => Self::host_error("epub compression"),
+                xteink_epub::EpubError::OutOfSpace => Self::host_error("epub out of space"),
+                xteink_epub::EpubError::Unsupported => Self::host_error("epub unsupported"),
+                xteink_epub::EpubError::Cancelled => Self::host_error("epub cancelled"),
+            }
         }
 
         fn load() -> Self {
@@ -325,7 +337,8 @@ mod wasm {
                 entry.fs_name.as_str(),
                 entry.kind == xteink_browser::EntryKind::Directory,
             )?;
-            let rendered = render_epub_from_entry(self, renderer, current_path, &fs_entry)?;
+            let rendered = render_epub_from_entry(self, renderer, current_path, &fs_entry)
+                .map_err(Self::epub_error)?;
             Ok(EpubRenderResult {
                 rendered_page: rendered.rendered_page,
                 progress_percent: rendered.progress_percent,
@@ -351,7 +364,8 @@ mod wasm {
                 &fs_entry,
                 target_page,
                 true,
-            )?;
+            )
+            .map_err(Self::epub_error)?;
             Ok(EpubRenderResult {
                 rendered_page: rendered.rendered_page,
                 progress_percent: rendered.progress_percent,
@@ -638,9 +652,8 @@ mod wasm {
                 }
             }
 
-            let clamped = Uint8ClampedArray::from(self.rgba.as_slice());
             if let Ok(image) = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-                clamped,
+                Clamped(self.rgba.as_slice()),
                 u32::from(DISPLAY_WIDTH),
                 u32::from(DISPLAY_HEIGHT),
             ) {
