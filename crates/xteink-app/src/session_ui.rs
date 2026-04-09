@@ -68,6 +68,7 @@ impl SessionUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use heapless::Vec;
     use xteink_browser::EntryKind;
 
     #[derive(Default)]
@@ -82,19 +83,21 @@ mod tests {
         }
 
         fn draw_text(&mut self, x: u16, y: u16, text: &str) {
-            let mut text = String::new();
-            let _ = text.push_str(text);
-            let _ = self.texts.push((x, y, text));
+            let mut rendered_text = String::new();
+            let _ = rendered_text.push_str(text);
+            let _ = self.texts.push((x, y, rendered_text));
         }
     }
 
     #[test]
     fn entry_conversion_uses_fs_name_for_controller_entries() {
         let ui = SessionUi::new();
+        let mut label = String::new();
+        let _ = label.push_str("Book");
         let mut fs_name = String::new();
         let _ = fs_name.push_str("book.epub");
         let entry = ListedEntry {
-            label: String::from("Book"),
+            label,
             fs_name,
             kind: EntryKind::Epub,
         };
@@ -113,7 +116,10 @@ mod tests {
 
         ui.render_browser(&mut renderer, "/", &entries, Some(1));
 
-        assert_eq!(renderer.clears, heapless::Vec::from_slice(&[0xFF]).unwrap());
+        assert_eq!(
+            renderer.clears,
+            heapless::Vec::<u8, 4>::from_slice(&[0xFF]).unwrap()
+        );
         assert!(renderer
             .texts
             .iter()

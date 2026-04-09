@@ -1,4 +1,6 @@
 use xteink_render::{Framebuffer, bookerly};
+use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static EPUB_RENDER_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -32,6 +34,58 @@ impl xteink_epub::EpubSource for VecSource {
         let chunk = &self.bytes[start..end];
         buffer[..chunk.len()].copy_from_slice(chunk);
         Ok(chunk.len())
+    }
+}
+
+struct CountingSource {
+    bytes: Vec<u8>,
+    reads: AtomicUsize,
+    bytes_read: AtomicUsize,
+}
+
+impl CountingSource {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            reads: AtomicUsize::new(0),
+            bytes_read: AtomicUsize::new(0),
+        }
+    }
+
+    fn counts(&self) -> (usize, usize) {
+        (
+            self.reads.load(Ordering::Relaxed),
+            self.bytes_read.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl xteink_epub::EpubSource for CountingSource {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, xteink_epub::EpubError> {
+        let start = offset as usize;
+        if start >= self.bytes.len() {
+            return Ok(0);
+        }
+        let end = (start + buffer.len()).min(self.bytes.len());
+        let chunk = &self.bytes[start..end];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.bytes_read.fetch_add(chunk.len(), Ordering::Relaxed);
+        Ok(chunk.len())
+    }
+}
+
+impl xteink_epub::EpubSource for &CountingSource {
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, xteink_epub::EpubError> {
+        (*self).read_at(offset, buffer)
     }
 }
 
@@ -195,6 +249,62 @@ fn cache_prefix_build_stops_before_full_book_for_large_fixture() {
     assert_eq!(result.rendered_page, 0);
     assert!(result.cached_pages >= 1);
     assert!(emitted_text_bytes > 0);
+}
+
+#[test]
+fn prints_cold_first_page_baselines_for_large_fixture() {
+    let _guard = EPUB_RENDER_TEST_MUTEX
+        .lock()
+        .expect("render test mutex poisoned");
+    let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let bytes = std::fs::read(&fixture).expect("fixture should be readable");
+
+    let mut direct = Framebuffer::new();
+    let direct_start = Instant::now();
+    let direct_result = direct.render_epub_page(VecSource { bytes: bytes.clone() }, 0);
+    let direct_elapsed = direct_start.elapsed();
+    assert_eq!(direct_result.expect("direct render should succeed"), 0);
+
+    let mut cached = Framebuffer::new();
+    let mut emitted_text_bytes = 0usize;
+    let cached_start = Instant::now();
+    let cached_result = cached.build_epub_cache_prefix_with_text_sink_and_cancel(
+        VecSource { bytes },
+        0,
+        |chunk| {
+            emitted_text_bytes = emitted_text_bytes.saturating_add(chunk.len());
+            Ok(())
+        },
+        || false,
+    );
+    let cached_elapsed = cached_start.elapsed();
+    assert_eq!(cached_result.expect("cache prefix build should succeed").rendered_page, 0);
+    assert!(emitted_text_bytes > 0);
+
+    eprintln!(
+        "cold first-page baselines: direct={:?} cached_prefix={:?} emitted_text_bytes={}",
+        direct_elapsed,
+        cached_elapsed,
+        emitted_text_bytes
+    );
+}
+
+#[test]
+fn prints_cold_first_page_io_profile_for_large_fixture() {
+    let _guard = EPUB_RENDER_TEST_MUTEX
+        .lock()
+        .expect("render test mutex poisoned");
+    let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let source = CountingSource::new(std::fs::read(&fixture).expect("fixture should be readable"));
+    let mut framebuffer = Framebuffer::new();
+
+    let result = framebuffer.render_epub_page(&source, 0);
+    assert_eq!(result.expect("render should succeed"), 0);
+    let (reads, bytes_read) = source.counts();
+    eprintln!(
+        "cold first-page io profile: reads={} bytes_read={}",
+        reads, bytes_read
+    );
 }
 
 #[test]

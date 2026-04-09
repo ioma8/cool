@@ -433,7 +433,6 @@ impl<S: EpubSource> Epub<S> {
         archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
         archive.parse(&self.source)?;
-
         let container_entry = archive
             .entry_by_name(&self.source, "META-INF/container.xml", zip_cd)?
             .ok_or(EpubError::InvalidFormat)?;
@@ -613,6 +612,7 @@ impl<S: EpubSource> Epub<S> {
             CompressionMethod::Deflate => {
                 let compressed_total =
                     usize::try_from(entry.compressed_size).map_err(|_| EpubError::InvalidFormat)?;
+                let mut final_drain_attempts = 0u8;
                 loop {
                     if self.state.chapter_len >= chapter_buf.len() {
                         return Ok(());
@@ -663,6 +663,10 @@ impl<S: EpubSource> Epub<S> {
                             if self.state.input_cursor >= self.state.input_len
                                 && self.state.compressed_read >= compressed_total
                             {
+                                final_drain_attempts = final_drain_attempts.saturating_add(1);
+                                if final_drain_attempts <= 2 {
+                                    continue;
+                                }
                                 return Err(EpubError::Compression);
                             }
                         }
@@ -681,6 +685,15 @@ impl<S: EpubSource> Epub<S> {
                                 && self.state.compressed_read < compressed_total
                             {
                                 continue;
+                            }
+                            if self.state.input_cursor >= self.state.input_len
+                                && self.state.compressed_read >= compressed_total
+                            {
+                                final_drain_attempts = final_drain_attempts.saturating_add(1);
+                                if final_drain_attempts <= 2 {
+                                    continue;
+                                }
+                                return Err(EpubError::Compression);
                             }
                             epub_diagln!(
                                 "EPUB out_of_space=inflate_buf chapter_len={} chapter_buf_cap={} compressed_read={} compressed_total={} input_cursor={} input_len={} spine_index={}",
@@ -786,6 +799,7 @@ fn parse_opf<S: EpubSource>(
     }
     let mut write = 2usize;
     let mut count: u16 = 0;
+    let mut metadata_slots_end = 2usize;
     let opf_base = path_parent(opf_path);
     let mut manifest_index = ManifestIndex::new(manifest_scratch)?;
 
@@ -819,9 +833,6 @@ fn parse_opf<S: EpubSource>(
                 let href = &opf[item.href_start..item.href_start + usize::from(item.href_len)];
                 let mut tmp = [0u8; MAX_CHAPTER_DIR_BYTES];
                 let resolved_len = resolve_reference(opf_base, href, &mut tmp)?;
-                let entry = archive
-                    .entry_by_name_bytes(source, &tmp[..resolved_len], zip_cd)?
-                    .ok_or(EpubError::InvalidFormat)?;
                 if write + 2 + resolved_len + SPINE_RECORD_METADATA_BYTES > catalog.len() {
                     epub_diagln!(
                         "EPUB out_of_space=catalog_record write={} resolved_len={} metadata_bytes={} catalog_cap={} count={} href_len={}",
@@ -848,11 +859,37 @@ fn parse_opf<S: EpubSource>(
                 write += 2;
                 catalog[write..write + resolved_len].copy_from_slice(&tmp[..resolved_len]);
                 write += resolved_len;
-                write_spine_record_metadata(&mut catalog[write..write + SPINE_RECORD_METADATA_BYTES], entry);
+                catalog[write..write + SPINE_RECORD_METADATA_BYTES].fill(0);
                 write += SPINE_RECORD_METADATA_BYTES;
+                metadata_slots_end = write;
                 count = count.saturating_add(1);
             }
         }
+    }
+    let mut matched = 0u16;
+    archive.for_each_entry(source, zip_cd, |name, entry| {
+        let mut cursor = 2usize;
+        while cursor < metadata_slots_end {
+            let (start, len, metadata, next_cursor) = read_spine_entry_at(catalog, cursor)
+                .map_err(|_| ZipError::InvalidArchive("invalid catalog spine entry"))?;
+            let is_unfilled = metadata.compressed_size == 0
+                && metadata.uncompressed_size == 0
+                && metadata.data_offset == 0
+                && matches!(metadata.compression, CompressionMethod::Stored);
+            if is_unfilled && len == name.len() && &catalog[start..start + len] == name {
+                let metadata_start = start + len;
+                write_spine_record_metadata(
+                    &mut catalog[metadata_start..metadata_start + SPINE_RECORD_METADATA_BYTES],
+                    entry,
+                );
+                matched = matched.saturating_add(1);
+            }
+            cursor = next_cursor;
+        }
+        Ok(())
+    })?;
+    if matched != count {
+        return Err(EpubError::InvalidFormat);
     }
     catalog[..2].copy_from_slice(&count.to_le_bytes());
     Ok(count)
@@ -2317,8 +2354,72 @@ mod tests {
         run_runtime_workspace_fixture(bytes);
     }
 
-    fn run_runtime_workspace_fixture(bytes: Vec<u8>) {
+    #[test]
+    fn streamed_refill_handles_scout_mindset_about_author_chapter() {
+        let bytes = std::fs::read(fixture_path(
+            "The Scout Mindset Why Some People See Things Clearly and Others Dont (Julia Galef) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+        ))
+        .expect("fixture should be readable");
         let source = VecSource { bytes };
+        let mut epub = Epub::open(source).expect("fixture should open");
+        let mut zip_cd = vec![0; 16 * 1024];
+        let mut inflate = vec![0; 48 * 1024];
+        let mut stream_input = vec![0; 2048];
+        let mut xml = vec![0; 32 * 1024];
+        let mut catalog = vec![0; 8192];
+        let mut path_buf = vec![0; 256];
+        let mut stream_state = InflateState::new(DataFormat::Raw);
+        let mut archive = EpubArchive::new();
+
+        epub.prepare_catalog(&mut catalog, &mut inflate, &mut zip_cd, &mut xml, &mut archive)
+            .expect("catalog should prepare");
+        epub.seek_to_spine_index(&catalog, 32)
+            .expect("should seek to target spine");
+        epub.load_current_chapter(
+            &mut catalog,
+            &mut zip_cd,
+            &mut path_buf,
+            &mut stream_state,
+            &mut archive,
+        )
+        .expect("chapter should load");
+
+        while !epub.state.chapter_finished {
+            epub.refill_current_chapter(&mut inflate, &mut stream_input, &mut stream_state)
+                .expect("streamed refill should succeed");
+            if epub.state.chapter_len >= inflate.len() {
+                break;
+            }
+            epub.state.cursor = epub.state.chapter_len;
+        }
+
+        let mut cursor = 2usize;
+        for _ in 0..32 {
+            let (_, _, _, next_cursor) = read_spine_entry_at(&catalog, cursor).expect("spine");
+            cursor = next_cursor;
+        }
+        let (start, len, metadata, _) = read_spine_entry_at(&catalog, cursor).expect("entry");
+        let path = std::str::from_utf8(&catalog[start..start + len]).expect("utf8 path");
+        let direct_entry = archive
+            .entry_by_name(&epub.source, path, &mut zip_cd)
+            .expect("lookup should succeed")
+            .expect("chapter should exist");
+        let mut direct_out = vec![0; 48 * 1024];
+        let mut direct_compressed = vec![0; 16 * 1024];
+        let direct = read_entry(
+            &epub.source,
+            &direct_entry,
+            &mut direct_out,
+            &mut direct_compressed,
+        )
+        .expect("direct read should succeed");
+
+        assert_eq!(metadata.uncompressed_size as usize, direct.len());
+        assert_eq!(&inflate[..direct.len()], direct);
+    }
+
+    fn run_runtime_workspace_fixture(bytes: Vec<u8>) {
+        let source = VecSource { bytes: bytes.clone() };
         let mut epub = Epub::open(source).expect("fixture should open");
         let mut zip_cd = vec![0; 16 * 1024];
         let mut inflate = vec![0; 48 * 1024];
