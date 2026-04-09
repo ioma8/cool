@@ -205,19 +205,28 @@ fn main() {
 }
 
 fn pack_bitmap(bitmap: &[u8], width: usize, height: usize) -> Vec<u8> {
-    let row_bytes = width.div_ceil(8);
+    let row_bytes = width.div_ceil(4);
     let mut packed = vec![0u8; row_bytes * height];
 
     for y in 0..height {
         for x in 0..width {
-            if bitmap[y * width + x] >= 0x80 {
-                let index = y * row_bytes + x / 8;
-                packed[index] |= 1 << (7 - (x % 8));
-            }
+            let shade = quantize_coverage(bitmap[y * width + x]);
+            let index = y * row_bytes + x / 4;
+            let shift = 6 - ((x % 4) * 2);
+            packed[index] |= shade << shift;
         }
     }
 
     packed
+}
+
+fn quantize_coverage(value: u8) -> u8 {
+    match value {
+        0..=63 => 0,
+        64..=127 => 1,
+        128..=191 => 2,
+        _ => 3,
+    }
 }
 
 fn render_generated_file(

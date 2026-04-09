@@ -181,9 +181,13 @@ fn generated_bookerly_bitmaps_match_hinted_freetype_rasterization() {
         let expected = bitmap
             .buffer()
             .iter()
-            .map(|value| *value >= 0x80)
+            .map(|value| quantize_coverage(*value))
             .collect::<Vec<_>>();
         assert_eq!(actual, expected, "bitmap mismatch for {ch}");
+        assert!(
+            actual.iter().any(|value| *value != 0 && *value != 3),
+            "expected {ch} to contain intermediate grayscale coverage"
+        );
     }
 }
 
@@ -256,20 +260,29 @@ fn shaped_positions(face: &Face<'_>, scale: f32, text: &str) -> Vec<i32> {
     positions
 }
 
-fn unpack_bookerly_bitmap(glyph: &bookerly::Glyph) -> Vec<bool> {
+fn unpack_bookerly_bitmap(glyph: &bookerly::Glyph) -> Vec<u8> {
     let bitmap = &bookerly::BOOKERLY.bitmap
         [glyph.data_offset as usize..(glyph.data_offset + glyph.data_length) as usize];
-    let row_bytes = usize::from(glyph.width).div_ceil(8);
+    let row_bytes = usize::from(glyph.width).div_ceil(4);
     let mut unpacked = Vec::with_capacity(usize::from(glyph.width) * usize::from(glyph.height));
 
     for row in 0..glyph.height {
         let row_start = usize::from(row) * row_bytes;
         for col in 0..glyph.width {
-            let byte = bitmap[row_start + usize::from(col / 8)];
-            let mask = 1 << (7 - (col % 8));
-            unpacked.push(byte & mask != 0);
+            let byte = bitmap[row_start + usize::from(col / 4)];
+            let shift = 6 - ((col % 4) * 2);
+            unpacked.push((byte >> shift) & 0b11);
         }
     }
 
     unpacked
+}
+
+fn quantize_coverage(value: u8) -> u8 {
+    match value {
+        0..=63 => 0,
+        64..=127 => 1,
+        128..=191 => 2,
+        _ => 3,
+    }
 }

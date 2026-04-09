@@ -41,6 +41,8 @@ pub struct Font {
 
 include!(concat!(env!("OUT_DIR"), "/bookerly_generated.rs"));
 
+pub const GLYPH_SHADE_BITS_PER_PIXEL: usize = 2;
+
 impl Font {
     pub fn line_height_px(&self) -> u16 {
         self.line_height
@@ -118,6 +120,20 @@ impl Font {
         }
 
         None
+    }
+
+    pub fn glyph_coverage(&self, glyph: &Glyph, x: u8, y: u8) -> u8 {
+        if x >= glyph.width || y >= glyph.height {
+            return 0;
+        }
+
+        let row_bytes = usize::from(glyph.width).div_ceil(4);
+        let bitmap = &self.bitmap
+            [glyph.data_offset as usize..(glyph.data_offset + glyph.data_length) as usize];
+        let row_start = usize::from(y) * row_bytes;
+        let byte = bitmap[row_start + usize::from(x / 4)];
+        let shift = 6 - ((usize::from(x % 4)) * 2);
+        (byte >> shift) & 0b11
     }
 }
 
