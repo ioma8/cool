@@ -60,7 +60,7 @@ Each book cache directory under `/.cool/<book-id>/` contains:
   - `content_length`
   - build completion flag
   - current cache-build checkpoint
-  - layout/version fields needed to invalidate stale `pages.idx`
+  - layout signature fields needed to invalidate stale `pages.idx`
 
 ## Reading Model
 
@@ -78,7 +78,7 @@ There is no page/chapter heuristic progress path in the final model.
 On reopen:
 
 1. read `progress.bin`
-2. map saved byte offset to the nearest page start in `pages.idx`
+2. map saved byte offset to the greatest page start byte offset less than or equal to the saved offset
 3. paginate from that byte offset in `content.txt`
 4. save updated byte offset after rendering/page turn
 
@@ -158,16 +158,16 @@ Progress formula:
 
 Behavior:
 
-- monotonic
+- monotonic once `content.txt` is complete
 - stable across reopen
 - stable across simulator and firmware
 - independent of chapter sizes
 
 If the book is not fully cached yet:
 
-- progress is based on bytes inside the currently built prefix
-- UI may optionally show “building cache” state separately, but the percentage itself remains byte-based
-- once the cache is complete, no progress semantics change
+- the exact total denominator is not yet known, so the reader footer must not show the final book percentage
+- instead, UI shows a distinct “building cache” state with no numeric percent
+- once `content.txt` is complete, the footer switches to exact byte-based percentage and remains exact thereafter
 
 ## Shared Boundaries
 
@@ -205,6 +205,17 @@ Required:
 - bump cache version
 - invalidate older cache directories automatically
 - rebuild `content.txt`, `chapters.idx`, `pages.idx`, and `progress.bin` under the new model
+
+`pages.idx` must be invalidated whenever any layout-signature field changes. The layout signature is:
+
+- cache version
+- display width
+- display height
+- reader content height
+- font metrics/version used for pagination
+- paginator algorithm version
+
+If any of these differ from `meta.txt`, `pages.idx` is stale and must be rebuilt from `content.txt`.
 
 ## Error Handling
 
