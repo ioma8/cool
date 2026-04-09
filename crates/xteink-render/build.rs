@@ -210,7 +210,7 @@ fn pack_bitmap(bitmap: &[u8], width: usize, height: usize) -> Vec<u8> {
 
     for y in 0..height {
         for x in 0..width {
-            if bitmap[y * width + x] > 0 {
+            if bitmap[y * width + x] >= 0x80 {
                 let index = y * row_bytes + x / 8;
                 packed[index] |= 1 << (7 - (x % 8));
             }

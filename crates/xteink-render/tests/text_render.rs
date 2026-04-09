@@ -181,7 +181,7 @@ fn generated_bookerly_bitmaps_match_hinted_freetype_rasterization() {
         let expected = bitmap
             .buffer()
             .iter()
-            .map(|value| *value > 0)
+            .map(|value| *value >= 0x80)
             .collect::<Vec<_>>();
         assert_eq!(actual, expected, "bitmap mismatch for {ch}");
     }
