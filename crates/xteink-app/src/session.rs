@@ -232,6 +232,14 @@ where
         &mut self.renderer
     }
 
+    pub fn storage(&self) -> &S {
+        &self.storage
+    }
+
+    pub fn storage_mut(&mut self) -> &mut S {
+        &mut self.storage
+    }
+
     pub fn screen_mode(&self) -> ScreenMode {
         self.controller.screen_mode()
     }

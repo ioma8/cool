@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Xteink Web Simulator</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #1a1d22;
+      --btn: #2a2f38;
+      --btn-active: #3b4350;
+      --text: #f2f5f9;
+      --gap: 8px;
+      --footer-h: 170px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    #app {
+      width: 100dvw;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #screen-wrap {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      place-items: center;
+      padding: 8px;
+      overflow: hidden;
+    }
+    #screen {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: white;
+      width: auto;
+      height: auto;
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 8px;
+      box-shadow: 0 6px 24px rgba(0,0,0,.45);
+    }
+    #footer {
+      flex: 0 0 var(--footer-h);
+      background: var(--panel);
+      border-top: 1px solid #2a2f34;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap);
+      overflow: hidden;
+    }
+    #buttons {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: var(--gap);
+    }
+    button {
+      border: 0;
+      border-radius: 10px;
+      background: var(--btn);
+      color: var(--text);
+      padding: 10px 6px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    button:active { background: var(--btn-active); }
+    #upload-row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: var(--gap);
+    }
+    #upload {
+      width: 100%;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="screen-wrap">
+      <canvas id="screen" width="480" height="800"></canvas>
+    </div>
+    <div id="footer">
+      <div id="buttons">
+        <button data-action="up">Up</button>
+        <button data-action="down">Down</button>
+        <button data-action="left">Left</button>
+        <button data-action="right">Bottom</button>
+        <button data-action="cancel">Cancel</button>
+        <button data-action="confirm">Confirm</button>
+        <button data-action="power">Power</button>
+      </div>
+      <div id="upload-row">
+        <input id="upload" type="file" accept=".epub,application/epub+zip" />
+      </div>
+    </div>
+  </div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
