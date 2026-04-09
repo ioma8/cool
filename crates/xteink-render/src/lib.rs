@@ -29,6 +29,34 @@ pub const BUFFER_SIZE: usize = (DISPLAY_WIDTH_BYTES as usize) * (PHYSICAL_HEIGHT
 pub const DISPLAY_WIDTH: u16 = 480;
 pub const DISPLAY_HEIGHT: u16 = 800;
 
+pub fn reader_footer_height() -> u16 {
+    bookerly::BOOKERLY.line_height_px().saturating_add(8)
+}
+
+pub fn reader_content_height() -> u16 {
+    DISPLAY_HEIGHT.saturating_sub(reader_footer_height())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedPageRenderResult {
+    pub rendered_page: usize,
+    pub consumed_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedPageRenderFromOffsetResult {
+    pub page_start_byte: usize,
+    pub next_page_start_byte: usize,
+    pub rendered_page: usize,
+    pub consumed_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ReplayProgress {
+    target_complete: bool,
+    consumed_bytes: usize,
+}
+
 pub struct Framebuffer {
     bytes: [u8; BUFFER_SIZE],
 }
@@ -139,15 +167,120 @@ impl Framebuffer {
     where
         R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
     {
-        self.render_cached_text_page_with_cancel(read_text, target_page, || false)
+        Ok(self
+            .render_cached_text_page_with_progress(read_text, target_page, || false)?
+            .rendered_page)
     }
 
     pub fn render_cached_text_page_with_cancel<R, C>(
         &mut self,
         read_text: &mut R,
         target_page: usize,
-        mut should_cancel: C,
+        should_cancel: C,
     ) -> Result<usize, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+        C: FnMut() -> bool,
+    {
+        Ok(self
+            .render_cached_text_page_with_progress(read_text, target_page, should_cancel)?
+            .rendered_page)
+    }
+
+    pub fn render_cached_text_page_with_progress<R, C>(
+        &mut self,
+        read_text: &mut R,
+        target_page: usize,
+        should_cancel: C,
+    ) -> Result<CachedPageRenderResult, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+        C: FnMut() -> bool,
+    {
+        let result = self.render_cached_text_page_with_offset_from_reader(
+            read_text,
+            0,
+            target_page,
+            should_cancel,
+        )?;
+        Ok(CachedPageRenderResult {
+            rendered_page: result.rendered_page,
+            consumed_bytes: result.consumed_bytes,
+        })
+    }
+
+    pub fn render_cached_text_page_from_offset<R>(
+        &mut self,
+        read_text: &mut R,
+        page_start_byte: usize,
+    ) -> Result<CachedPageRenderFromOffsetResult, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+    {
+        self.render_cached_text_page_from_offset_with_progress(read_text, page_start_byte, || false)
+    }
+
+    pub fn render_cached_text_page_from_offset_with_progress<R, C>(
+        &mut self,
+        read_text: &mut R,
+        page_start_byte: usize,
+        should_cancel: C,
+    ) -> Result<CachedPageRenderFromOffsetResult, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+        C: FnMut() -> bool,
+    {
+        self.render_cached_text_page_with_offset_from_reader(
+            read_text,
+            page_start_byte,
+            0,
+            should_cancel,
+        )
+    }
+
+    pub fn render_cached_text_page_from_offset_for_page<R>(
+        &mut self,
+        read_text: &mut R,
+        page_start_byte: usize,
+        target_page: usize,
+    ) -> Result<CachedPageRenderFromOffsetResult, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+    {
+        self.render_cached_text_page_from_offset_for_page_with_progress(
+            read_text,
+            page_start_byte,
+            target_page,
+            || false,
+        )
+    }
+
+    pub fn render_cached_text_page_from_offset_for_page_with_progress<R, C>(
+        &mut self,
+        read_text: &mut R,
+        page_start_byte: usize,
+        target_page: usize,
+        should_cancel: C,
+    ) -> Result<CachedPageRenderFromOffsetResult, xteink_epub::EpubError>
+    where
+        R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
+        C: FnMut() -> bool,
+    {
+        self.render_cached_text_page_with_offset_from_reader(
+            read_text,
+            page_start_byte,
+            target_page,
+            should_cancel,
+        )
+    }
+
+    fn render_cached_text_page_with_offset_from_reader<R, C>(
+        &mut self,
+        read_text: &mut R,
+        page_start_byte: usize,
+        target_page: usize,
+        mut should_cancel: C,
+    ) -> Result<CachedPageRenderFromOffsetResult, xteink_epub::EpubError>
     where
         R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
         C: FnMut() -> bool,
@@ -163,6 +296,8 @@ impl Framebuffer {
         let mut read_buffer = [0u8; CACHED_TEXT_CHUNK];
         let mut utf8_carry = [0u8; 4];
         let mut utf8_carry_len = 0usize;
+        let mut consumed_bytes = 0usize;
+        let mut skip_remaining = page_start_byte;
 
         self.clear(0xFF);
 
@@ -174,18 +309,34 @@ impl Framebuffer {
             if read_len == 0 {
                 break;
             }
+            let mut source = &read_buffer[..read_len];
+            if skip_remaining > 0 {
+                let skip_len = skip_remaining.min(source.len());
+                skip_remaining -= skip_len;
+                source = &source[skip_len..];
+                if source.is_empty() {
+                    continue;
+                }
+            }
 
             let mut chunk = [0u8; CACHED_TEXT_CHUNK + 4];
             chunk[..utf8_carry_len].copy_from_slice(&utf8_carry[..utf8_carry_len]);
-            chunk[utf8_carry_len..utf8_carry_len + read_len].copy_from_slice(&read_buffer[..read_len]);
-            let mut source = &chunk[..utf8_carry_len + read_len];
+            chunk[utf8_carry_len..utf8_carry_len + source.len()].copy_from_slice(source);
+            let mut source = &chunk[..utf8_carry_len + source.len()];
             utf8_carry_len = 0;
 
             while !source.is_empty() {
                 match core::str::from_utf8(source) {
                     Ok(text) => {
-                        if replay_cached_events(self, &mut state, target_page, text)? {
-                            return Ok(state.current_page());
+                        let progress = replay_cached_events(self, &mut state, target_page, text)?;
+                        consumed_bytes = consumed_bytes.saturating_add(progress.consumed_bytes);
+                        if progress.target_complete {
+                            return Ok(CachedPageRenderFromOffsetResult {
+                                page_start_byte,
+                                next_page_start_byte: page_start_byte.saturating_add(consumed_bytes),
+                                rendered_page: state.current_page(),
+                                consumed_bytes,
+                            });
                         }
                         source = &[];
                     }
@@ -193,8 +344,16 @@ impl Framebuffer {
                         let valid = err.valid_up_to();
                         if valid > 0 {
                             let text = core::str::from_utf8(&source[..valid]).unwrap_or("");
-                            if replay_cached_events(self, &mut state, target_page, text)? {
-                                return Ok(state.current_page());
+                            let progress = replay_cached_events(self, &mut state, target_page, text)?;
+                            consumed_bytes = consumed_bytes.saturating_add(progress.consumed_bytes);
+                            if progress.target_complete {
+                                return Ok(CachedPageRenderFromOffsetResult {
+                                    page_start_byte,
+                                    next_page_start_byte: page_start_byte
+                                        .saturating_add(consumed_bytes),
+                                    rendered_page: state.current_page(),
+                                    consumed_bytes,
+                                });
                             }
                         }
                         if err.error_len().is_none() {
@@ -210,8 +369,15 @@ impl Framebuffer {
 
         if utf8_carry_len > 0 {
             let text = core::str::from_utf8(&utf8_carry[..utf8_carry_len]).unwrap_or("");
-            if replay_cached_events(self, &mut state, target_page, text)? {
-                return Ok(state.current_page());
+            let progress = replay_cached_events(self, &mut state, target_page, text)?;
+            consumed_bytes = consumed_bytes.saturating_add(progress.consumed_bytes);
+            if progress.target_complete {
+                return Ok(CachedPageRenderFromOffsetResult {
+                    page_start_byte,
+                    next_page_start_byte: page_start_byte.saturating_add(consumed_bytes),
+                    rendered_page: state.current_page(),
+                    consumed_bytes,
+                });
             }
         }
 
@@ -230,7 +396,21 @@ impl Framebuffer {
             PaginationEvent::End,
         );
 
-        Ok(state.current_page())
+        if skip_remaining == 0 {
+            Ok(CachedPageRenderFromOffsetResult {
+                page_start_byte,
+                next_page_start_byte: page_start_byte.saturating_add(consumed_bytes),
+                rendered_page: state.current_page(),
+                consumed_bytes,
+            })
+        } else {
+            Ok(CachedPageRenderFromOffsetResult {
+                page_start_byte,
+                next_page_start_byte: page_start_byte,
+                rendered_page: state.current_page(),
+                consumed_bytes,
+            })
+        }
     }
 
     fn draw_glyph(&mut self, glyph: &Glyph, x: i32, y: i32) {
@@ -268,7 +448,7 @@ fn replay_cached_events(
     state: &mut PaginatorState<CACHED_LINE_LEN>,
     target_page: usize,
     text: &str,
-) -> Result<bool, xteink_epub::EpubError> {
+) -> Result<ReplayProgress, xteink_epub::EpubError> {
     let mut observer = NoopPaginationObserver;
     let config = PaginationConfig {
         target_page,
@@ -279,7 +459,8 @@ fn replay_cached_events(
         start_cursor_y: 0,
     };
 
-    for ch in text.chars() {
+    for (idx, ch) in text.char_indices() {
+        let char_bytes = ch.len_utf8();
         let progress = match ch {
             CACHE_LAYOUT_STREAM_MARKER => {
                 state.feed(framebuffer, &mut observer, config, PaginationEvent::EnableExplicitBreaks)?
@@ -304,11 +485,17 @@ fn replay_cached_events(
             }
         };
         if progress.target_complete {
-            return Ok(true);
+            return Ok(ReplayProgress {
+                target_complete: true,
+                consumed_bytes: idx.saturating_add(char_bytes),
+            });
         }
     }
 
-    Ok(false)
+    Ok(ReplayProgress {
+        target_complete: false,
+        consumed_bytes: text.len(),
+    })
 }
 
 impl PaginationRenderer for Framebuffer {
@@ -337,7 +524,7 @@ impl PaginationRenderer for Framebuffer {
     }
 
     fn display_height(&self) -> u16 {
-        DISPLAY_HEIGHT
+        reader_content_height()
     }
 }
 
@@ -380,11 +567,17 @@ mod tests {
         let target_page = 1usize;
 
         let mut direct = Framebuffer::new();
-        let first = direct.layout_wrapped_text_page_result(0, 0, &text, DISPLAY_HEIGHT, false);
+        let first = direct.layout_wrapped_text_page_result(0, 0, &text, reader_content_height(), false);
         assert!(first.consumed > 0);
         let remaining = &text[first.consumed..];
         direct.clear(0xFF);
-        let _ = direct.layout_wrapped_text_page_result(0, 0, remaining, DISPLAY_HEIGHT, true);
+        let _ = direct.layout_wrapped_text_page_result(
+            0,
+            0,
+            remaining,
+            reader_content_height(),
+            true,
+        );
 
         let bytes = text.into_bytes();
         let mut cached = Framebuffer::new();

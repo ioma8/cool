@@ -46,7 +46,9 @@ static EPUB_RENDER_WORKSPACE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheBuildResult {
     pub rendered_page: usize,
+    pub rendered_progress_percent: u8,
     pub cached_pages: usize,
+    pub cached_progress_percent: u8,
     pub next_spine_index: u16,
     pub spine_count: u16,
     pub resume_page: usize,
@@ -87,6 +89,7 @@ struct ResumeCheckpoint {
 
 struct CacheTextObserver<'a, F> {
     on_text_chunk: &'a mut F,
+    emitted_text_bytes: usize,
 }
 
 impl<F> PaginationObserver for CacheTextObserver<'_, F>
@@ -94,6 +97,7 @@ where
     F: FnMut(&str) -> Result<(), EpubError>,
 {
     fn on_text(&mut self, text: &str) -> Result<(), EpubError> {
+        self.emitted_text_bytes = self.emitted_text_bytes.saturating_add(text.len());
         (self.on_text_chunk)(text)
     }
 
@@ -107,6 +111,12 @@ where
 
     fn on_page_break(&mut self) -> Result<(), EpubError> {
         (self.on_text_chunk)(CACHE_PAGE_BREAK_MARKER.encode_utf8(&mut [0; 4]))
+    }
+}
+
+impl<F> CacheTextObserver<'_, F> {
+    fn emitted_text_bytes(&self) -> usize {
+        self.emitted_text_bytes
     }
 }
 
@@ -322,13 +332,13 @@ impl Framebuffer {
             if resume.is_none() {
                 on_text_chunk(CACHE_LAYOUT_STREAM_MARKER.encode_utf8(&mut [0; 4]))?;
             }
-            let mut observer = CacheTextObserver { on_text_chunk: &mut on_text_chunk };
+            let mut observer = CacheTextObserver {
+                on_text_chunk: &mut on_text_chunk,
+                emitted_text_bytes: 0,
+            };
             let mut stop_after_spine_index: Option<u16> = None;
-            let mut active_chapter_index: Option<u16> = None;
-            let mut active_chapter_start_page = paginator.current_page();
-            let mut target_chapter_index: Option<u16> = None;
-            let mut target_chapter_start_page: Option<usize> = None;
             let mut chapter_end_override: Option<(usize, u16)> = None;
+            let mut rendered_prefix_text_bytes: Option<usize> = None;
 
             if mode != RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget {
                 self.clear(0xFF);
@@ -405,18 +415,11 @@ impl Framebuffer {
                     }
                     EpubEvent::UnsupportedTag => continue,
                 };
-                let event_chapter_index = epub.next_spine_index().saturating_sub(1);
-                if active_chapter_index != Some(event_chapter_index) {
-                    active_chapter_index = Some(event_chapter_index);
-                    active_chapter_start_page = page_before_event;
-                }
-
                 if progress.target_complete {
+                    rendered_prefix_text_bytes.get_or_insert(observer.emitted_text_bytes());
                     match mode {
                         RenderMode::TargetPageOnly => break,
                         RenderMode::ThroughChapterBoundaryAfterTarget => {
-                            target_chapter_index.get_or_insert(event_chapter_index);
-                            target_chapter_start_page.get_or_insert(active_chapter_start_page);
                             mode = RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget;
                             stop_after_spine_index.get_or_insert(epub.next_spine_index());
                         }
@@ -456,30 +459,28 @@ impl Framebuffer {
                 current_page.max(1)
             };
             let rendered_page = rendered_page.min(target_page);
-            let progress_percent = if epub.is_complete() {
+            let (consumed_book_bytes, total_book_bytes) = epub.progress_bytes(unsafe { &(*workspace_ptr).catalog })?;
+            let cached_progress_percent =
+                percent_from_book_bytes(consumed_book_bytes, total_book_bytes, epub.is_complete());
+            let rendered_progress_percent = if epub.is_complete() {
                 percent_from_pages(rendered_page, cached_pages)
-            } else if let (Some(chapter_index), Some(chapter_start_page)) =
-                (target_chapter_index, target_chapter_start_page)
-            {
-                percent_from_chapter_pages(
-                    rendered_page,
-                    chapter_start_page,
-                    current_page,
-                    cursor_y,
-                    chapter_index,
-                    epub.spine_count(),
-                )
             } else {
-                percent_from_spine(epub.next_spine_index(), epub.spine_count())
+                percent_from_cached_prefix_bytes(
+                    rendered_prefix_text_bytes.unwrap_or_else(|| observer.emitted_text_bytes()),
+                    observer.emitted_text_bytes(),
+                    cached_progress_percent,
+                )
             };
             Ok(CacheBuildResult {
                 rendered_page,
+                rendered_progress_percent,
                 cached_pages,
+                cached_progress_percent,
                 next_spine_index: epub.next_spine_index(),
                 spine_count: epub.spine_count(),
                 resume_page: current_page,
                 resume_cursor_y: cursor_y,
-                progress_percent,
+                progress_percent: rendered_progress_percent,
                 complete: epub.is_complete(),
             })
         })
@@ -494,38 +495,29 @@ fn percent_from_pages(rendered_page: usize, total_pages: usize) -> u8 {
     progress.clamp(1, 100) as u8
 }
 
-fn percent_from_spine(next_spine_index: u16, spine_count: u16) -> u8 {
-    if spine_count == 0 {
+fn percent_from_cached_prefix_bytes(
+    rendered_text_bytes: usize,
+    cached_text_bytes: usize,
+    cached_progress_percent: u8,
+) -> u8 {
+    if cached_text_bytes == 0 {
         return 0;
     }
-    let progress = (u32::from(next_spine_index).saturating_mul(99)) / u32::from(spine_count);
-    progress.clamp(1, 99) as u8
+    let progress = rendered_text_bytes
+        .min(cached_text_bytes)
+        .saturating_mul(usize::from(cached_progress_percent))
+        / cached_text_bytes.max(1);
+    progress.clamp(1, usize::from(cached_progress_percent).max(1)) as u8
 }
 
-fn percent_from_chapter_pages(
-    rendered_page: usize,
-    chapter_start_page: usize,
-    current_page: usize,
-    cursor_y: u16,
-    chapter_index: u16,
-    spine_count: u16,
-) -> u8 {
-    if spine_count == 0 {
+fn percent_from_book_bytes(consumed_book_bytes: usize, total_book_bytes: usize, complete: bool) -> u8 {
+    if total_book_bytes == 0 {
         return 0;
     }
-    let chapter_pages = if cursor_y > 0 {
-        current_page.saturating_sub(chapter_start_page).saturating_add(1)
-    } else {
-        current_page.saturating_sub(chapter_start_page).max(1)
-    };
-    let page_in_chapter = rendered_page
-        .saturating_sub(chapter_start_page)
-        .saturating_add(1)
-        .min(chapter_pages);
-    let numerator = usize::from(chapter_index)
-        .saturating_mul(chapter_pages)
-        .saturating_add(page_in_chapter);
-    let denominator = usize::from(spine_count).saturating_mul(chapter_pages).max(1);
-    let progress = numerator.saturating_mul(100) / denominator;
-    progress.clamp(1, 99) as u8
+    let max = if complete { 100 } else { 99 };
+    let progress = consumed_book_bytes
+        .min(total_book_bytes)
+        .saturating_mul(100)
+        / total_book_bytes.max(1);
+    progress.clamp(1, max) as u8
 }

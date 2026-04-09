@@ -44,9 +44,8 @@ impl SessionUi {
     }
 
     pub fn render_reader_progress<R: AppRenderer>(&self, renderer: &mut R, progress_percent: u8) {
-        let line_height = bookerly::BOOKERLY.line_height_px();
-        let footer_height = line_height.saturating_add(8);
-        let footer_y = xteink_render::DISPLAY_HEIGHT.saturating_sub(footer_height);
+        let footer_height = xteink_render::reader_footer_height();
+        let footer_y = xteink_render::reader_content_height();
         renderer.fill_rect(
             0,
             footer_y,

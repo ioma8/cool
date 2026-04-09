@@ -4,6 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static EPUB_RENDER_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+fn lock_render_mutex() -> std::sync::MutexGuard<'static, ()> {
+    EPUB_RENDER_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 struct EmptySource;
 
 impl xteink_epub::EpubSource for EmptySource {
@@ -91,9 +97,7 @@ impl xteink_epub::EpubSource for &CountingSource {
 
 #[test]
 fn cached_text_pagination_advances_to_requested_page() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let mut framebuffer = Framebuffer::new();
     let paragraph = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu\n";
     let text = paragraph.repeat(80);
@@ -121,10 +125,100 @@ fn cached_text_pagination_advances_to_requested_page() {
 }
 
 #[test]
+fn cached_render_from_offset_matches_page_api() {
+    let _guard = lock_render_mutex();
+    let paragraph = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ";
+    let text = paragraph.repeat(180);
+    let bytes = text.as_bytes().to_vec();
+
+    let mut direct0 = Framebuffer::new();
+    let mut direct0_offset = 0usize;
+    let direct0_rendered = direct0
+        .render_cached_text_page(
+            &mut |buffer| {
+                if direct0_offset >= bytes.len() {
+                    return Ok(0);
+                }
+                let end = (direct0_offset + buffer.len()).min(bytes.len());
+                let chunk = &bytes[direct0_offset..end];
+                buffer[..chunk.len()].copy_from_slice(chunk);
+                direct0_offset = end;
+                Ok(chunk.len())
+            },
+            0,
+        )
+        .expect("direct cached render should succeed");
+    assert_eq!(direct0_rendered, 0);
+
+    let mut direct1 = Framebuffer::new();
+    let mut direct1_offset = 0usize;
+    let direct1_rendered = direct1
+        .render_cached_text_page(
+            &mut |buffer| {
+                if direct1_offset >= bytes.len() {
+                    return Ok(0);
+                }
+                let end = (direct1_offset + buffer.len()).min(bytes.len());
+                let chunk = &bytes[direct1_offset..end];
+                buffer[..chunk.len()].copy_from_slice(chunk);
+                direct1_offset = end;
+                Ok(chunk.len())
+            },
+            1,
+        )
+        .expect("direct cached page 1 render should succeed");
+    assert_eq!(direct1_rendered, 1);
+
+    let mut page0_offset = 0usize;
+    let mut offset_reader0 = |buffer: &mut [u8]| -> Result<usize, xteink_epub::EpubError> {
+        if page0_offset >= bytes.len() {
+            return Ok(0);
+        }
+        let end = (page0_offset + buffer.len()).min(bytes.len());
+        let chunk = &bytes[page0_offset..end];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        page0_offset = end;
+        Ok(chunk.len())
+    };
+    let mut framebuffer0 = Framebuffer::new();
+    let page0 = framebuffer0
+        .render_cached_text_page_from_offset_with_progress(&mut offset_reader0, 0usize, || false)
+        .expect("offset cached render should succeed");
+    assert_eq!(page0.rendered_page, 0);
+    assert!(page0.next_page_start_byte > 0);
+    assert!(page0.consumed_bytes > 0);
+    assert_eq!(framebuffer0.bytes(), direct0.bytes());
+
+    let mut page1_offset = 0usize;
+    let mut offset_reader1 = move |buffer: &mut [u8]| -> Result<usize, xteink_epub::EpubError> {
+        if page1_offset >= bytes.len() {
+            return Ok(0);
+        }
+        let end = (page1_offset + buffer.len()).min(bytes.len());
+        let chunk = &bytes[page1_offset..end];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        page1_offset = end;
+        Ok(chunk.len())
+    };
+    let mut second_page = Framebuffer::new();
+    let page1 = second_page
+        .render_cached_text_page_from_offset_with_progress(
+            &mut offset_reader1,
+            page0.next_page_start_byte,
+            || false,
+        )
+        .expect("second page from offset should succeed");
+    assert_eq!(page1.rendered_page, 0);
+    assert!(page1.next_page_start_byte > page0.next_page_start_byte);
+    assert!(
+        second_page.bytes().iter().any(|byte| *byte != 0xFF),
+        "offset render should produce visible content"
+    );
+}
+
+#[test]
 fn epub_render_api_returns_error_for_invalid_empty_source() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let mut framebuffer = Framebuffer::new();
 
     let result = framebuffer.render_epub_page(EmptySource, 0);
@@ -134,9 +228,7 @@ fn epub_render_api_returns_error_for_invalid_empty_source() {
 
 #[test]
 fn real_fixture_first_page_does_not_fail_with_out_of_space() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -176,9 +268,7 @@ fn epub_fixture_paths() -> Vec<std::path::PathBuf> {
 
 #[test]
 fn all_epub_fixtures_first_page_render_without_out_of_space() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixtures = epub_fixture_paths();
     assert!(!fixtures.is_empty(), "expected at least one epub fixture");
 
@@ -201,9 +291,7 @@ fn all_epub_fixtures_first_page_render_without_out_of_space() {
 
 #[test]
 fn large_fixture_cold_parse_to_cache_without_out_of_space() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
     let mut framebuffer = Framebuffer::new();
@@ -227,9 +315,7 @@ fn large_fixture_cold_parse_to_cache_without_out_of_space() {
 
 #[test]
 fn cache_prefix_build_stops_before_full_book_for_large_fixture() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
     let mut framebuffer = Framebuffer::new();
@@ -253,9 +339,7 @@ fn cache_prefix_build_stops_before_full_book_for_large_fixture() {
 
 #[test]
 fn prints_cold_first_page_baselines_for_large_fixture() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
 
@@ -291,9 +375,7 @@ fn prints_cold_first_page_baselines_for_large_fixture() {
 
 #[test]
 fn prints_cold_first_page_io_profile_for_large_fixture() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let source = CountingSource::new(std::fs::read(&fixture).expect("fixture should be readable"));
     let mut framebuffer = Framebuffer::new();
@@ -309,9 +391,7 @@ fn prints_cold_first_page_io_profile_for_large_fixture() {
 
 #[test]
 fn cached_page_matches_direct_epub_render_for_following_page() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixture = fixture_dir().join("Decisive - Chip Heath.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
     let target_page = 1usize;
@@ -384,9 +464,7 @@ fn cached_page_matches_direct_epub_render_for_following_page() {
 
 #[test]
 fn cold_open_prefix_render_matches_direct_first_page() {
-    let _guard = EPUB_RENDER_TEST_MUTEX
-        .lock()
-        .expect("render test mutex poisoned");
+    let _guard = lock_render_mutex();
     let fixture = fixture_dir().join("Decisive - Chip Heath.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
 

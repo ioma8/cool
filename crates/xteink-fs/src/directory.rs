@@ -1,7 +1,4 @@
-use crate::low_level::{self, DirectoryPageInfo, FsError, SdFilesystem};
-
-pub const MAX_ENTRIES: usize = low_level::MAX_ENTRIES;
-pub use crate::low_level::ListedEntry;
+use crate::{DirectoryPageInfo, FsError, ListedEntry, MAX_ENTRIES, SdFilesystem};
 
 #[derive(Debug)]
 pub struct DirectoryPage {

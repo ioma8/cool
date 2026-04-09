@@ -6,9 +6,8 @@ use crate::{
     cache::{
         cache_paths_for_epub, parse_meta, serialize_meta, CacheMeta, CachePaths, CACHE_VERSION,
     },
-    directory::ListedEntry,
     log::logln,
-    low_level::{SdFilesystem, SdFsFile},
+    ListedEntry, SdFilesystem, SdFsFile,
     path::join_child_path,
 };
 
@@ -110,6 +109,8 @@ where
         entry.fs_name.as_str(),
         entry.kind
     );
+    let source_path =
+        join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
     logln!("EPUB render step: building cache candidate paths");
     let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
     logln!("EPUB render step: built cache candidate paths");
@@ -122,9 +123,13 @@ where
         "EPUB cache probe begin: {}",
         cache_paths.progress.as_str()
     );
-    let cache_state = resolve_cache_state(fs, &cache_paths, 0, None);
-    let saved_progress = cache_state.start_page;
-    let start_page = saved_progress.map(|progress| progress.page).unwrap_or(0);
+    let source = fs
+        .open_epub_source(source_path.as_str())
+        .map_err(|_| EpubError::Io)?;
+    let source_size = u32::try_from(source.len()).map_err(|_| EpubError::OutOfSpace)?;
+    let cache_state = resolve_cache_state(fs, &cache_paths, source_size, None);
+    let saved_progress = cache_state.start_progress;
+    let start_page = saved_progress.map(|progress| progress.page_hint).unwrap_or(0);
     logln!(
         "EPUB render progress: cached_start_page={} cache_root={}",
         start_page,
@@ -197,7 +202,6 @@ where
         fast_refresh
     );
 
-    let saved_progress = read_cached_progress(fs, &cache_paths);
     let cache_state = resolve_cache_state(fs, &cache_paths, source_size, Some(page_index));
     let mut cache_paths_for_work = cache_state.work_paths;
     let (rendered_page, progress_percent) = match cache_state.selection {
@@ -216,17 +220,21 @@ where
             let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
                 content.read(buffer).map_err(|_| EpubError::Io)
             };
-            let rendered_page = display.render_cached_text_page_with_cancel(
+            let page_progress = saved_progress.unwrap_or(SavedProgress {
+                byte_offset: 0,
+                page_hint: page_index,
+            });
+            let rendered = display.render_cached_text_page_from_offset_for_page_with_progress(
                 &mut read_text,
+                page_progress.byte_offset,
                 page_index,
                 &mut should_cancel,
             )?;
+            let rendered_page = rendered.rendered_page;
             let progress_percent = if _meta.complete {
                 percent_from_pages(rendered_page, _meta.cached_pages)
-            } else if let Some(saved) = saved_progress {
-                estimate_percent_with_saved_progress(rendered_page, saved)
             } else {
-                estimate_percent_from_cached_prefix(rendered_page, _meta.cached_pages)
+                percent_from_cached_prefix_pages(rendered_page, _meta.cached_pages, _meta.cached_progress_percent)
             };
             (rendered_page, progress_percent)
         }
@@ -333,7 +341,7 @@ fn read_cache_meta_if_valid<SD: SdFilesystem>(
 
 #[derive(Debug, Clone)]
 struct CacheProbe {
-    start_page: Option<SavedProgress>,
+    start_progress: Option<SavedProgress>,
     selection: CacheSelection,
     work_paths: Option<CachePaths>,
 }
@@ -352,8 +360,10 @@ fn resolve_cache_state<SD: SdFilesystem>(
     page_index: Option<usize>,
 ) -> CacheProbe {
     if page_index.is_none() {
+        let start_page = read_cache_meta_if_valid(fs, paths, source_size)
+            .and_then(|_| read_cached_progress(fs, paths));
         return CacheProbe {
-            start_page: read_cached_progress(fs, paths),
+            start_progress,
             selection: CacheSelection::Miss { paths: None },
             work_paths: None,
         };
@@ -390,7 +400,7 @@ fn resolve_cache_state<SD: SdFilesystem>(
     };
 
     CacheProbe {
-        start_page: None,
+        start_progress: None,
         selection,
         work_paths,
     }
@@ -418,13 +428,13 @@ fn read_cache_meta<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<CacheMeta, E
 
 #[derive(Debug, Clone, Copy)]
 struct SavedProgress {
-    page: usize,
-    progress_percent: u8,
+    byte_offset: usize,
+    page_hint: usize,
 }
 
 fn read_cached_progress<SD: SdFilesystem>(fs: &SD, paths: &CachePaths) -> Option<SavedProgress> {
     let mut file = fs.open_cache_file_read(paths.progress.as_str()).ok()?;
-    let mut raw = [0u8; 5];
+    let mut raw = [0u8; 12];
     let mut total = 0usize;
     while total < raw.len() {
         let n = file.read(&mut raw[total..]).ok()?;
@@ -433,27 +443,40 @@ fn read_cached_progress<SD: SdFilesystem>(fs: &SD, paths: &CachePaths) -> Option
         }
         total += n;
     }
+    if total >= 12 {
+        let byte_offset = usize::try_from(u64::from_le_bytes([
+            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+        ]))
+        .ok()?;
+        let page_hint = usize::try_from(u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]])).ok()?;
+        return Some(SavedProgress {
+            byte_offset,
+            page_hint,
+        });
+    }
     if total < 4 {
         return None;
     }
-    let page = usize::try_from(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])).ok()?;
-    let progress_percent = if total >= 5 { raw[4] } else { 0 };
+    let page_hint = usize::try_from(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])).ok()?;
     Some(SavedProgress {
-        page,
-        progress_percent,
+        byte_offset: 0,
+        page_hint,
     })
 }
 
 fn write_cached_progress<SD: SdFilesystem>(
     fs: &SD,
     path: &str,
-    page: usize,
+    byte_offset: usize,
+    page_hint: usize,
     progress_percent: u8,
 ) -> Result<(), EpubError> {
-    let page = u32::try_from(page).map_err(|_| EpubError::OutOfSpace)?;
-    let mut raw = [0u8; 5];
-    raw[..4].copy_from_slice(&page.to_le_bytes());
-    raw[4] = progress_percent;
+    let byte_offset = u64::try_from(byte_offset).map_err(|_| EpubError::OutOfSpace)?;
+    let page_hint = u32::try_from(page_hint).map_err(|_| EpubError::OutOfSpace)?;
+    let mut raw = [0u8; 12];
+    raw[..8].copy_from_slice(&byte_offset.to_le_bytes());
+    raw[8..12].copy_from_slice(&page_hint.to_le_bytes());
+    let _ = progress_percent;
     write_bytes(fs, path, &raw)
 }
 
@@ -483,6 +506,7 @@ fn write_meta<SD: SdFilesystem>(
         source_size,
         content_length: u32::try_from(content_length).map_err(|_| EpubError::OutOfSpace)?,
         cached_pages: u32::try_from(build.cached_pages).map_err(|_| EpubError::OutOfSpace)?,
+        cached_progress_percent: build.cached_progress_percent,
         next_spine_index: build.next_spine_index,
         resume_page: u32::try_from(build.resume_page).map_err(|_| EpubError::OutOfSpace)?,
         resume_cursor_y: build.resume_cursor_y,
@@ -583,22 +607,19 @@ fn percent_from_pages(rendered_page: usize, total_pages: u32) -> u8 {
     progress.clamp(1, 100) as u8
 }
 
-fn estimate_percent_from_cached_prefix(rendered_page: usize, cached_pages: u32) -> u8 {
-    if cached_pages == 0 {
+fn percent_from_cached_prefix_pages(
+    rendered_page: usize,
+    cached_pages: u32,
+    cached_progress_percent: u8,
+) -> u8 {
+    let total_pages = usize::try_from(cached_pages).unwrap_or(0);
+    if total_pages == 0 {
         return 0;
     }
-    let progress = ((rendered_page.saturating_add(1)) * 99) / usize::try_from(cached_pages).unwrap_or(1);
-    progress.clamp(1, 99) as u8
-}
-
-fn estimate_percent_with_saved_progress(rendered_page: usize, saved: SavedProgress) -> u8 {
-    if saved.progress_percent == 0 {
-        return 0;
-    }
-    if rendered_page >= saved.page {
-        return saved.progress_percent;
-    }
-    let scaled = ((rendered_page.saturating_add(1)) * usize::from(saved.progress_percent))
-        / saved.page.saturating_add(1);
-    scaled.clamp(1, usize::from(saved.progress_percent)) as u8
+    let page_progress = rendered_page
+        .saturating_add(1)
+        .min(total_pages)
+        .saturating_mul(usize::from(cached_progress_percent))
+        / total_pages.max(1);
+    page_progress.clamp(1, usize::from(cached_progress_percent).max(1)) as u8
 }

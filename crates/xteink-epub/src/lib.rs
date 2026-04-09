@@ -179,6 +179,7 @@ struct ParserState {
     chapter_loaded: bool,
     chapter_finished: bool,
     chapter_entry: Option<EpubEntryMetadata>,
+    chapter_absolute_offset: usize,
     chapter_len: usize,
     cursor: usize,
     input_len: usize,
@@ -217,6 +218,7 @@ impl Default for ParserState {
             chapter_loaded: false,
             chapter_finished: false,
             chapter_entry: None,
+            chapter_absolute_offset: 0,
             chapter_len: 0,
             cursor: 0,
             input_len: 0,
@@ -398,6 +400,43 @@ impl<S: EpubSource> Epub<S> {
         self.state.done || self.state.spine_index >= self.state.spine_count
     }
 
+    pub fn progress_bytes(&self, catalog: &[u8]) -> Result<(usize, usize), EpubError> {
+        let mut cursor = 2usize;
+        let mut total = 0usize;
+        let mut consumed = 0usize;
+        let current_chapter_index = if self.state.chapter_loaded {
+            Some(self.state.spine_index.saturating_sub(1))
+        } else {
+            None
+        };
+
+        for index in 0..self.state.spine_count {
+            let (_, _, metadata, next_cursor) = read_spine_entry_at(catalog, cursor)?;
+            let chapter_total =
+                usize::try_from(metadata.uncompressed_size).map_err(|_| EpubError::InvalidFormat)?;
+            total = total.saturating_add(chapter_total);
+
+            if self.state.done || index < self.state.spine_index.saturating_sub(u16::from(self.state.chapter_loaded)) {
+                consumed = consumed.saturating_add(chapter_total);
+            } else if current_chapter_index == Some(index) {
+                let chapter_cursor = self
+                    .state
+                    .chapter_absolute_offset
+                    .saturating_add(self.state.cursor)
+                    .min(chapter_total);
+                consumed = consumed.saturating_add(chapter_cursor);
+            }
+
+            cursor = next_cursor;
+        }
+
+        if self.state.done {
+            consumed = total;
+        }
+
+        Ok((consumed.min(total), total))
+    }
+
     pub fn resume_from_spine_index<'a>(
         &'a mut self,
         workspace: ReaderBuffers<'a>,
@@ -488,6 +527,7 @@ impl<S: EpubSource> Epub<S> {
         self.state.chapter_loaded = false;
         self.state.chapter_finished = false;
         self.state.chapter_entry = None;
+        self.state.chapter_absolute_offset = 0;
         self.state.chapter_len = 0;
         self.state.cursor = 0;
         self.state.input_len = 0;
@@ -531,6 +571,7 @@ impl<S: EpubSource> Epub<S> {
         self.state.chapter_dir[..base.len()].copy_from_slice(base);
         self.state.chapter_dir_len = base.len();
         self.state.chapter_entry = Some(entry);
+        self.state.chapter_absolute_offset = 0;
         self.state.chapter_len = 0;
         self.state.cursor = 0;
         self.state.input_len = 0;
@@ -583,6 +624,10 @@ impl<S: EpubSource> Epub<S> {
         if preserved > 0 && self.state.cursor > 0 {
             chapter_buf.copy_within(self.state.cursor..self.state.chapter_len, 0);
         }
+        self.state.chapter_absolute_offset = self
+            .state
+            .chapter_absolute_offset
+            .saturating_add(self.state.cursor);
         self.state.chapter_len = preserved;
         self.state.cursor = 0;
 
