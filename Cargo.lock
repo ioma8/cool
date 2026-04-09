@@ -1630,6 +1630,7 @@ dependencies = [
  "xteink-browser",
  "xteink-buttons",
  "xteink-epub",
+ "xteink-fs",
  "xteink-memory",
  "xteink-render",
 ]

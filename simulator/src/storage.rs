@@ -1,12 +1,13 @@
 use std::{
     cell::RefCell,
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
 use xteink_app::{AppStorage, DirectoryPage, DirectoryPageInfo, ListedEntry};
 use xteink_browser::EntryKind;
+use xteink_fs::cache_paths_for_epub;
 use xteink_render::Framebuffer;
 
 pub struct HostStorage {
@@ -56,6 +57,43 @@ impl HostStorage {
             fs_name,
             kind: Self::entry_kind(path),
         }
+    }
+
+    fn is_visible_entry(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !name.starts_with('.'))
+    }
+
+    fn progress_path(&self, current_path: &str, entry: &ListedEntry) -> PathBuf {
+        let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
+        self.resolve(cache_paths.progress.as_str())
+    }
+
+    fn read_progress(&self, current_path: &str, entry: &ListedEntry) -> Option<usize> {
+        let path = self.progress_path(current_path, entry);
+        let bytes = fs::read(path).ok()?;
+        let raw: [u8; 4] = bytes.as_slice().try_into().ok()?;
+        usize::try_from(u32::from_le_bytes(raw)).ok()
+    }
+
+    fn write_progress(
+        &self,
+        current_path: &str,
+        entry: &ListedEntry,
+        page: usize,
+    ) -> Result<(), std::io::Error> {
+        let path = self.progress_path(current_path, entry);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = fs::File::create(path)?;
+        file.write_all(
+            &u32::try_from(page)
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        )?;
+        file.flush()
     }
 }
 
@@ -127,6 +165,7 @@ impl AppStorage<Framebuffer> for HostStorage {
         let mut entries: Vec<_> = fs::read_dir(&resolved)?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
+            .filter(|path| Self::is_visible_entry(path))
             .collect();
         entries.sort_by(|left, right| {
             let left_kind = Self::entry_kind(left);
@@ -170,7 +209,8 @@ impl AppStorage<Framebuffer> for HostStorage {
         current_path: &str,
         entry: &ListedEntry,
     ) -> Result<usize, Self::Error> {
-        self.render_epub_page_from_entry(renderer, current_path, entry, 0)
+        let target_page = self.read_progress(current_path, entry).unwrap_or(0);
+        self.render_epub_page_from_entry(renderer, current_path, entry, target_page)
     }
 
     fn render_epub_page_from_entry(
@@ -183,9 +223,11 @@ impl AppStorage<Framebuffer> for HostStorage {
         let mut full_path = self.resolve(current_path);
         full_path.push(entry.fs_name.as_str());
         let source = FileSource::open(&full_path)?;
-        renderer
+        let rendered_page = renderer
             .render_epub_page(source, target_page)
-            .map_err(StorageError::Render)
+            .map_err(StorageError::Render)?;
+        self.write_progress(current_path, entry, rendered_page)?;
+        Ok(rendered_page)
     }
 }
 

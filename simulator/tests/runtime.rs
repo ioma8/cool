@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::{Mutex, OnceLock};
 
 use simulator::{
     runtime::{bootstrap_session, simulator_device_memory_footprint},
@@ -8,6 +9,11 @@ use xteink_app::Session;
 use xteink_buttons::Button;
 use xteink_memory::DEVICE_PERSISTENT_BUDGET_BYTES;
 use xteink_render::Framebuffer;
+
+fn render_test_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn runtime_boots_root_directory_and_renders_first_browser_screen() {
@@ -30,11 +36,14 @@ fn simulator_device_footprint_stays_within_budget() {
 
 #[test]
 fn runtime_opens_decisive_fixture_to_non_blank_reader_page() {
-    let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let _guard = render_test_mutex().lock().expect("render mutex poisoned");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("test/epubs");
-    let storage = HostStorage::new(&fixture_root);
+        .join("test/epubs/Decisive - Chip Heath.epub");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
     let mut session = Session::new(storage, Framebuffer::new(), 8);
 
     session.bootstrap().expect("bootstrap");
@@ -55,5 +64,45 @@ fn runtime_opens_decisive_fixture_to_non_blank_reader_page() {
     assert!(
         session.renderer().bytes().iter().any(|byte| *byte != 0xFF),
         "turning to the next page should also render a non-blank page"
+    );
+}
+
+#[test]
+fn runtime_reopens_epub_from_saved_progress() {
+    let _guard = render_test_mutex().lock().expect("render mutex poisoned");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("test/epubs/Decisive - Chip Heath.epub");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+
+    let storage = HostStorage::new(tmp.path());
+    let mut session = Session::new(storage, Framebuffer::new(), 8);
+
+    session.bootstrap().expect("bootstrap");
+    session
+        .handle_button(Button::Back)
+        .expect("open selected epub");
+    session
+        .handle_button(Button::Down)
+        .expect("page 1 should render");
+    session
+        .handle_button(Button::Down)
+        .expect("page 2 should render");
+    assert_eq!(session.reader_page(), 2);
+
+    session
+        .handle_button(Button::Back)
+        .expect("return to browser");
+    assert_eq!(session.current_path(), "/");
+
+    session
+        .handle_button(Button::Back)
+        .expect("reopen selected epub");
+    assert_eq!(
+        session.reader_page(),
+        2,
+        "reopening an epub should resume from the last saved reading position"
     );
 }

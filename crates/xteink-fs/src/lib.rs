@@ -3,7 +3,6 @@
 #[cfg(test)]
 extern crate std;
 
-#[cfg(feature = "embedded")]
 mod cache;
 #[cfg(feature = "embedded")]
 mod directory;
@@ -18,7 +17,6 @@ mod path;
 #[cfg(feature = "embedded")]
 mod reader;
 
-#[cfg(feature = "embedded")]
 pub use cache::*;
 #[cfg(feature = "embedded")]
 pub use directory::{DirectoryPage, ListedEntry, load_directory_page};
