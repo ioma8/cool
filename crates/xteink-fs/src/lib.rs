@@ -4,8 +4,8 @@
 extern crate std;
 
 mod cache;
-mod filesystem;
 mod directory;
+mod filesystem;
 #[cfg(feature = "embedded")]
 mod hal;
 mod log;
@@ -15,11 +15,11 @@ mod path;
 mod reader;
 
 pub use cache::*;
-pub use filesystem::{
-    DirectoryPageInfo, FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, SdFsFile,
-    is_epub_label, listed_entry_from_parts,
-};
 pub use directory::{DirectoryPage, load_directory_page};
+pub use filesystem::{
+    DirectoryPageInfo, FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, SdFsFile, is_epub_label,
+    listed_entry_from_parts,
+};
 #[cfg(feature = "embedded")]
 pub use hal::{RawGpioOutput, SD_CS_PIN, SD_POWER_PIN};
 #[cfg(feature = "embedded")]

@@ -128,7 +128,9 @@ impl PaginationState {
     }
 
     pub(crate) fn advance_line_break(&mut self) {
-        self.cursor_y = self.cursor_y.saturating_add(bookerly::BOOKERLY.line_height_px());
+        self.cursor_y = self
+            .cursor_y
+            .saturating_add(bookerly::BOOKERLY.line_height_px());
     }
 
     pub(crate) fn advance_paragraph_break(&mut self) {
@@ -149,17 +151,11 @@ impl PaginationState {
         self.current_page >= config.target_page
     }
 
-    pub(crate) fn should_advance_for_height(
-        &self,
-        renderer_height: u16,
-    ) -> bool {
+    pub(crate) fn should_advance_for_height(&self, renderer_height: u16) -> bool {
         !self.explicit_page_breaks && self.cursor_y >= renderer_height
     }
 
-    pub(crate) fn advance_page(
-        &mut self,
-        config: PaginationConfig,
-    ) -> PaginationAdvanceOutcome {
+    pub(crate) fn advance_page(&mut self, config: PaginationConfig) -> PaginationAdvanceOutcome {
         if self.current_page >= config.target_page {
             if config.stop_after_target_page {
                 return PaginationAdvanceOutcome {
@@ -185,9 +181,7 @@ impl PaginationState {
         }
     }
 
-    pub(crate) fn apply_pending_action(
-        &mut self,
-    ) {
+    pub(crate) fn apply_pending_action(&mut self) {
         if !self.page_has_content {
             self.clear_pending_action();
             return;
@@ -312,7 +306,8 @@ impl<const N: usize> PaginatorState<N> {
                 continue;
             }
             let take = remaining.min(bytes.len() - start);
-            self.text.push_exact(core::str::from_utf8(&bytes[start..start + take]).unwrap_or(""));
+            self.text
+                .push_exact(core::str::from_utf8(&bytes[start..start + take]).unwrap_or(""));
             start += take;
         }
         Ok(false)
@@ -331,21 +326,22 @@ impl<const N: usize> PaginatorState<N> {
         while !self.text.is_empty() {
             let current_text = self.text.as_str();
             let cursor_before = self.state.cursor_y();
-            let result = if self.state.current_page() >= config.target_page && config.draw_target_page {
-                renderer.draw_wrapped_text_block(
-                    0,
-                    self.state.cursor_y(),
-                    current_text,
-                    renderer.display_height(),
-                )
-            } else {
-                renderer.measure_wrapped_text_block(
-                    0,
-                    self.state.cursor_y(),
-                    current_text,
-                    renderer.display_height(),
-                )
-            };
+            let result =
+                if self.state.current_page() >= config.target_page && config.draw_target_page {
+                    renderer.draw_wrapped_text_block(
+                        0,
+                        self.state.cursor_y(),
+                        current_text,
+                        renderer.display_height(),
+                    )
+                } else {
+                    renderer.measure_wrapped_text_block(
+                        0,
+                        self.state.cursor_y(),
+                        current_text,
+                        renderer.display_height(),
+                    )
+                };
             if result.consumed > 0 {
                 observer.on_text(&current_text[..result.consumed])?;
             }
@@ -358,7 +354,10 @@ impl<const N: usize> PaginatorState<N> {
                 if self.advance_page(renderer, observer, config)? {
                     return Ok(true);
                 }
-            } else if self.state.should_advance_for_height(renderer.display_height()) {
+            } else if self
+                .state
+                .should_advance_for_height(renderer.display_height())
+            {
                 if self.advance_page(renderer, observer, config)? {
                     return Ok(true);
                 }
@@ -392,7 +391,10 @@ impl<const N: usize> PaginatorState<N> {
         }
         self.state.apply_pending_action();
 
-        if self.state.should_advance_for_height(renderer.display_height()) {
+        if self
+            .state
+            .should_advance_for_height(renderer.display_height())
+        {
             return self.advance_page(renderer, observer, config);
         }
         Ok(false)
@@ -523,10 +525,20 @@ mod tests {
         };
 
         let _ = state
-            .feed(&mut renderer, &mut observer, config, PaginationEvent::Text("hello"))
+            .feed(
+                &mut renderer,
+                &mut observer,
+                config,
+                PaginationEvent::Text("hello"),
+            )
             .expect("text should succeed");
         let _ = state
-            .feed(&mut renderer, &mut observer, config, PaginationEvent::LineBreak)
+            .feed(
+                &mut renderer,
+                &mut observer,
+                config,
+                PaginationEvent::LineBreak,
+            )
             .expect("line break should succeed");
 
         assert_eq!(observer.events, vec!["text", "page"]);

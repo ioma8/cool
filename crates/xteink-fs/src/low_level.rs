@@ -12,12 +12,11 @@ use heapless::{String, Vec};
 use xteink_epub::{EpubError, EpubSource};
 use xteink_sdspi::{SdSpiCard, SdSpiOptions, SpiTransport};
 
-use crate::{
-    DirectoryPageInfo, FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, SdFsFile,
-    hal, path::normalize_path,
-    listed_entry_from_parts,
-};
 use crate::log::logln;
+use crate::{
+    DirectoryPageInfo, FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, SdFsFile, hal,
+    listed_entry_from_parts, path::normalize_path,
+};
 const LABEL_CAPACITY: usize = 96;
 const LFN_CAPACITY: usize = 256;
 const MAX_DIRS: usize = 16;
@@ -25,7 +24,6 @@ const MAX_FILES: usize = 4;
 const MAX_VOLUMES: usize = 1;
 const LOGICAL_CACHE_DIR: &str = ".cool";
 const PHYSICAL_CACHE_DIR: &str = "COOL";
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SdTransportError<E> {
@@ -118,7 +116,6 @@ where
     volume_mgr: SdVolumes<'bus, SPI, DELAY>,
     raw_volume: RawVolume,
 }
-
 
 impl<'bus, SPI, DELAY> SdApp<'bus, SPI, DELAY>
 where

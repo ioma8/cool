@@ -152,7 +152,10 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
                 };
                 if !fits && !line.is_empty() {
                     if flush_line(line, &mut cursor_y, &mut consumed, start, &mut draw_line) {
-                        return WrappedTextLayoutResult { next_y: cursor_y, consumed };
+                        return WrappedTextLayoutResult {
+                            next_y: cursor_y,
+                            consumed,
+                        };
                     }
                 }
                 if !line.is_empty() && pending_space {
@@ -170,7 +173,10 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
                 idx + ch.len_utf8(),
                 &mut draw_line,
             ) {
-                return WrappedTextLayoutResult { next_y: cursor_y, consumed };
+                return WrappedTextLayoutResult {
+                    next_y: cursor_y,
+                    consumed,
+                };
             }
             continue;
         }
@@ -186,7 +192,10 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
                 };
                 if !fits && !line.is_empty() {
                     if flush_line(line, &mut cursor_y, &mut consumed, start, &mut draw_line) {
-                        return WrappedTextLayoutResult { next_y: cursor_y, consumed };
+                        return WrappedTextLayoutResult {
+                            next_y: cursor_y,
+                            consumed,
+                        };
                     }
                 }
                 if !line.is_empty() && pending_space {
@@ -218,7 +227,10 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
             };
             if !fits && !line.is_empty() {
                 if flush_line(line, &mut cursor_y, &mut consumed, start, &mut draw_line) {
-                    return WrappedTextLayoutResult { next_y: cursor_y, consumed };
+                    return WrappedTextLayoutResult {
+                        next_y: cursor_y,
+                        consumed,
+                    };
                 }
             }
             if !line.is_empty() && pending_space {
@@ -229,10 +241,22 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
     }
 
     if !line.is_empty()
-        && flush_line(line, &mut cursor_y, &mut consumed, text.len(), &mut draw_line)
+        && flush_line(
+            line,
+            &mut cursor_y,
+            &mut consumed,
+            text.len(),
+            &mut draw_line,
+        )
     {
-        return WrappedTextLayoutResult { next_y: cursor_y, consumed };
+        return WrappedTextLayoutResult {
+            next_y: cursor_y,
+            consumed,
+        };
     }
 
-    WrappedTextLayoutResult { next_y: cursor_y, consumed }
+    WrappedTextLayoutResult {
+        next_y: cursor_y,
+        consumed,
+    }
 }

@@ -118,6 +118,23 @@ Keyboard mapping:
 - `Backspace`: go to parent / back
 - `Escape`: power
 
+## Web simulator
+
+A wasm/web version of the simulator is available and reuses the same shared app/session + render + fs reader pipeline.
+
+- framebuffer is rendered into an HTML `<canvas>`
+- button footer maps to device-style actions
+- EPUB uploads persist to browser `localStorage`
+- cache sidecars are written under `/.cool` in the simulated browser-backed SD filesystem
+
+Build a deployable static bundle:
+
+```bash
+bash scripts/build-web-simulator.sh
+```
+
+Output is placed in `dist/` and can be hosted as static files.
+
 ## Flashing
 
 ```bash

@@ -18,13 +18,15 @@ use esp_hal::{
     spi::master::{Config as SpiConfig, Spi},
     time::Rate,
 };
-use xteink_app::{AppStorage, EpubRenderResult as AppEpubRenderResult, ListedEntry as AppListedEntry, Session};
+use xteink_app::{
+    AppStorage, EpubRenderResult as AppEpubRenderResult, ListedEntry as AppListedEntry, Session,
+};
+use xteink_browser::EntryKind;
 use xteink_buttons::{
     Button as RawButton, ButtonState, get_button_from_adc_1, get_button_from_adc_2,
 };
 use xteink_controller::BrowserRefresh;
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display};
-use xteink_browser::EntryKind;
 use xteink_fs::{
     FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
     render_epub_page_from_entry,
@@ -213,7 +215,8 @@ where
         current_path: &str,
         entry: &AppListedEntry,
     ) -> Result<AppEpubRenderResult, Self::Error> {
-        let rendered = render_epub_from_entry(self.sd, renderer, current_path, &clone_listed_entry(entry))?;
+        let rendered =
+            render_epub_from_entry(self.sd, renderer, current_path, &clone_listed_entry(entry))?;
         Ok(AppEpubRenderResult {
             rendered_page: rendered.rendered_page,
             progress_percent: rendered.progress_percent,
@@ -293,7 +296,9 @@ fn log_firmware_memory_report(footprint: DeviceMemoryFootprint) {
         used_permille / 10,
         used_permille % 10,
         footprint.device_heap_bytes,
-        footprint.device_bytes.saturating_sub(footprint.device_heap_bytes),
+        footprint
+            .device_bytes
+            .saturating_sub(footprint.device_heap_bytes),
         footprint.remaining_device_bytes(),
         DEVICE_TOTAL_RAM_BYTES,
         DEVICE_STACK_RESERVE_BYTES,
@@ -331,30 +336,28 @@ fn observe_task_stack(task_name: &str, probe: &'static Mutex<CriticalSectionRawM
     let sp = current_stack_pointer();
     unsafe {
         probe.lock_mut(|state| {
-        if state.top == 0 {
-            state.top = sp;
-        }
-        if sp < state.low {
-            state.low = sp;
-        }
+            if state.top == 0 {
+                state.top = sp;
+            }
+            if sp < state.low {
+                state.low = sp;
+            }
 
-        let used = state.top.saturating_sub(state.low);
-        let should_report = if !state.has_reported {
-            true
-        } else {
-            used >= state.reported_usage.saturating_add(STACK_REPORT_GRANULARITY_BYTES)
-        };
+            let used = state.top.saturating_sub(state.low);
+            let should_report = if !state.has_reported {
+                true
+            } else {
+                used >= state
+                    .reported_usage
+                    .saturating_add(STACK_REPORT_GRANULARITY_BYTES)
+            };
 
-        if should_report {
-            state.reported_usage = used;
-            state.has_reported = true;
-            esp_println::println!(
-                "Stack usage: task={} observed_used={}B",
-                task_name,
-                used,
-            );
-        }
-    })
+            if should_report {
+                state.reported_usage = used;
+                state.has_reported = true;
+                esp_println::println!("Stack usage: task={} observed_used={}B", task_name, used,);
+            }
+        })
     };
 }
 
@@ -485,8 +488,16 @@ async fn main(spawner: Spawner) -> ! {
         let mut framebuffer = Framebuffer::new();
         let mut pending_display_refresh = PendingDisplayRefresh::None;
         display.init();
-        render_error_screen(&mut framebuffer, "SD init failed", &mut pending_display_refresh);
-        service_display_refresh(&mut display, framebuffer.bytes(), &mut pending_display_refresh);
+        render_error_screen(
+            &mut framebuffer,
+            "SD init failed",
+            &mut pending_display_refresh,
+        );
+        service_display_refresh(
+            &mut display,
+            framebuffer.bytes(),
+            &mut pending_display_refresh,
+        );
         loop {
             yield_now().await;
         }

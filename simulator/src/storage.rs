@@ -36,8 +36,8 @@ impl HostStorage {
     }
 
     fn host_path_for(&self, path: &str) -> Result<PathBuf, FsError> {
-        let normalized = xteink_fs::normalize_path(path)
-            .map_err(|_| Self::host_error("invalid path"))?;
+        let normalized =
+            xteink_fs::normalize_path(path).map_err(|_| Self::host_error("invalid path"))?;
         let mut resolved = self.root.clone();
         for component in normalized
             .as_str()
@@ -50,8 +50,8 @@ impl HostStorage {
     }
 
     fn host_parent_and_leaf_for(&self, path: &str) -> Result<(PathBuf, String), FsError> {
-        let normalized = xteink_fs::normalize_path(path)
-            .map_err(|_| Self::host_error("invalid path"))?;
+        let normalized =
+            xteink_fs::normalize_path(path).map_err(|_| Self::host_error("invalid path"))?;
         let trimmed = normalized.as_str().trim_end_matches('/');
         let Some((parent, leaf)) = trimmed.rsplit_once('/') else {
             return Err(Self::host_error("missing path component"));
@@ -64,8 +64,8 @@ impl HostStorage {
     }
 
     fn host_directory_path_for(&self, path: &str) -> Result<PathBuf, FsError> {
-        let normalized = xteink_fs::normalize_path(path)
-            .map_err(|_| Self::host_error("invalid path"))?;
+        let normalized =
+            xteink_fs::normalize_path(path).map_err(|_| Self::host_error("invalid path"))?;
         let mut resolved = self.root.clone();
         for component in normalized
             .as_str()
@@ -281,8 +281,14 @@ impl xteink_epub::EpubSource for HostEpubSource {
 }
 
 impl SdFilesystem for HostStorage {
-    type EpubSource<'a> = HostEpubSource where Self: 'a;
-    type File<'a> = HostFile where Self: 'a;
+    type EpubSource<'a>
+        = HostEpubSource
+    where
+        Self: 'a;
+    type File<'a>
+        = HostFile
+    where
+        Self: 'a;
 
     fn list_directory_page(
         &self,
@@ -318,7 +324,8 @@ impl SdFilesystem for HostStorage {
             let name = Self::file_name_str(path)?;
             let short_name = Self::short_component_name(name, path.is_dir());
             let label = Self::display_label(name);
-            let entry = listed_entry_from_parts(label.as_str(), short_name.as_str(), path.is_dir())?;
+            let entry =
+                listed_entry_from_parts(label.as_str(), short_name.as_str(), path.is_dir())?;
             let _ = entries.push(entry);
         }
         Ok(FsDirectoryPageInfo {
@@ -399,7 +406,8 @@ impl AppStorage<Framebuffer> for HostStorage {
         page_start: usize,
         page_size: usize,
     ) -> Result<DirectoryPage, Self::Error> {
-        let FsDirectoryPage { entries, info } = load_directory_page(self, path, page_start, page_size)?;
+        let FsDirectoryPage { entries, info } =
+            load_directory_page(self, path, page_start, page_size)?;
         let mut app_entries = heapless::Vec::new();
         for entry in entries.iter() {
             let _ = app_entries.push(Self::app_entry(entry));
@@ -420,7 +428,8 @@ impl AppStorage<Framebuffer> for HostStorage {
         current_path: &str,
         entry: &ListedEntry,
     ) -> Result<EpubRenderResult, Self::Error> {
-        let fs_entry = listed_entry_from_parts(entry.label.as_str(), entry.fs_name.as_str(), false)?;
+        let fs_entry =
+            listed_entry_from_parts(entry.label.as_str(), entry.fs_name.as_str(), false)?;
         let rendered = render_epub_from_entry(self, renderer, current_path, &fs_entry)?;
         Ok(EpubRenderResult {
             rendered_page: rendered.rendered_page,
@@ -435,9 +444,16 @@ impl AppStorage<Framebuffer> for HostStorage {
         entry: &ListedEntry,
         target_page: usize,
     ) -> Result<EpubRenderResult, Self::Error> {
-        let fs_entry = listed_entry_from_parts(entry.label.as_str(), entry.fs_name.as_str(), false)?;
-        let rendered =
-            render_epub_page_from_entry(self, renderer, current_path, &fs_entry, target_page, true)?;
+        let fs_entry =
+            listed_entry_from_parts(entry.label.as_str(), entry.fs_name.as_str(), false)?;
+        let rendered = render_epub_page_from_entry(
+            self,
+            renderer,
+            current_path,
+            &fs_entry,
+            target_page,
+            true,
+        )?;
         Ok(EpubRenderResult {
             rendered_page: rendered.rendered_page,
             progress_percent: rendered.progress_percent,

@@ -1,4 +1,4 @@
-use xteink_render::{bookerly, Framebuffer, DISPLAY_HEIGHT};
+use xteink_render::{DISPLAY_HEIGHT, Framebuffer, bookerly};
 
 fn render_cached_text_page_with_chunk_size(
     text: &[u8],
@@ -15,7 +15,9 @@ fn render_cached_text_page_with_chunk_size(
                     return Ok(0);
                 }
 
-                let end = (offset + chunk_size).min(offset + buffer.len()).min(text.len());
+                let end = (offset + chunk_size)
+                    .min(offset + buffer.len())
+                    .min(text.len());
                 let chunk = &text[offset..end];
                 buffer[..chunk.len()].copy_from_slice(chunk);
                 offset = end;
