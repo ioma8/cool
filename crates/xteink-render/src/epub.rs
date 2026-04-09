@@ -13,10 +13,10 @@ use crate::{
     paginator::{PaginationConfig, PaginationEvent, PaginationObserver, PaginatorState},
 };
 
-const EPUB_WORKSPACE_ZIP_CD: usize = 16 * 1024;
-const EPUB_WORKSPACE_INFLATE: usize = 48 * 1024;
+const EPUB_WORKSPACE_ZIP_CD: usize = 8 * 1024;
+const EPUB_WORKSPACE_INFLATE: usize = 40 * 1024;
 const EPUB_WORKSPACE_STREAM_INPUT: usize = 2048;
-const EPUB_WORKSPACE_XML: usize = 32 * 1024;
+const EPUB_WORKSPACE_XML: usize = 16 * 1024;
 const EPUB_WORKSPACE_CATALOG: usize = 8192;
 const EPUB_WORKSPACE_PATH_BUF: usize = 256;
 const TEXT_LEN: usize = 2048;
