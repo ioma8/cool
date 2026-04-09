@@ -21,11 +21,16 @@ pub fn bootstrap_session<S: AppStorage<Framebuffer>>(
 }
 
 pub fn simulator_device_memory_footprint(scale: usize) -> DeviceMemoryFootprint {
-    let device_bytes =
-        size_of::<Session<HostStorage, Framebuffer>>() + EPUB_RENDER_WORKSPACE_BYTES + SIMULATOR_DEVICE_HEAP_BYTES;
+    let device_bytes = size_of::<Session<HostStorage, Framebuffer>>()
+        + EPUB_RENDER_WORKSPACE_BYTES
+        + SIMULATOR_DEVICE_HEAP_BYTES;
     let host_only_bytes =
         usize::from(DISPLAY_WIDTH) * usize::from(DISPLAY_HEIGHT) * scale * scale * size_of::<u32>();
-    DeviceMemoryFootprint::with_breakdown(device_bytes, SIMULATOR_DEVICE_HEAP_BYTES, host_only_bytes)
+    DeviceMemoryFootprint::with_breakdown(
+        device_bytes,
+        SIMULATOR_DEVICE_HEAP_BYTES,
+        host_only_bytes,
+    )
 }
 
 fn print_simulator_memory_report(footprint: DeviceMemoryFootprint, scale: usize) {
@@ -36,7 +41,9 @@ fn print_simulator_memory_report(footprint: DeviceMemoryFootprint, scale: usize)
         used_permille / 10,
         used_permille % 10,
         footprint.device_heap_bytes,
-        footprint.device_bytes.saturating_sub(footprint.device_heap_bytes),
+        footprint
+            .device_bytes
+            .saturating_sub(footprint.device_heap_bytes),
         footprint.remaining_device_bytes(),
         footprint.host_only_bytes,
         DEVICE_TOTAL_RAM_BYTES,

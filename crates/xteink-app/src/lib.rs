@@ -3,5 +3,6 @@
 mod session;
 
 pub use session::{
-    AppRenderer, AppStorage, DirectoryPage, DirectoryPageInfo, EpubRenderResult, ListedEntry, Session,
+    AppRenderer, AppStorage, DirectoryPage, DirectoryPageInfo, EpubRenderResult, ListedEntry,
+    Session,
 };

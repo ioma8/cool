@@ -134,11 +134,12 @@ impl Framebuffer {
     ) -> u16 {
         const LINE_BUF_LEN: usize = 512;
         let mut line = WrappedLine::<LINE_BUF_LEN>::new();
-        let result = layout_wrapped_text_page(&mut line, x, y, text, max_y, |draw_x, draw_y, line_text| {
-            if draw {
-                self.draw_text(draw_x, draw_y, line_text);
-            }
-        });
+        let result =
+            layout_wrapped_text_page(&mut line, x, y, text, max_y, |draw_x, draw_y, line_text| {
+                if draw {
+                    self.draw_text(draw_x, draw_y, line_text);
+                }
+            });
         result.next_y
     }
 
@@ -333,7 +334,8 @@ impl Framebuffer {
                         if progress.target_complete {
                             return Ok(CachedPageRenderFromOffsetResult {
                                 page_start_byte,
-                                next_page_start_byte: page_start_byte.saturating_add(consumed_bytes),
+                                next_page_start_byte: page_start_byte
+                                    .saturating_add(consumed_bytes),
                                 rendered_page: state.current_page(),
                                 consumed_bytes,
                             });
@@ -344,7 +346,8 @@ impl Framebuffer {
                         let valid = err.valid_up_to();
                         if valid > 0 {
                             let text = core::str::from_utf8(&source[..valid]).unwrap_or("");
-                            let progress = replay_cached_events(self, &mut state, target_page, text)?;
+                            let progress =
+                                replay_cached_events(self, &mut state, target_page, text)?;
                             consumed_bytes = consumed_bytes.saturating_add(progress.consumed_bytes);
                             if progress.target_complete {
                                 return Ok(CachedPageRenderFromOffsetResult {
@@ -462,18 +465,30 @@ fn replay_cached_events(
     for (idx, ch) in text.char_indices() {
         let char_bytes = ch.len_utf8();
         let progress = match ch {
-            CACHE_LAYOUT_STREAM_MARKER => {
-                state.feed(framebuffer, &mut observer, config, PaginationEvent::EnableExplicitBreaks)?
-            }
-            CACHE_PAGE_BREAK_MARKER => {
-                state.feed(framebuffer, &mut observer, config, PaginationEvent::ExplicitPageBreak)?
-            }
-            CACHE_LINE_BREAK_MARKER | '\n' => {
-                state.feed(framebuffer, &mut observer, config, PaginationEvent::LineBreak)?
-            }
-            CACHE_PARAGRAPH_BREAK_MARKER => {
-                state.feed(framebuffer, &mut observer, config, PaginationEvent::ParagraphBreak)?
-            }
+            CACHE_LAYOUT_STREAM_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::EnableExplicitBreaks,
+            )?,
+            CACHE_PAGE_BREAK_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::ExplicitPageBreak,
+            )?,
+            CACHE_LINE_BREAK_MARKER | '\n' => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::LineBreak,
+            )?,
+            CACHE_PARAGRAPH_BREAK_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::ParagraphBreak,
+            )?,
             _ => {
                 let mut encoded = [0u8; 4];
                 state.feed(
@@ -544,8 +559,8 @@ mod tests {
     #[test]
     fn wrapped_text_page_result_preserves_unconsumed_tail() {
         let mut framebuffer = Framebuffer::new();
-        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu "
-            .repeat(200);
+        let text =
+            "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(200);
 
         let first = framebuffer.layout_wrapped_text_page_result(0, 0, &text, DISPLAY_HEIGHT, false);
         assert!(first.consumed > 0);
@@ -567,17 +582,13 @@ mod tests {
         let target_page = 1usize;
 
         let mut direct = Framebuffer::new();
-        let first = direct.layout_wrapped_text_page_result(0, 0, &text, reader_content_height(), false);
+        let first =
+            direct.layout_wrapped_text_page_result(0, 0, &text, reader_content_height(), false);
         assert!(first.consumed > 0);
         let remaining = &text[first.consumed..];
         direct.clear(0xFF);
-        let _ = direct.layout_wrapped_text_page_result(
-            0,
-            0,
-            remaining,
-            reader_content_height(),
-            true,
-        );
+        let _ =
+            direct.layout_wrapped_text_page_result(0, 0, remaining, reader_content_height(), true);
 
         let bytes = text.into_bytes();
         let mut cached = Framebuffer::new();
@@ -595,7 +606,10 @@ mod tests {
             },
             target_page,
         );
-        assert_eq!(cached_result.expect("cached render should succeed"), target_page);
+        assert_eq!(
+            cached_result.expect("cached render should succeed"),
+            target_page
+        );
         assert_eq!(cached.bytes(), direct.bytes());
     }
 
@@ -614,7 +628,10 @@ mod tests {
         );
 
         assert_eq!(drawn.len(), 1, "test should fill exactly one drawn line");
-        assert!(result.consumed < text.len(), "test should leave text for next page");
+        assert!(
+            result.consumed < text.len(),
+            "test should leave text for next page"
+        );
         assert_eq!(
             text[..result.consumed].trim_end(),
             drawn[0].trim_end(),

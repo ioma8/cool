@@ -1,17 +1,20 @@
-use xteink_epub::EpubError;
-use xteink_epub::EpubSource;
-use xteink_render::{CacheBuildResult, Framebuffer};
+use xteink_epub::{EpubError, EpubSource};
+use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, reader_content_height};
 
 use crate::{
+    ListedEntry, SdFilesystem, SdFsFile,
     cache::{
-        cache_paths_for_epub, parse_meta, serialize_meta, CacheMeta, CachePaths, CACHE_VERSION,
+        CACHE_VERSION, CacheMeta, CachePaths, ProgressState, cache_paths_for_epub, decode_progress,
+        encode_offset, encode_progress, parse_meta, serialize_meta,
     },
     log::logln,
-    ListedEntry, SdFilesystem, SdFsFile,
     path::join_child_path,
 };
 
 const CACHED_TEXT_WRITE_BUFFER: usize = 1024;
+const LAYOUT_SIG_VERSION: u16 = 1;
+const LAYOUT_SIG_FONT: u32 = 1;
+const LAYOUT_SIG_PAGINATOR: u32 = 2;
 
 struct CacheWriteBuffer {
     bytes: [u8; CACHED_TEXT_WRITE_BUFFER],
@@ -103,44 +106,24 @@ where
     SD: SdFilesystem,
     C: FnMut() -> bool,
 {
-    logln!(
-        "EPUB render start: path={} entry={} kind={:?}",
-        current_path,
-        entry.fs_name.as_str(),
-        entry.kind
-    );
     let source_path =
         join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
-    logln!("EPUB render step: building cache candidate paths");
     let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
-    logln!("EPUB render step: built cache candidate paths");
-    logln!(
-        "EPUB render step: cache candidate lengths {} | {}",
-        cache_paths.progress.len(),
-        cache_paths.progress.len()
-    );
-    logln!(
-        "EPUB cache probe begin: {}",
-        cache_paths.progress.as_str()
-    );
-    let source = fs
-        .open_epub_source(source_path.as_str())
-        .map_err(|_| EpubError::Io)?;
-    let source_size = u32::try_from(source.len()).map_err(|_| EpubError::OutOfSpace)?;
-    let cache_state = resolve_cache_state(fs, &cache_paths, source_size, None);
-    let saved_progress = cache_state.start_progress;
-    let start_page = saved_progress.map(|progress| progress.page_hint).unwrap_or(0);
-    logln!(
-        "EPUB render progress: cached_start_page={} cache_root={}",
-        start_page,
-        cache_paths.directory.as_str()
-    );
+    let source_size = u32::try_from(
+        fs.open_epub_source(source_path.as_str())
+            .map_err(|_| EpubError::Io)?
+            .len(),
+    )
+    .map_err(|_| EpubError::OutOfSpace)?;
+    let saved = read_cached_progress(fs, cache_paths.progress.as_str());
+    let start_page = saved.map(|p| p.current_page_hint as usize).unwrap_or(0);
 
     render_epub_page_from_entry_with_cancel(
         fs,
         display,
         current_path,
         entry,
+        source_size,
         start_page,
         false,
         should_cancel,
@@ -158,11 +141,20 @@ pub fn render_epub_page_from_entry<SD>(
 where
     SD: SdFilesystem,
 {
+    let source_path =
+        join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
+    let source_size = u32::try_from(
+        fs.open_epub_source(source_path.as_str())
+            .map_err(|_| EpubError::Io)?
+            .len(),
+    )
+    .map_err(|_| EpubError::OutOfSpace)?;
     render_epub_page_from_entry_with_cancel(
         fs,
         display,
         current_path,
         entry,
+        source_size,
         page_index,
         fast_refresh,
         || false,
@@ -174,9 +166,10 @@ pub fn render_epub_page_from_entry_with_cancel<SD, C>(
     display: &mut Framebuffer,
     current_path: &str,
     entry: &ListedEntry,
+    source_size: u32,
     page_index: usize,
     fast_refresh: bool,
-    should_cancel: C,
+    mut should_cancel: C,
 ) -> Result<EpubRenderResult, EpubError>
 where
     SD: SdFilesystem,
@@ -185,131 +178,83 @@ where
     let source_path =
         join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
     let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
-    let mut should_cancel = should_cancel;
-    logln!("EPUB source open begin: {}", source_path.as_str());
 
-    let mut source = Some(
-        fs.open_epub_source(source_path.as_str())
-            .map_err(|_| EpubError::Io)?,
-    );
-    let source_size =
-        u32::try_from(source.as_ref().ok_or(EpubError::Io)?.len()).map_err(|_| EpubError::OutOfSpace)?;
-    logln!(
-        "EPUB source opened: {} bytes={} target_page={} fast_refresh={}",
-        source_path.as_str(),
-        source_size,
-        page_index,
-        fast_refresh
-    );
-
-    let cache_state = resolve_cache_state(fs, &cache_paths, source_size, Some(page_index));
-    let mut cache_paths_for_work = cache_state.work_paths;
-    let (rendered_page, progress_percent) = match cache_state.selection {
-        CacheSelection::Hit { paths, meta: _meta } => {
-            cache_paths_for_work = Some(paths.clone());
-            logln!(
-                "EPUB cache hit: {} v{} source_size={} content_length={}",
-                source_path.as_str(),
-                _meta.version,
-                _meta.source_size,
-                _meta.content_length
-            );
-            let mut content = fs
-                .open_cache_file_read(paths.content.as_str())
-                .map_err(|_| EpubError::Io)?;
-            let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
-                content.read(buffer).map_err(|_| EpubError::Io)
-            };
-            let page_progress = saved_progress.unwrap_or(SavedProgress {
-                byte_offset: 0,
-                page_hint: page_index,
-            });
-            let rendered = display.render_cached_text_page_from_offset_for_page_with_progress(
-                &mut read_text,
-                page_progress.byte_offset,
-                page_index,
-                &mut should_cancel,
-            )?;
-            let rendered_page = rendered.rendered_page;
-            let progress_percent = if _meta.complete {
-                percent_from_pages(rendered_page, _meta.cached_pages)
-            } else {
-                percent_from_cached_prefix_pages(rendered_page, _meta.cached_pages, _meta.cached_progress_percent)
-            };
-            (rendered_page, progress_percent)
-        }
-        CacheSelection::Resume { paths, meta: _meta } => {
-            cache_paths_for_work = Some(paths.clone());
-            logln!(
-                "EPUB partial cache rebuild: {} v{} cached_pages={} next_spine_index={} resume_page={} resume_cursor_y={}",
-                source_path.as_str(),
-                _meta.version,
-                _meta.cached_pages,
-                _meta.next_spine_index,
-                _meta.resume_page,
-                _meta.resume_cursor_y
-            );
-            let source = source.take().ok_or(EpubError::Io)?;
-            let build = read_epub_source_to_cache_and_render(
-                fs,
-                display,
-                source,
-                source_size,
-                source_path.as_str(),
-                &paths,
-                page_index,
-                &mut should_cancel,
-            )?;
-            (build.rendered_page, build.progress_percent)
-        }
-        CacheSelection::Miss { paths } => {
-            logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
-            let source = source.take().ok_or(EpubError::Io)?;
-            if let Some(paths) = paths {
-                cache_paths_for_work = Some(paths);
-            }
-            let cache_paths_for_render = cache_paths_for_work
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| cache_paths.clone());
-            logln!(
-                "EPUB parse start: source={} cache_dir={}",
-                source_path.as_str(),
-                cache_paths_for_render.directory.as_str()
-            );
-            let build = read_epub_source_to_cache_and_render(
-                fs,
-                display,
-                source,
-                source_size,
-                source_path.as_str(),
-                &cache_paths_for_render,
-                page_index,
-                &mut should_cancel,
-            )?;
-            logln!(
-                "EPUB parse complete: source={} rendered_page={}",
-                source_path.as_str(),
-                build.rendered_page
-            );
-            (build.rendered_page, build.progress_percent)
-        }
-    };
-
-    if let Some(paths) = cache_paths_for_work {
-        if let Err(_err) = write_cached_progress(
+    let mut meta = read_cache_meta_if_valid(fs, &cache_paths, source_size).ok();
+    if meta.is_none() {
+        logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
+        let source = fs
+            .open_epub_source(source_path.as_str())
+            .map_err(|_| EpubError::Io)?;
+        let build = build_content_cache(
             fs,
-            paths.progress.as_str(),
-            rendered_page,
-            progress_percent,
-        ) {
-            logln!(
-                "EPUB progress write failed: {} -> {:?}",
-                paths.progress.as_str(),
-                _err
-            );
-        }
+            display,
+            source,
+            source_size,
+            &cache_paths,
+            page_index,
+            &mut should_cancel,
+        )?;
+        let new_meta = CacheMeta {
+            version: CACHE_VERSION,
+            source_size,
+            content_length: u64::try_from(build.content_length)
+                .map_err(|_| EpubError::OutOfSpace)?,
+            build_complete: build.complete,
+            next_chapter_index: build.next_chapter_index,
+            layout_sig_version: LAYOUT_SIG_VERSION,
+            layout_sig_width: DISPLAY_WIDTH,
+            layout_sig_height: DISPLAY_HEIGHT,
+            layout_sig_content_height: reader_content_height(),
+            layout_sig_font: LAYOUT_SIG_FONT,
+            layout_sig_paginator: LAYOUT_SIG_PAGINATOR,
+        };
+        write_meta(fs, cache_paths.meta.as_str(), &new_meta)?;
+        // initialize sidecars
+        write_offset_record(fs, cache_paths.pages.as_str(), 0, true)?;
+        write_offset_record(fs, cache_paths.chapters.as_str(), 0, true)?;
+        meta = Some(new_meta);
     }
+
+    let meta = meta.ok_or(EpubError::Io)?;
+    let saved = read_cached_progress(fs, cache_paths.progress.as_str()).unwrap_or(ProgressState {
+        current_byte_offset: 0,
+        current_page_hint: 0,
+    });
+
+    let (rendered_page, page_start_offset, next_page_offset) = render_cached_page(
+        fs,
+        display,
+        cache_paths.content.as_str(),
+        page_index,
+        saved,
+        &mut should_cancel,
+    )?;
+
+    let progress_percent =
+        compute_progress_percent(page_start_offset, meta.content_length, meta.build_complete);
+
+    write_cached_progress(
+        fs,
+        cache_paths.progress.as_str(),
+        ProgressState {
+            current_byte_offset: page_start_offset,
+            current_page_hint: u32::try_from(rendered_page).unwrap_or(u32::MAX),
+        },
+    )?;
+
+    // best-effort page index update
+    let _ = write_page_index_record(
+        fs,
+        cache_paths.pages.as_str(),
+        rendered_page,
+        page_start_offset,
+    );
+    let _ = write_page_index_record(
+        fs,
+        cache_paths.pages.as_str(),
+        rendered_page + 1,
+        next_page_offset,
+    );
 
     Ok(EpubRenderResult {
         rendered_page,
@@ -322,95 +267,143 @@ where
     })
 }
 
+fn compute_progress_percent(current_offset: u64, content_length: u64, build_complete: bool) -> u8 {
+    if content_length == 0 {
+        return 0;
+    }
+    let raw = ((current_offset.saturating_mul(100)) / content_length).clamp(0, 100);
+    let pct = u8::try_from(raw).unwrap_or(100);
+    if build_complete {
+        pct.max(1)
+    } else {
+        pct.min(99)
+    }
+}
+
+fn render_cached_page<SD, C>(
+    fs: &SD,
+    display: &mut Framebuffer,
+    content_path: &str,
+    target_page: usize,
+    saved: ProgressState,
+    should_cancel: &mut C,
+) -> Result<(usize, u64, u64), EpubError>
+where
+    SD: SdFilesystem,
+    C: FnMut() -> bool,
+{
+    let (mut page, mut offset) = if target_page >= saved.current_page_hint as usize {
+        (saved.current_page_hint as usize, saved.current_byte_offset)
+    } else {
+        (0usize, 0u64)
+    };
+
+    loop {
+        let mut file = fs
+            .open_cache_file_read(content_path)
+            .map_err(|_| EpubError::Io)?;
+        file.seek_from_start(0).map_err(|_| EpubError::Io)?;
+        let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
+            file.read(buffer).map_err(|_| EpubError::Io)
+        };
+        let rendered = display.render_cached_text_page_from_offset_with_progress(
+            &mut read_text,
+            usize::try_from(offset).map_err(|_| EpubError::OutOfSpace)?,
+            &mut *should_cancel,
+        )?;
+
+        let next =
+            u64::try_from(rendered.next_page_start_byte).map_err(|_| EpubError::OutOfSpace)?;
+        if page >= target_page || next <= offset {
+            return Ok((page, offset, next));
+        }
+
+        page = page.saturating_add(1);
+        offset = next;
+    }
+}
+
+struct BuildResult {
+    content_length: usize,
+    complete: bool,
+    next_chapter_index: u16,
+}
+
+fn build_content_cache<SD>(
+    fs: &SD,
+    display: &mut Framebuffer,
+    source: SD::EpubSource<'_>,
+    _source_size: u32,
+    paths: &CachePaths,
+    page_index: usize,
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<BuildResult, EpubError>
+where
+    SD: SdFilesystem,
+{
+    fs.ensure_directory(paths.directory.as_str())
+        .map_err(|_| EpubError::Io)?;
+    let mut content = fs
+        .open_cache_file_write(paths.content.as_str())
+        .map_err(|_| EpubError::Io)?;
+    let mut content_buffer = CacheWriteBuffer::new();
+
+    let mut on_text_chunk = |chunk: &str| -> Result<(), EpubError> {
+        if !chunk.is_empty() {
+            content_buffer.push(&mut content, chunk.as_bytes())?;
+        }
+        Ok(())
+    };
+
+    let build = display.build_epub_cache_prefix_with_text_sink_and_cancel(
+        source,
+        page_index,
+        &mut on_text_chunk,
+        should_cancel,
+    )?;
+
+    content_buffer.flush(&mut content)?;
+    content.flush().map_err(|_| EpubError::Io)?;
+
+    Ok(BuildResult {
+        content_length: content_buffer.total_written(),
+        complete: build.complete,
+        next_chapter_index: build.next_spine_index,
+    })
+}
+
 fn read_cache_meta_if_valid<SD: SdFilesystem>(
     fs: &SD,
     paths: &CachePaths,
     source_size: u32,
-) -> Option<CacheMeta> {
-    let meta = read_cache_meta(fs, paths.meta.as_str()).ok()?;
+) -> Result<CacheMeta, EpubError> {
+    let meta = read_cache_meta(fs, paths.meta.as_str())?;
     if meta.version != CACHE_VERSION || meta.source_size != source_size {
-        return None;
+        return Err(EpubError::InvalidFormat);
+    }
+    if meta.layout_sig_version != LAYOUT_SIG_VERSION
+        || meta.layout_sig_width != DISPLAY_WIDTH
+        || meta.layout_sig_height != DISPLAY_HEIGHT
+        || meta.layout_sig_content_height != reader_content_height()
+        || meta.layout_sig_font != LAYOUT_SIG_FONT
+        || meta.layout_sig_paginator != LAYOUT_SIG_PAGINATOR
+    {
+        return Err(EpubError::InvalidFormat);
     }
 
-    let content = fs.open_cache_file_read(paths.content.as_str()).ok()?;
-    if content.len() != meta.content_length as usize {
-        return None;
+    let content = fs
+        .open_cache_file_read(paths.content.as_str())
+        .map_err(|_| EpubError::Io)?;
+    if content.len() as u64 != meta.content_length {
+        return Err(EpubError::InvalidFormat);
     }
-    Some(meta)
-}
-
-#[derive(Debug, Clone)]
-struct CacheProbe {
-    start_progress: Option<SavedProgress>,
-    selection: CacheSelection,
-    work_paths: Option<CachePaths>,
-}
-
-#[derive(Debug, Clone)]
-enum CacheSelection {
-    Hit { paths: CachePaths, meta: CacheMeta },
-    Resume { paths: CachePaths, meta: CacheMeta },
-    Miss { paths: Option<CachePaths> },
-}
-
-fn resolve_cache_state<SD: SdFilesystem>(
-    fs: &SD,
-    paths: &CachePaths,
-    source_size: u32,
-    page_index: Option<usize>,
-) -> CacheProbe {
-    if page_index.is_none() {
-        let start_page = read_cache_meta_if_valid(fs, paths, source_size)
-            .and_then(|_| read_cached_progress(fs, paths));
-        return CacheProbe {
-            start_progress,
-            selection: CacheSelection::Miss { paths: None },
-            work_paths: None,
-        };
-    }
-
-    let selection = if let Some(meta) = read_cache_meta_if_valid(fs, paths, source_size) {
-        let cached_pages = usize::try_from(meta.cached_pages).ok();
-        match (page_index, cached_pages) {
-            (Some(page_index), Some(cached_pages)) if meta.complete || page_index < cached_pages => {
-                CacheSelection::Hit {
-                    paths: paths.clone(),
-                    meta,
-                }
-            }
-            (Some(_), Some(_)) if !meta.complete => CacheSelection::Resume {
-                paths: paths.clone(),
-                meta,
-            },
-            _ => CacheSelection::Miss {
-                paths: Some(paths.clone()),
-            },
-        }
-    } else {
-        CacheSelection::Miss {
-            paths: Some(paths.clone()),
-        }
-    };
-
-    let work_paths = match &selection {
-        CacheSelection::Hit { paths, .. } | CacheSelection::Resume { paths, .. } => {
-            Some(paths.clone())
-        }
-        CacheSelection::Miss { paths } => paths.clone(),
-    };
-
-    CacheProbe {
-        start_progress: None,
-        selection,
-        work_paths,
-    }
+    Ok(meta)
 }
 
 fn read_cache_meta<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<CacheMeta, EpubError> {
     let mut file = fs.open_cache_file_read(path).map_err(|_| EpubError::Io)?;
-    let mut raw = [0u8; 256];
+    let mut raw = [0u8; 384];
     let mut total = 0usize;
-
     loop {
         if total >= raw.len() {
             return Err(EpubError::OutOfSpace);
@@ -426,14 +419,8 @@ fn read_cache_meta<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<CacheMeta, E
         .ok_or(EpubError::InvalidFormat)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SavedProgress {
-    byte_offset: usize,
-    page_hint: usize,
-}
-
-fn read_cached_progress<SD: SdFilesystem>(fs: &SD, paths: &CachePaths) -> Option<SavedProgress> {
-    let mut file = fs.open_cache_file_read(paths.progress.as_str()).ok()?;
+fn read_cached_progress<SD: SdFilesystem>(fs: &SD, path: &str) -> Option<ProgressState> {
+    let mut file = fs.open_cache_file_read(path).ok()?;
     let mut raw = [0u8; 12];
     let mut total = 0usize;
     while total < raw.len() {
@@ -443,41 +430,75 @@ fn read_cached_progress<SD: SdFilesystem>(fs: &SD, paths: &CachePaths) -> Option
         }
         total += n;
     }
-    if total >= 12 {
-        let byte_offset = usize::try_from(u64::from_le_bytes([
-            raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-        ]))
-        .ok()?;
-        let page_hint = usize::try_from(u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]])).ok()?;
-        return Some(SavedProgress {
-            byte_offset,
-            page_hint,
-        });
-    }
-    if total < 4 {
-        return None;
-    }
-    let page_hint = usize::try_from(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])).ok()?;
-    Some(SavedProgress {
-        byte_offset: 0,
-        page_hint,
-    })
+    decode_progress(&raw[..total])
 }
 
 fn write_cached_progress<SD: SdFilesystem>(
     fs: &SD,
     path: &str,
-    byte_offset: usize,
-    page_hint: usize,
-    progress_percent: u8,
+    progress: ProgressState,
 ) -> Result<(), EpubError> {
-    let byte_offset = u64::try_from(byte_offset).map_err(|_| EpubError::OutOfSpace)?;
-    let page_hint = u32::try_from(page_hint).map_err(|_| EpubError::OutOfSpace)?;
-    let mut raw = [0u8; 12];
-    raw[..8].copy_from_slice(&byte_offset.to_le_bytes());
-    raw[8..12].copy_from_slice(&page_hint.to_le_bytes());
-    let _ = progress_percent;
-    write_bytes(fs, path, &raw)
+    write_bytes(fs, path, &encode_progress(progress))
+}
+
+fn write_meta<SD: SdFilesystem>(fs: &SD, path: &str, meta: &CacheMeta) -> Result<(), EpubError> {
+    let serialized = serialize_meta(meta);
+    write_bytes(fs, path, serialized.as_bytes())
+}
+
+fn write_offset_record<SD: SdFilesystem>(
+    fs: &SD,
+    path: &str,
+    offset: u64,
+    truncate: bool,
+) -> Result<(), EpubError> {
+    let mut file = if truncate {
+        fs.open_cache_file_write(path)
+    } else {
+        fs.open_cache_file_append(path)
+    }
+    .map_err(|_| EpubError::Io)?;
+    let raw = encode_offset(offset);
+    let mut written = 0usize;
+    while written < raw.len() {
+        let count = file.write(&raw[written..]).map_err(|_| EpubError::Io)?;
+        if count == 0 {
+            return Err(EpubError::Io);
+        }
+        written += count;
+    }
+    file.flush().map_err(|_| EpubError::Io)?;
+    Ok(())
+}
+
+fn write_page_index_record<SD: SdFilesystem>(
+    fs: &SD,
+    path: &str,
+    page: usize,
+    offset: u64,
+) -> Result<(), EpubError> {
+    let mut file = match fs.open_cache_file_read(path) {
+        Ok(file) => {
+            let existing_records = file.len() / 8;
+            if page < existing_records {
+                return Ok(());
+            }
+            fs.open_cache_file_append(path).map_err(|_| EpubError::Io)?
+        }
+        Err(_) => fs.open_cache_file_write(path).map_err(|_| EpubError::Io)?,
+    };
+
+    let raw = encode_offset(offset);
+    let mut written = 0usize;
+    while written < raw.len() {
+        let count = file.write(&raw[written..]).map_err(|_| EpubError::Io)?;
+        if count == 0 {
+            return Err(EpubError::Io);
+        }
+        written += count;
+    }
+    file.flush().map_err(|_| EpubError::Io)?;
+    Ok(())
 }
 
 fn write_bytes<SD: SdFilesystem>(fs: &SD, path: &str, data: &[u8]) -> Result<(), EpubError> {
@@ -492,134 +513,4 @@ fn write_bytes<SD: SdFilesystem>(fs: &SD, path: &str, data: &[u8]) -> Result<(),
     }
     file.flush().map_err(|_| EpubError::Io)?;
     Ok(())
-}
-
-fn write_meta<SD: SdFilesystem>(
-    fs: &SD,
-    paths: &CachePaths,
-    source_size: u32,
-    content_length: usize,
-    build: CacheBuildResult,
-) -> Result<(), EpubError> {
-    let meta = CacheMeta {
-        version: CACHE_VERSION,
-        source_size,
-        content_length: u32::try_from(content_length).map_err(|_| EpubError::OutOfSpace)?,
-        cached_pages: u32::try_from(build.cached_pages).map_err(|_| EpubError::OutOfSpace)?,
-        cached_progress_percent: build.cached_progress_percent,
-        next_spine_index: build.next_spine_index,
-        resume_page: u32::try_from(build.resume_page).map_err(|_| EpubError::OutOfSpace)?,
-        resume_cursor_y: build.resume_cursor_y,
-        complete: build.complete,
-    };
-    let serialized = serialize_meta(&meta, source_size);
-    write_bytes(fs, paths.meta.as_str(), serialized.as_bytes())
-}
-
-fn read_epub_source_to_cache_and_render<SD>(
-    fs: &SD,
-    display: &mut Framebuffer,
-    source: SD::EpubSource<'_>,
-    source_size: u32,
-    _source_path: &str,
-    paths: &CachePaths,
-    page_index: usize,
-    should_cancel: &mut impl FnMut() -> bool,
-) -> Result<CacheBuildResult, EpubError>
-where
-    SD: SdFilesystem,
-{
-    logln!(
-        "EPUB cache write start: directory={} content={}",
-        paths.directory.as_str(),
-        paths.content.as_str()
-    );
-    if let Err(_err) = fs.ensure_directory(paths.directory.as_str()) {
-        logln!(
-            "EPUB cache ensure_directory failed: {} -> {:?}",
-            paths.directory.as_str(),
-            _err
-        );
-    }
-    let mut content = match fs.open_cache_file_write(paths.content.as_str()) {
-        Ok(file) => {
-            logln!("EPUB cache content open ok: {}", paths.content.as_str());
-            Some(file)
-        }
-        Err(_err) => {
-            logln!(
-                "EPUB cache content open failed: {} -> {:?}",
-                paths.content.as_str(),
-                _err
-            );
-            None
-        }
-    };
-    let mut content_buffer = CacheWriteBuffer::new();
-
-    let mut on_text_chunk = |chunk: &str| -> Result<(), EpubError> {
-        if let Some(file) = content.as_mut() {
-            if !chunk.is_empty() {
-                content_buffer.push(file, chunk.as_bytes())?;
-            }
-        }
-        Ok(())
-    };
-
-    let build = display.build_epub_cache_prefix_with_text_sink_and_cancel(
-        source,
-        page_index,
-        &mut on_text_chunk,
-        should_cancel,
-    )?;
-
-    if let Some(mut file) = content {
-        content_buffer.flush(&mut file)?;
-        let _ = file.flush();
-        let content_length = content_buffer.total_written();
-        if write_meta(fs, paths, source_size, content_length, build).is_ok() {
-            logln!(
-                "EPUB parsed and cached: {} -> bytes={} content_len={} cached_pages={} next_spine_index={} complete={}",
-                source_path,
-                source_size,
-                content_length,
-                build.cached_pages,
-                build.next_spine_index,
-                build.complete
-            );
-        } else {
-            logln!(
-                "EPUB cache meta write failed: {} content_len={}",
-                paths.meta.as_str(),
-                content_length
-            );
-        }
-    }
-
-    Ok(build)
-}
-
-fn percent_from_pages(rendered_page: usize, total_pages: u32) -> u8 {
-    if total_pages == 0 {
-        return 0;
-    }
-    let progress = ((rendered_page.saturating_add(1)) * 100) / usize::try_from(total_pages).unwrap_or(1);
-    progress.clamp(1, 100) as u8
-}
-
-fn percent_from_cached_prefix_pages(
-    rendered_page: usize,
-    cached_pages: u32,
-    cached_progress_percent: u8,
-) -> u8 {
-    let total_pages = usize::try_from(cached_pages).unwrap_or(0);
-    if total_pages == 0 {
-        return 0;
-    }
-    let page_progress = rendered_page
-        .saturating_add(1)
-        .min(total_pages)
-        .saturating_mul(usize::from(cached_progress_percent))
-        / total_pages.max(1);
-    page_progress.clamp(1, usize::from(cached_progress_percent).max(1)) as u8
 }

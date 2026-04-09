@@ -30,7 +30,11 @@ impl SessionUi {
             }
 
             let mut line = String::<96>::new();
-            let _ = line.push(if selected_index == Some(index) { '>' } else { ' ' });
+            let _ = line.push(if selected_index == Some(index) {
+                '>'
+            } else {
+                ' '
+            });
             let _ = line.push(' ');
             let _ = line.push_str(match entry.kind {
                 EntryKind::Directory => "[D] ",
@@ -133,7 +137,10 @@ mod tests {
     fn render_browser_draws_selection_marker_and_entry_label() {
         let ui = SessionUi::new();
         let mut renderer = RecordingRenderer::default();
-        let entries = [ListedEntry::directory("Books"), ListedEntry::epub("book.epub")];
+        let entries = [
+            ListedEntry::directory("Books"),
+            ListedEntry::epub("book.epub"),
+        ];
 
         ui.render_browser(&mut renderer, "/", &entries, Some(1));
 
@@ -141,14 +148,18 @@ mod tests {
             renderer.clears,
             heapless::Vec::<u8, 4>::from_slice(&[0xFF]).unwrap()
         );
-        assert!(renderer
-            .texts
-            .iter()
-            .any(|(_, _, text)| text.as_str().contains("[D] Books")));
-        assert!(renderer
-            .texts
-            .iter()
-            .any(|(_, _, text)| text.as_str().contains("> [E] book.epub")));
+        assert!(
+            renderer
+                .texts
+                .iter()
+                .any(|(_, _, text)| text.as_str().contains("[D] Books"))
+        );
+        assert!(
+            renderer
+                .texts
+                .iter()
+                .any(|(_, _, text)| text.as_str().contains("> [E] book.epub"))
+        );
     }
 
     #[test]
@@ -159,9 +170,11 @@ mod tests {
         ui.render_reader_progress(&mut renderer, 42);
 
         assert_eq!(renderer.fills.len(), 1);
-        assert!(renderer
-            .texts
-            .iter()
-            .any(|(_, _, text)| text.as_str() == "42%"));
+        assert!(
+            renderer
+                .texts
+                .iter()
+                .any(|(_, _, text)| text.as_str() == "42%")
+        );
     }
 }
