@@ -16,6 +16,27 @@ fn draw_text_uses_bookerly_glyphs_and_changes_expected_pixels() {
 }
 
 #[test]
+fn grayscale_text_render_uses_intermediate_shades() {
+    let mut framebuffer = Framebuffer::new();
+
+    framebuffer.draw_text(4, 4, "Aa");
+
+    let mut seen = [false; 4];
+    for y in 0..40 {
+        for x in 0..40 {
+            seen[usize::from(framebuffer.shade_at(x, y))] = true;
+        }
+    }
+
+    assert!(seen[0], "background should remain white");
+    assert!(seen[3], "glyph should include solid black coverage");
+    assert!(
+        seen[1] || seen[2],
+        "glyph rendering should preserve intermediate antialiasing shades"
+    );
+}
+
+#[test]
 fn wrapped_text_advances_to_multiple_lines_when_width_is_tight() {
     let mut framebuffer = Framebuffer::new();
     let start_y = 4;

@@ -464,16 +464,10 @@ impl Framebuffer {
     }
 
     fn draw_glyph(&mut self, glyph: &Glyph, x: i32, y: i32) {
-        let bitmap = &bookerly::BOOKERLY.bitmap
-            [glyph.data_offset as usize..(glyph.data_offset + glyph.data_length) as usize];
-        let row_bytes = usize::from(glyph.width).div_ceil(8);
-
         for row in 0..glyph.height {
-            let row_start = usize::from(row) * row_bytes;
             for col in 0..glyph.width {
-                let byte = bitmap[row_start + usize::from(col / 8)];
-                let mask = 1 << (7 - (col % 8));
-                if byte & mask == 0 {
+                let coverage = bookerly::BOOKERLY.glyph_coverage(glyph, col, row);
+                if coverage == 0 {
                     continue;
                 }
 
@@ -487,7 +481,8 @@ impl Framebuffer {
                     continue;
                 }
 
-                self.set_pixel(px as u16, py as u16, true);
+                let current = self.shade_at(px as u16, py as u16);
+                self.set_shade(px as u16, py as u16, current.max(coverage));
             }
         }
     }
