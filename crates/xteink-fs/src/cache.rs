@@ -2,7 +2,7 @@ use core::fmt::Write;
 
 use heapless::String;
 
-pub const CACHE_VERSION: u8 = 1;
+pub const CACHE_VERSION: u8 = 3;
 pub const META_FILE_NAME: &str = "meta.txt";
 pub const CONTENT_FILE_NAME: &str = "content.txt";
 pub const PROGRESS_FILE_NAME: &str = "progress.bin";
@@ -18,6 +18,11 @@ pub struct CacheMeta {
     pub version: u8,
     pub source_size: u32,
     pub content_length: u32,
+    pub cached_pages: u32,
+    pub next_spine_index: u16,
+    pub resume_page: u32,
+    pub resume_cursor_y: u16,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,8 +145,16 @@ pub fn serialize_meta(meta: &CacheMeta, source_size: u32) -> String<256> {
     let mut output = String::<256>::new();
     let _ = write!(
         &mut output,
-        "version={}\nsource_size={}\ncontent_length={}\nsource_len={}\n",
-        meta.version, meta.source_size, meta.content_length, source_size
+        "version={}\nsource_size={}\ncontent_length={}\ncached_pages={}\nnext_spine_index={}\nresume_page={}\nresume_cursor_y={}\ncomplete={}\nsource_len={}\n",
+        meta.version,
+        meta.source_size,
+        meta.content_length,
+        meta.cached_pages,
+        meta.next_spine_index,
+        meta.resume_page,
+        meta.resume_cursor_y,
+        if meta.complete { 1 } else { 0 },
+        source_size
     );
     output
 }
@@ -151,8 +164,13 @@ pub fn parse_meta(raw: &str) -> Option<CacheMeta> {
         version: 0,
         source_size: 0,
         content_length: 0,
+        cached_pages: 0,
+        next_spine_index: 0,
+        resume_page: 0,
+        resume_cursor_y: 0,
+        complete: false,
     };
-    let mut seen = [false; 3];
+    let mut seen = [false; 8];
 
     for line in raw.split('\n') {
         if let Some(value) = line.strip_prefix("version=") {
@@ -170,9 +188,38 @@ pub fn parse_meta(raw: &str) -> Option<CacheMeta> {
             seen[2] = true;
             continue;
         }
+        if let Some(value) = line.strip_prefix("cached_pages=") {
+            parsed.cached_pages = value.parse::<u32>().ok()?;
+            seen[3] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("next_spine_index=") {
+            parsed.next_spine_index = value.parse::<u16>().ok()?;
+            seen[4] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("resume_page=") {
+            parsed.resume_page = value.parse::<u32>().ok()?;
+            seen[5] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("resume_cursor_y=") {
+            parsed.resume_cursor_y = value.parse::<u16>().ok()?;
+            seen[6] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("complete=") {
+            parsed.complete = match value {
+                "0" => false,
+                "1" => true,
+                _ => return None,
+            };
+            seen[7] = true;
+            continue;
+        }
     }
 
-    if !seen[0] || !seen[1] || !seen[2] {
+    if !seen.iter().all(|seen| *seen) {
         return None;
     }
     if parsed.version != CACHE_VERSION {
@@ -240,6 +287,11 @@ mod tests {
             version: CACHE_VERSION,
             source_size: 12345,
             content_length: 4096,
+            cached_pages: 3,
+            next_spine_index: 7,
+            resume_page: 2,
+            resume_cursor_y: 412,
+            complete: false,
         };
         let raw = serialize_meta(&meta, 12345);
         let parsed = parse_meta(raw.as_str()).expect("meta should parse");
@@ -249,13 +301,18 @@ mod tests {
                 version: CACHE_VERSION,
                 source_size: 12345,
                 content_length: 4096,
+                cached_pages: 3,
+                next_spine_index: 7,
+                resume_page: 2,
+                resume_cursor_y: 412,
+                complete: false,
             }
         );
     }
 
     #[test]
     fn parse_meta_rejects_invalid_version() {
-        let raw = "version=2\nsource_size=1\ncontent_length=2\n";
+        let raw = "version=2\nsource_size=1\ncontent_length=2\ncached_pages=1\nnext_spine_index=0\nresume_page=0\nresume_cursor_y=0\ncomplete=1\n";
         assert!(parse_meta(raw).is_none());
     }
 }

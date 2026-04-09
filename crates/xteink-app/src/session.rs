@@ -130,7 +130,7 @@ where
     }
 
     pub fn bootstrap(&mut self) -> Result<BrowserRefresh, S::Error> {
-        self.load_directory(0, 0, BrowserRefresh::Full)
+        self.load_directory(0, 0, BrowserRefresh::Fast)
     }
 
     pub fn handle_button(&mut self, button: Button) -> Result<Option<BrowserRefresh>, S::Error> {
@@ -177,7 +177,7 @@ where
                     &listed,
                 )?;
                 self.controller.apply_epub_opened(rendered);
-                Ok(Some(BrowserRefresh::Full))
+                Ok(Some(BrowserRefresh::Fast))
             }
             ControllerCommand::RenderReaderPage {
                 entry,

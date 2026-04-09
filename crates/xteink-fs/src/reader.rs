@@ -1,6 +1,6 @@
 use xteink_epub::EpubError;
 use xteink_epub::EpubSource;
-use xteink_render::Framebuffer;
+use xteink_render::{CacheBuildResult, Framebuffer};
 
 use crate::{
     cache::{
@@ -210,7 +210,7 @@ where
 
     let mut cache_paths_for_work: Option<CachePaths> = None;
     let rendered_page = if let Some((paths, meta)) =
-        select_valid_cache(fs, &cache_paths, source_size)
+        select_valid_cache(fs, &cache_paths, source_size, page_index)
     {
         cache_paths_for_work = Some(paths);
         logln!(
@@ -232,6 +232,31 @@ where
         };
         display.render_cached_text_page_with_cancel(
             &mut read_text,
+            page_index,
+            &mut should_cancel,
+        )?
+    } else if let Some((paths, meta)) = select_resume_cache(fs, &cache_paths, source_size, page_index)
+    {
+        cache_paths_for_work = Some(paths.clone());
+        logln!(
+            "EPUB partial cache rebuild: {} v{} cached_pages={} next_spine_index={} resume_page={} resume_cursor_y={}",
+            source_path.as_str(),
+            meta.version,
+            meta.cached_pages,
+            meta.next_spine_index,
+            meta.resume_page,
+            meta.resume_cursor_y
+        );
+        let source = fs
+            .open_epub_source(source_path.as_str())
+            .map_err(|_| EpubError::Io)?;
+        read_epub_source_to_cache_and_render(
+            fs,
+            display,
+            source,
+            source_size,
+            source_path.as_str(),
+            &paths,
             page_index,
             &mut should_cancel,
         )?
@@ -312,9 +337,32 @@ fn select_valid_cache<SD: SdFilesystem>(
     fs: &SD,
     candidates: &[CachePaths; 2],
     source_size: u32,
+    page_index: usize,
 ) -> Option<(CachePaths, CacheMeta)> {
     for paths in candidates.iter() {
         if let Some(meta) = read_cache_meta_if_valid(fs, paths, source_size) {
+            let cached_pages = usize::try_from(meta.cached_pages).ok()?;
+            if !meta.complete && page_index >= cached_pages {
+                continue;
+            }
+            return Some((paths.clone(), meta));
+        }
+    }
+    None
+}
+
+fn select_resume_cache<SD: SdFilesystem>(
+    fs: &SD,
+    candidates: &[CachePaths; 2],
+    source_size: u32,
+    page_index: usize,
+) -> Option<(CachePaths, CacheMeta)> {
+    for paths in candidates.iter() {
+        if let Some(meta) = read_cache_meta_if_valid(fs, paths, source_size) {
+            let cached_pages = usize::try_from(meta.cached_pages).ok()?;
+            if meta.complete || page_index < cached_pages {
+                continue;
+            }
             return Some((paths.clone(), meta));
         }
     }
@@ -410,11 +458,17 @@ fn write_meta<SD: SdFilesystem>(
     paths: &CachePaths,
     source_size: u32,
     content_length: usize,
+    build: CacheBuildResult,
 ) -> Result<(), EpubError> {
     let meta = CacheMeta {
         version: CACHE_VERSION,
         source_size,
         content_length: u32::try_from(content_length).map_err(|_| EpubError::OutOfSpace)?,
+        cached_pages: u32::try_from(build.cached_pages).map_err(|_| EpubError::OutOfSpace)?,
+        next_spine_index: build.next_spine_index,
+        resume_page: u32::try_from(build.resume_page).map_err(|_| EpubError::OutOfSpace)?,
+        resume_cursor_y: build.resume_cursor_y,
+        complete: build.complete,
     };
     let serialized = serialize_meta(&meta, source_size);
     write_bytes(fs, paths.meta.as_str(), serialized.as_bytes())
@@ -470,11 +524,10 @@ where
         Ok(())
     };
 
-    let rendered_page = display.render_epub_page_with_text_sink_and_cancel(
+    let build = display.build_epub_cache_prefix_with_text_sink_and_cancel(
         source,
         page_index,
         &mut on_text_chunk,
-        true,
         should_cancel,
     )?;
 
@@ -482,12 +535,15 @@ where
         content_buffer.flush(&mut file)?;
         let _ = file.flush();
         let content_length = content_buffer.total_written();
-        if write_meta(fs, paths, source_size, content_length).is_ok() {
+        if write_meta(fs, paths, source_size, content_length, build).is_ok() {
             logln!(
-                "EPUB parsed and cached: {} -> bytes={} content_len={}",
+                "EPUB parsed and cached: {} -> bytes={} content_len={} cached_pages={} next_spine_index={} complete={}",
                 source_path,
                 source_size,
-                content_length
+                content_length,
+                build.cached_pages,
+                build.next_spine_index,
+                build.complete
             );
         } else {
             logln!(
@@ -498,5 +554,5 @@ where
         }
     }
 
-    Ok(rendered_page)
+    Ok(build.rendered_page)
 }

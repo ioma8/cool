@@ -166,6 +166,7 @@ pub trait SdFilesystem {
     fn open_epub_source<'a>(&'a self, path: &str) -> Result<Self::EpubSource<'a>, FsError>;
     fn open_cache_file_read<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError>;
     fn open_cache_file_write<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError>;
+    fn open_cache_file_append<'a>(&'a self, path: &str) -> Result<Self::File<'a>, FsError>;
     fn ensure_directory(&self, path: &str) -> Result<(), FsError>;
 }
 
@@ -407,6 +408,10 @@ where
 
     fn open_cache_file_write<'b>(&'b self, path: &str) -> Result<Self::File<'b>, FsError> {
         self.open_file_at_path_with_mode(path, Mode::ReadWriteCreateOrTruncate)
+    }
+
+    fn open_cache_file_append<'b>(&'b self, path: &str) -> Result<Self::File<'b>, FsError> {
+        self.open_file_at_path_with_mode(path, Mode::ReadWriteCreateOrAppend)
     }
 
     fn ensure_directory(&self, path: &str) -> Result<(), FsError> {

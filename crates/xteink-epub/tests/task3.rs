@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use miniz_oxide::{DataFormat, inflate::stream::InflateState};
 use xteink_epub::{
@@ -93,7 +94,7 @@ impl Scratch {
 
 impl Default for Scratch {
     fn default() -> Self {
-        Self::new(16384, 32768, 4096, 32768, 2048, 1024)
+        Self::new(16 * 1024, 48 * 1024, 2048, 32 * 1024, 8192, 256)
     }
 }
 
@@ -157,6 +158,21 @@ fn collect_events(data: Vec<u8>, scratch: &mut Scratch) -> Result<Vec<OwnedEvent
         }
     }
 
+    Ok(out)
+}
+
+fn collect_events_from_epub(
+    epub: &mut Epub<MemorySource>,
+    scratch: &mut Scratch,
+) -> Result<Vec<OwnedEvent>, EpubError> {
+    let mut out = Vec::new();
+    loop {
+        let event = epub.next_event(scratch.buffers())?;
+        match event {
+            Some(event) => out.push(to_owned_event(event)),
+            None => break,
+        }
+    }
     Ok(out)
 }
 
@@ -552,4 +568,44 @@ fn every_epub_fixture_matches_reference_text_1024_prefix() {
             "fixture {name} did not match reference text 1024-char prefix"
         );
     }
+}
+
+#[test]
+fn resume_from_spine_index_allows_continued_parsing() {
+    let data = load_fixture("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let mut resumed = Epub::open(MemorySource::new(data)).expect("fixture should reopen");
+    let mut resume_scratch = Scratch::default();
+    resumed
+        .resume_from_spine_index(resume_scratch.buffers(), 1)
+        .expect("resume should prepare parser at a later spine entry");
+    let actual = collect_events_from_epub(&mut resumed, &mut resume_scratch)
+        .expect("resumed parse should succeed");
+
+    assert!(!actual.is_empty(), "resume should still yield events");
+}
+
+#[test]
+fn prints_large_fixture_parse_baselines() {
+    let data =
+        load_fixture("Happiness Trap Pocketbook, The - Russ Harris.epub");
+
+    let started = Instant::now();
+    let mut first_page_scratch = Scratch::default();
+    let prefix = collect_readable_prefix(data.clone(), &mut first_page_scratch, 1024)
+        .expect("first-page prefix parse should succeed");
+    let first_page_elapsed = started.elapsed();
+
+    let started = Instant::now();
+    let mut full_scratch = Scratch::default();
+    let events = collect_events(data, &mut full_scratch).expect("full parse should succeed");
+    let full_parse_elapsed = started.elapsed();
+
+    println!(
+        "large fixture baselines: first_prefix={:?} full_parse={:?} events={}",
+        first_page_elapsed,
+        full_parse_elapsed,
+        events.len()
+    );
+    assert!(!prefix.is_empty());
+    assert!(!events.is_empty());
 }

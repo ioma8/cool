@@ -1,19 +1,28 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 pub mod bookerly;
 mod epub;
-mod pagination;
+mod paginator;
 mod text;
 
 use bookerly::Glyph;
-pub use epub::EPUB_RENDER_WORKSPACE_BYTES;
-use pagination::{CachedPaginationState, CachedTextRenderer};
-use text::{WrappedLine, measure_text_width};
+pub use epub::{CacheBuildResult, EPUB_RENDER_WORKSPACE_BYTES};
+use paginator::{
+    NoopPaginationObserver, PaginationConfig, PaginationEvent, PaginationRenderer, PaginatorState,
+};
+use text::{WrappedLine, layout_wrapped_text_page};
 
 const PHYSICAL_WIDTH: u16 = 800;
 const PHYSICAL_HEIGHT: u16 = 480;
 const CACHED_TEXT_CHUNK: usize = 1024;
 const CACHED_LINE_LEN: usize = 1024;
+pub(crate) const CACHE_LINE_BREAK_MARKER: char = '\u{001E}';
+pub(crate) const CACHE_PARAGRAPH_BREAK_MARKER: char = '\u{001F}';
+pub(crate) const CACHE_PAGE_BREAK_MARKER: char = '\u{001D}';
+pub(crate) const CACHE_LAYOUT_STREAM_MARKER: char = '\u{001C}';
 pub const DISPLAY_WIDTH_BYTES: u16 = PHYSICAL_WIDTH / 8;
 pub const BUFFER_SIZE: usize = (DISPLAY_WIDTH_BYTES as usize) * (PHYSICAL_HEIGHT as usize);
 
@@ -74,48 +83,42 @@ impl Framebuffer {
     }
 
     pub fn draw_wrapped_text(&mut self, x: u16, y: u16, text: &str, max_y: u16) -> u16 {
+        self.layout_wrapped_text_internal(x, y, text, max_y, true)
+    }
+
+    fn layout_wrapped_text_internal(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        max_y: u16,
+        draw: bool,
+    ) -> u16 {
         const LINE_BUF_LEN: usize = 512;
-
-        let mut cursor_y = y;
-        let line_height = bookerly::BOOKERLY.line_height_px();
-        let available_width = i32::from(DISPLAY_WIDTH.saturating_sub(x));
         let mut line = WrappedLine::<LINE_BUF_LEN>::new();
-
-        for paragraph in text.split('\n') {
-            for word in paragraph.split_whitespace() {
-                let word_width = measure_text_width(word);
-                let word_fits = if line.is_empty() {
-                    word_width <= available_width
-                } else {
-                    line.width + measure_text_width(" ") + word_width <= available_width
-                };
-
-                if !word_fits && !line.is_empty() {
-                    if cursor_y.saturating_add(line_height) > max_y {
-                        return cursor_y;
-                    }
-                    self.draw_text(x, cursor_y, line.as_str());
-                    cursor_y = cursor_y.saturating_add(line_height);
-                    line.clear();
-                }
-
-                if !line.is_empty() {
-                    line.push_space();
-                }
-                line.push_str(word);
+        let result = layout_wrapped_text_page(&mut line, x, y, text, max_y, |draw_x, draw_y, line_text| {
+            if draw {
+                self.draw_text(draw_x, draw_y, line_text);
             }
+        });
+        result.next_y
+    }
 
-            if !line.is_empty() {
-                if cursor_y.saturating_add(line_height) > max_y {
-                    return cursor_y;
-                }
-                self.draw_text(x, cursor_y, line.as_str());
-                cursor_y = cursor_y.saturating_add(line_height);
-                line.clear();
+    pub(crate) fn layout_wrapped_text_page_result(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        max_y: u16,
+        draw: bool,
+    ) -> text::WrappedTextLayoutResult {
+        const LINE_BUF_LEN: usize = 512;
+        let mut line = WrappedLine::<LINE_BUF_LEN>::new();
+        layout_wrapped_text_page(&mut line, x, y, text, max_y, |draw_x, draw_y, line_text| {
+            if draw {
+                self.draw_text(draw_x, draw_y, line_text);
             }
-        }
-
-        cursor_y
+        })
     }
 
     pub fn render_cached_text_page<R>(
@@ -139,12 +142,17 @@ impl Framebuffer {
         R: FnMut(&mut [u8]) -> Result<usize, xteink_epub::EpubError>,
         C: FnMut() -> bool,
     {
-        let mut cursor_y = 0u16;
-        let mut current_page = 0usize;
-        let line_height = bookerly::BOOKERLY.line_height_px();
-        let mut state = CachedPaginationState::<CACHED_LINE_LEN>::new();
+        let mut state = PaginatorState::<CACHED_LINE_LEN>::new(PaginationConfig {
+            target_page,
+            draw_target_page: true,
+            stop_after_target_page: true,
+            preserve_target_page_framebuffer: false,
+            start_page: 0,
+            start_cursor_y: 0,
+        });
         let mut read_buffer = [0u8; CACHED_TEXT_CHUNK];
-        let mut done = false;
+        let mut utf8_carry = [0u8; 4];
+        let mut utf8_carry_len = 0usize;
 
         self.clear(0xFF);
 
@@ -157,52 +165,62 @@ impl Framebuffer {
                 break;
             }
 
-            let mut source = &read_buffer[..read_len];
-            while !source.is_empty() && !done {
+            let mut chunk = [0u8; CACHED_TEXT_CHUNK + 4];
+            chunk[..utf8_carry_len].copy_from_slice(&utf8_carry[..utf8_carry_len]);
+            chunk[utf8_carry_len..utf8_carry_len + read_len].copy_from_slice(&read_buffer[..read_len]);
+            let mut source = &chunk[..utf8_carry_len + read_len];
+            utf8_carry_len = 0;
+
+            while !source.is_empty() {
                 match core::str::from_utf8(source) {
                     Ok(text) => {
-                        state.cursor_y = cursor_y;
-                        state.current_page = current_page;
-                        done = pagination::render_cached_text_snippet(
-                            self,
-                            &mut state,
-                            target_page,
-                            line_height,
-                            text,
-                        )?;
-                        cursor_y = state.cursor_y;
-                        current_page = state.current_page;
+                        if replay_cached_events(self, &mut state, target_page, text)? {
+                            return Ok(state.current_page());
+                        }
                         source = &[];
                     }
                     Err(err) => {
                         let valid = err.valid_up_to();
                         if valid > 0 {
-                            state.cursor_y = cursor_y;
-                            state.current_page = current_page;
-                            done = pagination::render_cached_text_snippet(
-                                self,
-                                &mut state,
-                                target_page,
-                                line_height,
-                                core::str::from_utf8(&source[..valid]).unwrap_or(""),
-                            )?;
-                            cursor_y = state.cursor_y;
-                            current_page = state.current_page;
+                            let text = core::str::from_utf8(&source[..valid]).unwrap_or("");
+                            if replay_cached_events(self, &mut state, target_page, text)? {
+                                return Ok(state.current_page());
+                            }
                         }
                         if err.error_len().is_none() {
+                            utf8_carry_len = source.len().min(utf8_carry.len());
+                            utf8_carry[..utf8_carry_len].copy_from_slice(&source[..utf8_carry_len]);
                             break;
                         }
                         source = &source[valid.saturating_add(err.error_len().unwrap_or(0))..];
                     }
                 }
             }
+        }
 
-            if done {
-                break;
+        if utf8_carry_len > 0 {
+            let text = core::str::from_utf8(&utf8_carry[..utf8_carry_len]).unwrap_or("");
+            if replay_cached_events(self, &mut state, target_page, text)? {
+                return Ok(state.current_page());
             }
         }
 
-        Ok(current_page)
+        let mut observer = NoopPaginationObserver;
+        let _ = state.feed(
+            self,
+            &mut observer,
+            PaginationConfig {
+                target_page,
+                draw_target_page: true,
+                stop_after_target_page: true,
+                preserve_target_page_framebuffer: false,
+                start_page: 0,
+                start_cursor_y: 0,
+            },
+            PaginationEvent::End,
+        );
+
+        Ok(state.current_page())
     }
 
     fn draw_glyph(&mut self, glyph: &Glyph, x: i32, y: i32) {
@@ -235,21 +253,77 @@ impl Framebuffer {
     }
 }
 
-impl CachedTextRenderer for Framebuffer {
+fn replay_cached_events(
+    framebuffer: &mut Framebuffer,
+    state: &mut PaginatorState<CACHED_LINE_LEN>,
+    target_page: usize,
+    text: &str,
+) -> Result<bool, xteink_epub::EpubError> {
+    let mut observer = NoopPaginationObserver;
+    let config = PaginationConfig {
+        target_page,
+        draw_target_page: true,
+        stop_after_target_page: true,
+        preserve_target_page_framebuffer: false,
+        start_page: 0,
+        start_cursor_y: 0,
+    };
+
+    for ch in text.chars() {
+        let progress = match ch {
+            CACHE_LAYOUT_STREAM_MARKER => {
+                state.feed(framebuffer, &mut observer, config, PaginationEvent::EnableExplicitBreaks)?
+            }
+            CACHE_PAGE_BREAK_MARKER => {
+                state.feed(framebuffer, &mut observer, config, PaginationEvent::ExplicitPageBreak)?
+            }
+            CACHE_LINE_BREAK_MARKER | '\n' => {
+                state.feed(framebuffer, &mut observer, config, PaginationEvent::LineBreak)?
+            }
+            CACHE_PARAGRAPH_BREAK_MARKER => {
+                state.feed(framebuffer, &mut observer, config, PaginationEvent::ParagraphBreak)?
+            }
+            _ => {
+                let mut encoded = [0u8; 4];
+                state.feed(
+                    framebuffer,
+                    &mut observer,
+                    config,
+                    PaginationEvent::Text(ch.encode_utf8(&mut encoded)),
+                )?
+            }
+        };
+        if progress.target_complete {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+impl PaginationRenderer for Framebuffer {
     fn clear_to_white(&mut self) {
         self.clear(0xFF);
     }
 
-    fn draw_text(&mut self, x: u16, y: u16, text: &str) {
-        self.draw_text(x, y, text);
+    fn draw_wrapped_text_block(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        max_y: u16,
+    ) -> text::WrappedTextLayoutResult {
+        self.layout_wrapped_text_page_result(x, y, text, max_y, true)
     }
 
-    fn measure_text_width(&self, text: &str) -> i32 {
-        measure_text_width(text)
-    }
-
-    fn display_width(&self) -> u16 {
-        DISPLAY_WIDTH
+    fn measure_wrapped_text_block(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        max_y: u16,
+    ) -> text::WrappedTextLayoutResult {
+        self.layout_wrapped_text_page_result(x, y, text, max_y, false)
     }
 
     fn display_height(&self) -> u16 {
@@ -260,5 +334,88 @@ impl CachedTextRenderer for Framebuffer {
 impl Default for Framebuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::{WrappedLine, layout_wrapped_text_page};
+    use std::borrow::ToOwned;
+    use std::string::String;
+
+    #[test]
+    fn wrapped_text_page_result_preserves_unconsumed_tail() {
+        let mut framebuffer = Framebuffer::new();
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu "
+            .repeat(200);
+
+        let first = framebuffer.layout_wrapped_text_page_result(0, 0, &text, DISPLAY_HEIGHT, false);
+        assert!(first.consumed > 0);
+        assert!(first.consumed < text.len());
+
+        let second = framebuffer.layout_wrapped_text_page_result(
+            0,
+            0,
+            &text[first.consumed..],
+            DISPLAY_HEIGHT,
+            false,
+        );
+        assert!(second.consumed > 0);
+    }
+
+    #[test]
+    fn cached_render_does_not_drop_long_plain_text_runs() {
+        let text = "word ".repeat(2000);
+        let target_page = 1usize;
+
+        let mut direct = Framebuffer::new();
+        let first = direct.layout_wrapped_text_page_result(0, 0, &text, DISPLAY_HEIGHT, false);
+        assert!(first.consumed > 0);
+        let remaining = &text[first.consumed..];
+        direct.clear(0xFF);
+        let _ = direct.layout_wrapped_text_page_result(0, 0, remaining, DISPLAY_HEIGHT, true);
+
+        let bytes = text.into_bytes();
+        let mut cached = Framebuffer::new();
+        let mut offset = 0usize;
+        let cached_result = cached.render_cached_text_page(
+            &mut |buffer| {
+                if offset >= bytes.len() {
+                    return Ok(0);
+                }
+                let end = (offset + buffer.len()).min(bytes.len());
+                let chunk = &bytes[offset..end];
+                buffer[..chunk.len()].copy_from_slice(chunk);
+                offset = end;
+                Ok(chunk.len())
+            },
+            target_page,
+        );
+        assert_eq!(cached_result.expect("cached render should succeed"), target_page);
+        assert_eq!(cached.bytes(), direct.bytes());
+    }
+
+    #[test]
+    fn wrapped_text_does_not_consume_undrawn_line_when_page_is_full() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau";
+        let mut line = WrappedLine::<512>::new();
+        let mut drawn = std::vec::Vec::<String>::new();
+        let result = layout_wrapped_text_page(
+            &mut line,
+            0,
+            0,
+            text,
+            bookerly::BOOKERLY.line_height_px(),
+            |_, _, line_text| drawn.push(line_text.to_owned()),
+        );
+
+        assert_eq!(drawn.len(), 1, "test should fill exactly one drawn line");
+        assert!(result.consumed < text.len(), "test should leave text for next page");
+        assert_eq!(
+            text[..result.consumed].trim_end(),
+            drawn[0].trim_end(),
+            "consumed text must match what was actually drawn on the page"
+        );
     }
 }

@@ -17,6 +17,7 @@ pub const MAX_ARCHIVE_ENTRIES: usize = 512;
 pub const MAX_ARCHIVE_NAME_CAPACITY: usize = 16 * 1024;
 const CHAPTER_TAIL_RESERVE: usize = 1024;
 const SPINE_RECORD_METADATA_BYTES: usize = 14;
+const MANIFEST_RECORD_BYTES: usize = 18;
 
 #[cfg(target_arch = "riscv32")]
 macro_rules! epub_diagln {
@@ -278,16 +279,16 @@ impl<S: EpubSource> Epub<S> {
         }
 
         if !self.state.catalog_ready {
-            let (catalog, inflate, zip_cd, path_buf, archive) = unsafe {
+            let (catalog, inflate, zip_cd, xml, archive) = unsafe {
                 (
                     &mut *catalog_ptr,
                     &mut *inflate_ptr,
                     &mut *zip_cd_ptr,
-                    &mut *path_buf_ptr,
+                    &mut *xml_ptr,
                     &mut *archive_ptr,
                 )
             };
-            self.prepare_catalog(catalog, inflate, zip_cd, path_buf, archive)?;
+            self.prepare_catalog(catalog, inflate, zip_cd, xml, archive)?;
             self.state.catalog_ready = true;
         }
 
@@ -342,13 +343,16 @@ impl<S: EpubSource> Epub<S> {
             let chapter = unsafe {
                 core::slice::from_raw_parts((*inflate_ptr).as_ptr(), self.state.chapter_len)
             };
-            let dir_len = self.state.chapter_dir_len;
-            let mut chapter_dir = [0u8; MAX_CHAPTER_DIR_BYTES];
-            chapter_dir[..dir_len].copy_from_slice(&self.state.chapter_dir[..dir_len]);
+            let chapter_dir = unsafe {
+                core::slice::from_raw_parts(
+                    self.state.chapter_dir.as_ptr(),
+                    self.state.chapter_dir_len,
+                )
+            };
 
             let cursor_before = self.state.cursor;
             if let Some(event) =
-                parse_next_xhtml_event(chapter, &mut self.state, &chapter_dir[..dir_len], unsafe {
+                parse_next_xhtml_event(chapter, &mut self.state, chapter_dir, unsafe {
                     &mut *xml_ptr
                 })?
             {
@@ -378,12 +382,54 @@ impl<S: EpubSource> Epub<S> {
         }
     }
 
+    pub fn is_at_resume_boundary(&self) -> bool {
+        self.state.catalog_ready && !self.state.chapter_loaded && !self.state.done
+    }
+
+    pub fn next_spine_index(&self) -> u16 {
+        self.state.spine_index
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.state.done || self.state.spine_index >= self.state.spine_count
+    }
+
+    pub fn resume_from_spine_index<'a>(
+        &'a mut self,
+        workspace: ReaderBuffers<'a>,
+        spine_index: u16,
+    ) -> Result<(), EpubError> {
+        let scratch = ReaderScratch::new(workspace);
+        let inflate_ptr = scratch.inflate_ptr();
+        let xml_ptr = scratch.xml_ptr();
+        let catalog_ptr = scratch.catalog_ptr();
+        let zip_cd_ptr = scratch.zip_cd_ptr();
+        let archive_ptr = scratch.archive_ptr();
+
+        if !self.state.catalog_ready {
+            let (catalog, inflate, zip_cd, xml, archive) = unsafe {
+                (
+                    &mut *catalog_ptr,
+                    &mut *inflate_ptr,
+                    &mut *zip_cd_ptr,
+                    &mut *xml_ptr,
+                    &mut *archive_ptr,
+                )
+            };
+            self.prepare_catalog(catalog, inflate, zip_cd, xml, archive)?;
+            self.state.catalog_ready = true;
+        }
+
+        let catalog = unsafe { &mut *catalog_ptr };
+        self.seek_to_spine_index(catalog, spine_index)
+    }
+
     fn prepare_catalog(
         &mut self,
         catalog: &mut [u8],
         inflate: &mut [u8],
         zip_cd: &mut [u8],
-        _path_buf: &mut [u8],
+        manifest_scratch: &mut [u8],
         archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
     ) -> Result<(), EpubError> {
         archive.parse(&self.source)?;
@@ -411,9 +457,40 @@ impl<S: EpubSource> Epub<S> {
             .ok_or(EpubError::InvalidFormat)?;
         let opf = read_entry(&self.source, &opf_entry, inflate, zip_cd)?;
 
-        let count = parse_opf(opf, &opf_path[..opf_path_len], catalog, &self.source, zip_cd, archive)?;
+        let count = parse_opf(
+            opf,
+            &opf_path[..opf_path_len],
+            catalog,
+            manifest_scratch,
+            &self.source,
+            zip_cd,
+            archive,
+        )?;
         self.state.spine_count = count;
         self.state.spine_cursor = 2;
+        Ok(())
+    }
+
+    fn seek_to_spine_index(&mut self, catalog: &[u8], spine_index: u16) -> Result<(), EpubError> {
+        if spine_index > self.state.spine_count {
+            return Err(EpubError::InvalidFormat);
+        }
+        let mut cursor = 2usize;
+        for _ in 0..spine_index {
+            let (_, _, _, next_cursor) = read_spine_entry_at(catalog, cursor)?;
+            cursor = next_cursor;
+        }
+        self.state.spine_index = spine_index;
+        self.state.spine_cursor = cursor;
+        self.state.chapter_loaded = false;
+        self.state.chapter_finished = false;
+        self.state.chapter_entry = None;
+        self.state.chapter_len = 0;
+        self.state.cursor = 0;
+        self.state.input_len = 0;
+        self.state.input_cursor = 0;
+        self.state.compressed_read = 0;
+        self.state.done = spine_index >= self.state.spine_count;
         Ok(())
     }
 
@@ -695,6 +772,7 @@ fn parse_opf<S: EpubSource>(
     opf: &[u8],
     opf_path: &[u8],
     catalog: &mut [u8],
+    manifest_scratch: &mut [u8],
     source: &S,
     zip_cd: &mut [u8],
     archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
@@ -709,6 +787,7 @@ fn parse_opf<S: EpubSource>(
     let mut write = 2usize;
     let mut count: u16 = 0;
     let opf_base = path_parent(opf_path);
+    let mut manifest_index = ManifestIndex::new(manifest_scratch)?;
 
     let mut cursor = 0usize;
     while cursor < opf.len() {
@@ -717,12 +796,21 @@ fn parse_opf<S: EpubSource>(
             continue;
         }
         if let Some(tag) = parse_xml_tag(opf, &mut cursor)? {
+            if !tag.is_end && tag.name_is("item") {
+                if let (Some(id), Some(href)) = (tag.attr(b"id"), tag.attr(b"href")) {
+                    let media = tag.attr(b"media-type").unwrap_or(b"");
+                    manifest_index.insert(opf, id, href, media)?;
+                }
+                continue;
+            }
             if !tag.is_end && tag.name_is("itemref") {
                 if matches!(tag.attr(b"linear"), Some(value) if value == b"no") {
                     continue;
                 }
                 let idref = tag.attr(b"idref").ok_or(EpubError::InvalidFormat)?;
-                let item = manifest_item_for_id(opf, idref)?;
+                let item = manifest_index
+                    .find(opf, idref)?
+                    .ok_or(EpubError::InvalidFormat)?;
                 let media_type = &opf[item.media_start..item.media_end];
                 if !attr_eq(media_type, b"application/xhtml+xml") {
                     continue;
@@ -798,45 +886,192 @@ fn read_spine_record_metadata(data: &[u8]) -> Result<SpineRecordMetadata, EpubEr
     })
 }
 
-fn manifest_item_for_id(opf: &[u8], idref: &[u8]) -> Result<ManifestItem, EpubError> {
-    let opf_start = opf.as_ptr() as usize;
-    let mut cursor = 0usize;
-    while cursor < opf.len() {
-        if opf[cursor] != b'<' {
-            cursor += 1;
-            continue;
+struct ManifestIndex<'a> {
+    slots: &'a mut [u8],
+    records: &'a mut [u8],
+    record_count: usize,
+}
+
+impl<'a> ManifestIndex<'a> {
+    fn new(scratch: &'a mut [u8]) -> Result<Self, EpubError> {
+        let slot_count = (scratch.len() / 8).clamp(16, 1024).next_power_of_two();
+        let slot_bytes = slot_count.checked_mul(2).ok_or(EpubError::OutOfSpace)?;
+        if scratch.len() <= slot_bytes + MANIFEST_RECORD_BYTES {
+            epub_diagln!(
+                "EPUB out_of_space=manifest_index_scratch scratch_cap={} slot_bytes={}",
+                scratch.len(),
+                slot_bytes
+            );
+            return Err(EpubError::OutOfSpace);
         }
-        if let Some(tag) = parse_xml_tag(opf, &mut cursor)? {
-            if !tag.is_end && tag.name_is("item") {
-                if let Some(id) = tag.attr(b"id") {
-                    if attr_eq(id, idref) {
-                        let media = tag.attr(b"media-type").unwrap_or(b"");
-                        let href = tag.attr(b"href").ok_or(EpubError::InvalidFormat)?;
-                        let href_start = href.as_ptr() as usize - opf_start;
-                        let media_start = if media.is_empty() {
-                            href_start
-                        } else {
-                            media.as_ptr() as usize - opf_start
-                        };
-                        return Ok(ManifestItem {
-                            href_len: u16::try_from(href.len()).map_err(|_| {
-                                epub_diagln!(
-                                    "EPUB out_of_space=href_len href_len={} idref_len={}",
-                                    href.len(),
-                                    idref.len()
-                                );
-                                EpubError::OutOfSpace
-                            })?,
-                            href_start,
-                            media_start,
-                            media_end: media_start + media.len(),
-                        });
-                    }
-                }
+        let (slots, records) = scratch.split_at_mut(slot_bytes);
+        slots.fill(0);
+        records.fill(0);
+        Ok(Self {
+            slots,
+            records,
+            record_count: 0,
+        })
+    }
+
+    fn slot_count(&self) -> usize {
+        self.slots.len() / 2
+    }
+
+    fn record_capacity(&self) -> usize {
+        self.records.len() / MANIFEST_RECORD_BYTES
+    }
+
+    fn insert(
+        &mut self,
+        opf: &[u8],
+        id: &[u8],
+        href: &[u8],
+        media: &[u8],
+    ) -> Result<(), EpubError> {
+        if self.record_count >= self.record_capacity() {
+            epub_diagln!(
+                "EPUB out_of_space=manifest_record_capacity record_count={} record_capacity={}",
+                self.record_count,
+                self.record_capacity()
+            );
+            return Err(EpubError::OutOfSpace);
+        }
+        let Some(id_start) = slice_offset(opf, id) else {
+            return Err(EpubError::InvalidFormat);
+        };
+        let Some(href_start) = slice_offset(opf, href) else {
+            return Err(EpubError::InvalidFormat);
+        };
+        let media_start = if media.is_empty() {
+            href_start
+        } else {
+            slice_offset(opf, media).ok_or(EpubError::InvalidFormat)?
+        };
+        let record = ManifestItem {
+            href_len: u16::try_from(href.len()).map_err(|_| {
+                epub_diagln!(
+                    "EPUB out_of_space=href_len href_len={} id_len={}",
+                    href.len(),
+                    id.len()
+                );
+                EpubError::OutOfSpace
+            })?,
+            href_start,
+            media_start,
+            media_end: media_start + media.len(),
+        };
+        let offset = self.record_count
+            .checked_mul(MANIFEST_RECORD_BYTES)
+            .ok_or(EpubError::OutOfSpace)?;
+        let target = &mut self.records[offset..offset + MANIFEST_RECORD_BYTES];
+        target.fill(0);
+        target[0..4].copy_from_slice(
+            &u32::try_from(id_start)
+                .map_err(|_| EpubError::InvalidFormat)?
+                .to_le_bytes(),
+        );
+        target[4..6].copy_from_slice(
+            &u16::try_from(id.len())
+                .map_err(|_| EpubError::OutOfSpace)?
+                .to_le_bytes(),
+        );
+        target[6..10].copy_from_slice(
+            &u32::try_from(record.href_start)
+                .map_err(|_| EpubError::InvalidFormat)?
+                .to_le_bytes(),
+        );
+        target[10..12].copy_from_slice(&record.href_len.to_le_bytes());
+        target[12..16].copy_from_slice(
+            &u32::try_from(record.media_start)
+                .map_err(|_| EpubError::InvalidFormat)?
+                .to_le_bytes(),
+        );
+        target[16..18].copy_from_slice(
+            &u16::try_from(media.len())
+                .map_err(|_| EpubError::OutOfSpace)?
+                .to_le_bytes(),
+        );
+
+        let slot_mask = self.slot_count() - 1;
+        let mut slot = (hash_bytes(id) as usize) & slot_mask;
+        loop {
+            let slot_offset = slot * 2;
+            let existing = u16::from_le_bytes([self.slots[slot_offset], self.slots[slot_offset + 1]]);
+            if existing == 0 {
+                let value =
+                    u16::try_from(self.record_count + 1).map_err(|_| EpubError::OutOfSpace)?;
+                self.slots[slot_offset..slot_offset + 2].copy_from_slice(&value.to_le_bytes());
+                self.record_count += 1;
+                return Ok(());
             }
+            slot = (slot + 1) & slot_mask;
         }
     }
-    Err(EpubError::InvalidFormat)
+
+    fn find(&self, opf: &[u8], idref: &[u8]) -> Result<Option<ManifestItem>, EpubError> {
+        let slot_mask = self.slot_count() - 1;
+        let mut slot = (hash_bytes(idref) as usize) & slot_mask;
+        loop {
+            let slot_offset = slot * 2;
+            let record_index =
+                u16::from_le_bytes([self.slots[slot_offset], self.slots[slot_offset + 1]]);
+            if record_index == 0 {
+                return Ok(None);
+            }
+            let record_offset = usize::from(record_index - 1)
+                .checked_mul(MANIFEST_RECORD_BYTES)
+                .ok_or(EpubError::InvalidFormat)?;
+            if usize::from(record_index) > self.record_count
+                || record_offset + MANIFEST_RECORD_BYTES > self.records.len()
+            {
+                return Err(EpubError::InvalidFormat);
+            }
+            let record = &self.records[record_offset..record_offset + MANIFEST_RECORD_BYTES];
+            let id_start =
+                usize::try_from(u32::from_le_bytes([record[0], record[1], record[2], record[3]]))
+                    .map_err(|_| EpubError::InvalidFormat)?;
+            let id_len = usize::from(u16::from_le_bytes([record[4], record[5]]));
+            if opf
+                .get(id_start..id_start + id_len)
+                .is_some_and(|candidate| attr_eq(candidate, idref))
+            {
+                let href_start = usize::try_from(u32::from_le_bytes([
+                    record[6], record[7], record[8], record[9],
+                ]))
+                .map_err(|_| EpubError::InvalidFormat)?;
+                let href_len = u16::from_le_bytes([record[10], record[11]]);
+                let media_start = usize::try_from(u32::from_le_bytes([
+                    record[12], record[13], record[14], record[15],
+                ]))
+                .map_err(|_| EpubError::InvalidFormat)?;
+                let media_len = usize::from(u16::from_le_bytes([record[16], record[17]]));
+                return Ok(Some(ManifestItem {
+                    href_len,
+                    href_start,
+                    media_start,
+                    media_end: media_start + media_len,
+                }));
+            }
+            slot = (slot + 1) & slot_mask;
+        }
+    }
+}
+
+fn slice_offset(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    let start = haystack.as_ptr() as usize;
+    let ptr = needle.as_ptr() as usize;
+    let offset = ptr.checked_sub(start)?;
+    (offset + needle.len() <= haystack.len()).then_some(offset)
+}
+
+fn hash_bytes(bytes: &[u8]) -> u32 {
+    let mut hash = 0x811C_9DC5u32;
+    for &byte in bytes {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 fn attr_eq(lhs: &[u8], rhs: &[u8]) -> bool {
@@ -2070,6 +2305,19 @@ mod tests {
     fn runtime_workspace_handles_happiness_trap_pocketbook_fixture() {
         let bytes = std::fs::read(fixture_path("Happiness Trap Pocketbook, The - Russ Harris.epub"))
             .expect("fixture should be readable");
+        run_runtime_workspace_fixture(bytes);
+    }
+
+    #[test]
+    fn runtime_workspace_handles_scout_mindset_fixture() {
+        let bytes = std::fs::read(fixture_path(
+            "The Scout Mindset Why Some People See Things Clearly and Others Dont (Julia Galef) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+        ))
+        .expect("fixture should be readable");
+        run_runtime_workspace_fixture(bytes);
+    }
+
+    fn run_runtime_workspace_fixture(bytes: Vec<u8>) {
         let source = VecSource { bytes };
         let mut epub = Epub::open(source).expect("fixture should open");
         let mut zip_cd = vec![0; 16 * 1024];
