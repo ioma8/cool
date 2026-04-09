@@ -62,6 +62,92 @@ Each book cache directory under `/.cool/<book-id>/` contains:
   - current cache-build checkpoint
   - layout signature fields needed to invalidate stale `pages.idx`
 
+`<book-id>` stays compatible with the existing scheme:
+
+- derive it from the full logical source path plus entry name
+- sanitize to uppercase ASCII alnum/underscore
+- if longer than the component limit, shorten to the existing hashed `Bxxxxxxx` form
+
+This preserves simulator/firmware cache-path compatibility and keeps migration bounded to cache-version changes, not naming changes.
+
+## Text Normalization Rules
+
+`content.txt` stores the same normalized text stream currently emitted by the shared EPUB parser/paginator boundary.
+
+Normalization rules:
+
+- UTF-8 encoding only
+- paragraph text is emitted as plain text bytes
+- line breaks are encoded with a single newline byte `\\n`
+- paragraph breaks are encoded with two newline bytes `\\n\\n`
+- explicit page-break markers are never stored in `content.txt`
+- unsupported tags emit no bytes
+- image alt text is emitted exactly where the shared parser currently emits it
+- no additional whitespace collapsing happens after bytes are written to `content.txt`
+
+Byte offsets in `chapters.idx`, `pages.idx`, and `progress.bin` always refer to byte positions in this normalized UTF-8 stream.
+
+## File Formats
+
+### `content.txt`
+
+- encoding: UTF-8
+- append-only while cache is incomplete
+- final size in bytes is recorded as `content_length` in `meta.txt`
+
+### `chapters.idx`
+
+- binary file
+- little-endian
+- record size: 8 bytes
+- each record:
+  - `u64 chapter_start_byte_offset`
+- append one record when a new chapter begins in `content.txt`
+- atomicity rule: append the chapter offset before appending the chapter’s normalized bytes
+
+### `pages.idx`
+
+- binary file
+- little-endian
+- record size: 8 bytes
+- each record:
+  - `u64 page_start_byte_offset`
+- record `0` is always byte offset `0`
+- append one record when a page boundary is discovered by paginating `content.txt`
+- atomicity rule: only append a page record after the preceding page bytes already exist in `content.txt`
+
+### `progress.bin`
+
+- binary file
+- little-endian
+- fixed size: 16 bytes
+- fields in order:
+  - `u64 current_byte_offset`
+  - `u32 current_page_hint`
+  - `u32 reserved`
+- `current_page_hint` is advisory only
+- `current_byte_offset` is authoritative
+- write rule: replace atomically after a successful page render
+
+### `meta.txt`
+
+- UTF-8 text
+- newline-delimited `key=value`
+- authoritative fields:
+  - `version`
+  - `source_size`
+  - `content_length`
+  - `build_complete`
+  - `next_chapter_index`
+  - `layout_sig_version`
+  - `layout_sig_width`
+  - `layout_sig_height`
+  - `layout_sig_content_height`
+  - `layout_sig_font`
+  - `layout_sig_paginator`
+- write rule:
+  - overwrite only after `content.txt` and any newly appended index records are flushed
+
 ## Reading Model
 
 ### Authoritative Rules
