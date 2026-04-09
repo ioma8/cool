@@ -24,6 +24,7 @@ use xteink_buttons::{
 };
 use xteink_controller::BrowserRefresh;
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display};
+use xteink_browser::EntryKind;
 use xteink_fs::{
     FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
     render_epub_page_from_entry,
@@ -111,27 +112,68 @@ impl<'a, SD> FirmwareStorage<'a, SD> {
     }
 }
 
-fn fs_entry_to_app_entry(entry: &ListedEntry) -> AppListedEntry {
-    let mut label = heapless::String::new();
-    let mut fs_name = heapless::String::new();
-    let _ = label.push_str(entry.label.as_str());
-    let _ = fs_name.push_str(entry.fs_name.as_str());
-    AppListedEntry {
-        label,
-        fs_name,
-        kind: entry.kind,
+trait ListedEntrySource {
+    fn listed_entry_parts(&self) -> (&str, &str, EntryKind);
+}
+
+trait ListedEntryTarget: Sized {
+    fn from_listed_entry_parts(
+        label: heapless::String<96>,
+        fs_name: heapless::String<96>,
+        kind: EntryKind,
+    ) -> Self;
+}
+
+fn clone_listed_entry<T, S>(entry: &S) -> T
+where
+    S: ListedEntrySource,
+    T: ListedEntryTarget,
+{
+    let (label, fs_name, kind) = entry.listed_entry_parts();
+    let mut label_out = heapless::String::new();
+    let mut fs_name_out = heapless::String::new();
+    let _ = label_out.push_str(label);
+    let _ = fs_name_out.push_str(fs_name);
+    T::from_listed_entry_parts(label_out, fs_name_out, kind)
+}
+
+impl ListedEntrySource for ListedEntry {
+    fn listed_entry_parts(&self) -> (&str, &str, EntryKind) {
+        (self.label.as_str(), self.fs_name.as_str(), self.kind)
     }
 }
 
-fn app_entry_to_fs_entry(entry: &AppListedEntry) -> ListedEntry {
-    let mut label = heapless::String::new();
-    let mut fs_name = heapless::String::new();
-    let _ = label.push_str(entry.label.as_str());
-    let _ = fs_name.push_str(entry.fs_name.as_str());
-    ListedEntry {
-        label,
-        fs_name,
-        kind: entry.kind,
+impl ListedEntrySource for AppListedEntry {
+    fn listed_entry_parts(&self) -> (&str, &str, EntryKind) {
+        (self.label.as_str(), self.fs_name.as_str(), self.kind)
+    }
+}
+
+impl ListedEntryTarget for ListedEntry {
+    fn from_listed_entry_parts(
+        label: heapless::String<96>,
+        fs_name: heapless::String<96>,
+        kind: EntryKind,
+    ) -> Self {
+        Self {
+            label,
+            fs_name,
+            kind,
+        }
+    }
+}
+
+impl ListedEntryTarget for AppListedEntry {
+    fn from_listed_entry_parts(
+        label: heapless::String<96>,
+        fs_name: heapless::String<96>,
+        kind: EntryKind,
+    ) -> Self {
+        Self {
+            label,
+            fs_name,
+            kind,
+        }
     }
 }
 
@@ -153,7 +195,7 @@ where
             .list_directory_page(path, page_start, page_size, &mut entries)?;
         let mut app_entries = heapless::Vec::new();
         for entry in entries.iter() {
-            let _ = app_entries.push(fs_entry_to_app_entry(entry));
+            let _ = app_entries.push(clone_listed_entry(entry));
         }
         Ok(xteink_app::DirectoryPage {
             entries: app_entries,
@@ -171,12 +213,7 @@ where
         current_path: &str,
         entry: &AppListedEntry,
     ) -> Result<usize, Self::Error> {
-        let rendered = render_epub_from_entry(
-            self.sd,
-            renderer,
-            current_path,
-            &app_entry_to_fs_entry(entry),
-        )?;
+        let rendered = render_epub_from_entry(self.sd, renderer, current_path, &clone_listed_entry(entry))?;
         Ok(rendered.rendered_page)
     }
 
@@ -191,7 +228,7 @@ where
             self.sd,
             renderer,
             current_path,
-            &app_entry_to_fs_entry(entry),
+            &clone_listed_entry(entry),
             target_page,
             true,
         )?;

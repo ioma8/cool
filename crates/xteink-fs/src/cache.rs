@@ -6,8 +6,7 @@ pub const CACHE_VERSION: u8 = 3;
 pub const META_FILE_NAME: &str = "meta.txt";
 pub const CONTENT_FILE_NAME: &str = "content.txt";
 pub const PROGRESS_FILE_NAME: &str = "progress.bin";
-pub const CACHE_ROOT_DIRS: [&str; 2] = ["/.cool", "/.cool"];
-const PRIMARY_CACHE_ROOT_DIR: &str = CACHE_ROOT_DIRS[0];
+pub const CACHE_ROOT_DIR: &str = "/.cool";
 
 const PATH_CAPACITY: usize = 220;
 const NAME_CAPACITY: usize = 64;
@@ -87,14 +86,7 @@ fn short_cache_name(hash: u32) -> String<NAME_CAPACITY> {
 }
 
 pub fn cache_paths_for_epub(source_path: &str, entry_name: &str) -> CachePaths {
-    cache_paths_for_epub_with_root(source_path, entry_name, PRIMARY_CACHE_ROOT_DIR)
-}
-
-pub fn cache_paths_for_epub_candidates(source_path: &str, entry_name: &str) -> [CachePaths; 2] {
-    [
-        cache_paths_for_epub_with_root(source_path, entry_name, CACHE_ROOT_DIRS[0]),
-        cache_paths_for_epub_with_root(source_path, entry_name, CACHE_ROOT_DIRS[1]),
-    ]
+    cache_paths_for_epub_with_root(source_path, entry_name, CACHE_ROOT_DIR)
 }
 
 fn cache_paths_for_epub_with_root(
@@ -118,20 +110,9 @@ fn cache_paths_for_epub_with_root(
     let _ = directory.push('/');
     let _ = directory.push_str(name.as_str());
 
-    let mut meta = String::<PATH_CAPACITY>::new();
-    let _ = meta.push_str(directory.as_str());
-    let _ = meta.push('/');
-    let _ = meta.push_str(META_FILE_NAME);
-
-    let mut content = String::<PATH_CAPACITY>::new();
-    let _ = content.push_str(directory.as_str());
-    let _ = content.push('/');
-    let _ = content.push_str(CONTENT_FILE_NAME);
-
-    let mut progress = String::<PATH_CAPACITY>::new();
-    let _ = progress.push_str(directory.as_str());
-    let _ = progress.push('/');
-    let _ = progress.push_str(PROGRESS_FILE_NAME);
+    let meta = join_cache_file(directory.as_str(), META_FILE_NAME);
+    let content = join_cache_file(directory.as_str(), CONTENT_FILE_NAME);
+    let progress = join_cache_file(directory.as_str(), PROGRESS_FILE_NAME);
 
     CachePaths {
         directory,
@@ -139,6 +120,14 @@ fn cache_paths_for_epub_with_root(
         content,
         progress,
     }
+}
+
+fn join_cache_file(directory: &str, file_name: &str) -> String<PATH_CAPACITY> {
+    let mut path = String::<PATH_CAPACITY>::new();
+    let _ = path.push_str(directory);
+    let _ = path.push('/');
+    let _ = path.push_str(file_name);
+    path
 }
 
 pub fn serialize_meta(meta: &CacheMeta, source_size: u32) -> String<256> {
@@ -270,15 +259,13 @@ mod tests {
     }
 
     #[test]
-    fn cache_candidates_stay_under_logical_dot_cool_root() {
-        let candidates = cache_paths_for_epub_candidates("/MYBOOKS", "WHEN_I~1.EPU");
+    fn cache_paths_stay_under_logical_dot_cool_root() {
+        let paths = cache_paths_for_epub("/MYBOOKS", "WHEN_I~1.EPU");
 
-        for paths in candidates {
-            assert!(paths.directory.as_str().starts_with("/.cool/"));
-            assert!(paths.meta.as_str().starts_with("/.cool/"));
-            assert!(paths.content.as_str().starts_with("/.cool/"));
-            assert!(paths.progress.as_str().starts_with("/.cool/"));
-        }
+        assert!(paths.directory.as_str().starts_with("/.cool/"));
+        assert!(paths.meta.as_str().starts_with("/.cool/"));
+        assert!(paths.content.as_str().starts_with("/.cool/"));
+        assert!(paths.progress.as_str().starts_with("/.cool/"));
     }
 
     #[test]

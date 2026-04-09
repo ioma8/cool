@@ -14,6 +14,7 @@ use xteink_epub::{EpubError, EpubSource};
 use xteink_sdspi::{SdSpiCard, SdSpiOptions, SpiTransport};
 
 use crate::{hal, path::normalize_path};
+use crate::log::logln;
 
 pub const MAX_ENTRIES: usize = 24;
 const LABEL_CAPACITY: usize = 96;
@@ -189,11 +190,11 @@ where
         let cs = hal::sd_cs_output();
         let power = hal::RawGpioOutput::new(hal::SD_POWER_PIN, true);
         let card = SdSpiCard::new(transport, cs, power, delay, SdSpiOptions::default());
-        let card_type = match card.begin() {
+        let _card_type = match card.begin() {
             Ok(card_type) => card_type,
             Err(err) => return Err(FsError::CardInitFailed(error_string(&err))),
         };
-        esp_println::println!("SD card type: {:?}", card_type);
+        logln!("SD card type: {:?}", _card_type);
         let volume_mgr = VolumeManager::new_with_limits(card, NoopTimeSource, 5000);
         let raw_volume = volume_mgr
             .open_volume(VolumeIdx(0))
@@ -208,12 +209,12 @@ where
     fn open_directory_at_path<'fs>(&'fs self, path: &str) -> Result<RawDirectory, FsError> {
         let path =
             normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
-        esp_println::println!("SD open_directory_at_path start: {}", path.as_str());
+        logln!("SD open_directory_at_path start: {}", path.as_str());
         let mut raw_directory = self
             .volume_mgr
             .open_root_dir(self.raw_volume)
             .map_err(|err| {
-                esp_println::println!(
+                logln!(
                     "SD open_directory_at_path root failed: {} -> {:?}",
                     path,
                     err
@@ -222,14 +223,14 @@ where
             })?;
         for component in path_components(path.as_str()) {
             let fs_component = fs_component_name(component);
-            esp_println::println!("SD open_directory_at_path component: {}", component);
+            logln!("SD open_directory_at_path component: {}", component);
             let current = raw_directory;
             let next = self
                 .volume_mgr
                 .open_dir(current, fs_component)
                 .map_err(|err| {
                     self.close_raw_directory(current);
-                    esp_println::println!(
+                    logln!(
                         "SD open_directory_at_path component failed: {} / {} -> {:?}",
                         path,
                         component,
@@ -240,7 +241,7 @@ where
             self.close_raw_directory(current);
             raw_directory = next;
         }
-        esp_println::println!("SD open_directory_at_path complete: {}", path.as_str());
+        logln!("SD open_directory_at_path complete: {}", path.as_str());
         Ok(raw_directory)
     }
 
@@ -251,9 +252,9 @@ where
     ) -> Result<SdRawFile<'fs, 'bus, SPI, DELAY>, FsError> {
         let path =
             normalize_path(path).map_err(|_| FsError::OpenFailed(error_message("invalid path")))?;
-        esp_println::println!("SD open_file_at_path start: {}", path.as_str());
+        logln!("SD open_file_at_path start: {}", path.as_str());
         let (parent_path, file_name) = split_parent_path(path.as_str())?;
-        esp_println::println!(
+        logln!(
             "SD open_file_at_path split: {} parent={} file={}",
             path.as_str(),
             parent_path,
@@ -265,7 +266,7 @@ where
             .open_file_in_dir(raw_directory, file_name, mode)
             .map_err(|err| {
                 self.close_raw_directory(raw_directory);
-                esp_println::println!(
+                logln!(
                     "SD open_file_at_path open_file_in_dir failed: {} -> {:?}",
                     path.as_str(),
                     err
@@ -273,7 +274,7 @@ where
                 FsError::OpenFailed(error_string(&err))
             })?;
         self.close_raw_directory(raw_directory);
-        esp_println::println!("SD open_file_at_path complete: {}", path.as_str());
+        logln!("SD open_file_at_path complete: {}", path.as_str());
         Ok(file.to_file(&self.volume_mgr))
     }
 
@@ -345,14 +346,14 @@ where
         entries: &mut Vec<ListedEntry, MAX_ENTRIES>,
     ) -> Result<DirectoryPageInfo, FsError> {
         entries.clear();
-        esp_println::println!(
+        logln!(
             "SD list_directory_page start: {} page_start={} page_size={}",
             path,
             page_start,
             page_size
         );
         let raw_directory = self.open_directory_at_path(path)?;
-        esp_println::println!("SD directory opened: {}", path);
+        logln!("SD directory opened: {}", path);
         let directory = raw_directory.to_directory(&self.volume_mgr);
         let mut lfn_storage = [0u8; LFN_CAPACITY];
         let mut lfn_buffer = LfnBuffer::new(&mut lfn_storage);
@@ -361,7 +362,7 @@ where
         let page_size = page_size.min(MAX_ENTRIES).max(1);
         let mut has_next = false;
 
-        esp_println::println!("SD iterating directory: {}", path);
+        logln!("SD iterating directory: {}", path);
         directory
             .iterate_dir_lfn(&mut lfn_buffer, |entry, long_name| {
                 if entry.attributes.is_lfn() {
@@ -384,7 +385,7 @@ where
                 }
             })
             .map_err(|err| FsError::OpenFailed(error_string(&err)))?;
-        esp_println::println!(
+        logln!(
             "SD directory iteration complete: {}{}",
             path,
             if has_next { " (more entries)" } else { "" }

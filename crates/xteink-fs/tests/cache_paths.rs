@@ -1,7 +1,7 @@
 #[path = "../src/cache.rs"]
 mod cache;
 
-use cache::{cache_paths_for_epub, cache_paths_for_epub_candidates, sanitize_cache_name};
+use cache::{cache_paths_for_epub, sanitize_cache_name};
 
 #[test]
 fn cache_paths_use_logical_dot_cool_root() {
@@ -11,18 +11,6 @@ fn cache_paths_use_logical_dot_cool_root() {
     assert!(paths.meta.as_str().starts_with("/.cool/"));
     assert!(paths.content.as_str().starts_with("/.cool/"));
     assert!(paths.progress.as_str().starts_with("/.cool/"));
-}
-
-#[test]
-fn cache_path_candidates_use_dot_cool_root() {
-    let candidates = cache_paths_for_epub_candidates("/MYBOOKS", "WHEN_I~1.EPU");
-
-    for paths in candidates {
-        assert!(paths.directory.as_str().starts_with("/.cool/"));
-        assert!(paths.meta.as_str().starts_with("/.cool/"));
-        assert!(paths.content.as_str().starts_with("/.cool/"));
-        assert!(paths.progress.as_str().starts_with("/.cool/"));
-    }
 }
 
 #[test]

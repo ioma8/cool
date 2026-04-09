@@ -4,8 +4,7 @@ use xteink_render::{CacheBuildResult, Framebuffer};
 
 use crate::{
     cache::{
-        CACHE_VERSION, CacheMeta, CachePaths, cache_paths_for_epub_candidates, parse_meta,
-        serialize_meta,
+        cache_paths_for_epub, parse_meta, serialize_meta, CacheMeta, CachePaths, CACHE_VERSION,
     },
     directory::ListedEntry,
     log::logln,
@@ -111,35 +110,23 @@ where
         entry.kind
     );
     logln!("EPUB render step: building cache candidate paths");
-    let cache_candidates = cache_paths_for_epub_candidates(current_path, entry.fs_name.as_str());
+    let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
     logln!("EPUB render step: built cache candidate paths");
     logln!(
         "EPUB render step: cache candidate lengths {} | {}",
-        cache_candidates[0].progress.len(),
-        cache_candidates[1].progress.len()
+        cache_paths.progress.len(),
+        cache_paths.progress.len()
     );
     logln!(
-        "EPUB cache probe begin: {} | {}",
-        cache_candidates[0].progress.as_str(),
-        cache_candidates[1].progress.as_str()
+        "EPUB cache probe begin: {}",
+        cache_paths.progress.as_str()
     );
-    let start_page = cache_candidates
-        .iter()
-        .find_map(|paths| {
-            logln!("EPUB cache probe read begin: {}", paths.progress.as_str());
-            let result = read_cached_progress(fs, paths);
-            logln!(
-                "EPUB cache probe read end: {} -> {:?}",
-                paths.progress.as_str(),
-                result
-            );
-            result
-        })
-        .unwrap_or(0);
+    let cache_state = resolve_cache_state(fs, &cache_paths, 0, None);
+    let start_page = cache_state.start_page.unwrap_or(0);
     logln!(
         "EPUB render progress: cached_start_page={} cache_root={}",
         start_page,
-        cache_candidates[0].directory.as_str()
+        cache_paths.directory.as_str()
     );
 
     render_epub_page_from_entry_with_cancel(
@@ -190,16 +177,16 @@ where
 {
     let source_path =
         join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
-    let cache_paths = cache_paths_for_epub_candidates(current_path, entry.fs_name.as_str());
+    let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
     let mut should_cancel = should_cancel;
     logln!("EPUB source open begin: {}", source_path.as_str());
 
-    let source_size = u32::try_from(
+    let mut source = Some(
         fs.open_epub_source(source_path.as_str())
-            .map_err(|_| EpubError::Io)?
-            .len(),
-    )
-    .map_err(|_| EpubError::OutOfSpace)?;
+            .map_err(|_| EpubError::Io)?,
+    );
+    let source_size =
+        u32::try_from(source.as_ref().ok_or(EpubError::Io)?.len()).map_err(|_| EpubError::OutOfSpace)?;
     logln!(
         "EPUB source opened: {} bytes={} target_page={} fast_refresh={}",
         source_path.as_str(),
@@ -208,100 +195,93 @@ where
         fast_refresh
     );
 
-    let mut cache_paths_for_work: Option<CachePaths> = None;
-    let rendered_page = if let Some((paths, meta)) =
-        select_valid_cache(fs, &cache_paths, source_size, page_index)
-    {
-        cache_paths_for_work = Some(paths);
-        logln!(
-            "EPUB cache hit: {} v{} source_size={} content_length={}",
-            source_path.as_str(),
-            meta.version,
-            meta.source_size,
-            meta.content_length
-        );
-        let paths = cache_paths_for_work
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| cache_paths[0].clone());
-        let mut content = fs
-            .open_cache_file_read(paths.content.as_str())
-            .map_err(|_| EpubError::Io)?;
-        let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
-            content.read(buffer).map_err(|_| EpubError::Io)
-        };
-        display.render_cached_text_page_with_cancel(
-            &mut read_text,
-            page_index,
-            &mut should_cancel,
-        )?
-    } else if let Some((paths, meta)) = select_resume_cache(fs, &cache_paths, source_size, page_index)
-    {
-        cache_paths_for_work = Some(paths.clone());
-        logln!(
-            "EPUB partial cache rebuild: {} v{} cached_pages={} next_spine_index={} resume_page={} resume_cursor_y={}",
-            source_path.as_str(),
-            meta.version,
-            meta.cached_pages,
-            meta.next_spine_index,
-            meta.resume_page,
-            meta.resume_cursor_y
-        );
-        let source = fs
-            .open_epub_source(source_path.as_str())
-            .map_err(|_| EpubError::Io)?;
-        read_epub_source_to_cache_and_render(
-            fs,
-            display,
-            source,
-            source_size,
-            source_path.as_str(),
-            &paths,
-            page_index,
-            &mut should_cancel,
-        )?
-    } else {
-        logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
-        let source = fs
-            .open_epub_source(source_path.as_str())
-            .map_err(|_| EpubError::Io)?;
-        let chosen = choose_cache_root(fs, &cache_paths).or_else(|| cache_paths.first().cloned());
-        if let Some(chosen) = chosen {
-            cache_paths_for_work = Some(chosen);
+    let cache_state = resolve_cache_state(fs, &cache_paths, source_size, Some(page_index));
+    let mut cache_paths_for_work = cache_state.work_paths;
+    let rendered_page = match cache_state.selection {
+        CacheSelection::Hit { paths, meta: _meta } => {
+            cache_paths_for_work = Some(paths.clone());
+            logln!(
+                "EPUB cache hit: {} v{} source_size={} content_length={}",
+                source_path.as_str(),
+                _meta.version,
+                _meta.source_size,
+                _meta.content_length
+            );
+            let mut content = fs
+                .open_cache_file_read(paths.content.as_str())
+                .map_err(|_| EpubError::Io)?;
+            let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
+                content.read(buffer).map_err(|_| EpubError::Io)
+            };
+            display.render_cached_text_page_with_cancel(
+                &mut read_text,
+                page_index,
+                &mut should_cancel,
+            )?
         }
-        let cache_paths_for_render = cache_paths_for_work
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| cache_paths[0].clone());
-        logln!(
-            "EPUB parse start: source={} cache_dir={}",
-            source_path.as_str(),
-            cache_paths_for_render.directory.as_str()
-        );
-        let rendered_page = read_epub_source_to_cache_and_render(
-            fs,
-            display,
-            source,
-            source_size,
-            source_path.as_str(),
-            &cache_paths_for_render,
-            page_index,
-            &mut should_cancel,
-        )?;
-        logln!(
-            "EPUB parse complete: source={} rendered_page={}",
-            source_path.as_str(),
+        CacheSelection::Resume { paths, meta: _meta } => {
+            cache_paths_for_work = Some(paths.clone());
+            logln!(
+                "EPUB partial cache rebuild: {} v{} cached_pages={} next_spine_index={} resume_page={} resume_cursor_y={}",
+                source_path.as_str(),
+                _meta.version,
+                _meta.cached_pages,
+                _meta.next_spine_index,
+                _meta.resume_page,
+                _meta.resume_cursor_y
+            );
+            let source = source.take().ok_or(EpubError::Io)?;
+            read_epub_source_to_cache_and_render(
+                fs,
+                display,
+                source,
+                source_size,
+                source_path.as_str(),
+                &paths,
+                page_index,
+                &mut should_cancel,
+            )?
+        }
+        CacheSelection::Miss { paths } => {
+            logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
+            let source = source.take().ok_or(EpubError::Io)?;
+            if let Some(paths) = paths {
+                cache_paths_for_work = Some(paths);
+            }
+            let cache_paths_for_render = cache_paths_for_work
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| cache_paths.clone());
+            logln!(
+                "EPUB parse start: source={} cache_dir={}",
+                source_path.as_str(),
+                cache_paths_for_render.directory.as_str()
+            );
+            let rendered_page = read_epub_source_to_cache_and_render(
+                fs,
+                display,
+                source,
+                source_size,
+                source_path.as_str(),
+                &cache_paths_for_render,
+                page_index,
+                &mut should_cancel,
+            )?;
+            logln!(
+                "EPUB parse complete: source={} rendered_page={}",
+                source_path.as_str(),
+                rendered_page
+            );
             rendered_page
-        );
-        rendered_page
+        }
     };
 
     if let Some(paths) = cache_paths_for_work {
-        if let Err(err) = write_cached_progress(fs, paths.progress.as_str(), rendered_page) {
+        if let Err(_err) = write_cached_progress(fs, paths.progress.as_str(), rendered_page) {
             logln!(
                 "EPUB progress write failed: {} -> {:?}",
                 paths.progress.as_str(),
-                err
+                _err
             );
         }
     }
@@ -333,50 +313,69 @@ fn read_cache_meta_if_valid<SD: SdFilesystem>(
     Some(meta)
 }
 
-fn select_valid_cache<SD: SdFilesystem>(
-    fs: &SD,
-    candidates: &[CachePaths; 2],
-    source_size: u32,
-    page_index: usize,
-) -> Option<(CachePaths, CacheMeta)> {
-    for paths in candidates.iter() {
-        if let Some(meta) = read_cache_meta_if_valid(fs, paths, source_size) {
-            let cached_pages = usize::try_from(meta.cached_pages).ok()?;
-            if !meta.complete && page_index >= cached_pages {
-                continue;
-            }
-            return Some((paths.clone(), meta));
-        }
-    }
-    None
+#[derive(Debug, Clone)]
+struct CacheProbe {
+    start_page: Option<usize>,
+    selection: CacheSelection,
+    work_paths: Option<CachePaths>,
 }
 
-fn select_resume_cache<SD: SdFilesystem>(
-    fs: &SD,
-    candidates: &[CachePaths; 2],
-    source_size: u32,
-    page_index: usize,
-) -> Option<(CachePaths, CacheMeta)> {
-    for paths in candidates.iter() {
-        if let Some(meta) = read_cache_meta_if_valid(fs, paths, source_size) {
-            let cached_pages = usize::try_from(meta.cached_pages).ok()?;
-            if meta.complete || page_index < cached_pages {
-                continue;
-            }
-            return Some((paths.clone(), meta));
-        }
-    }
-    None
+#[derive(Debug, Clone)]
+enum CacheSelection {
+    Hit { paths: CachePaths, meta: CacheMeta },
+    Resume { paths: CachePaths, meta: CacheMeta },
+    Miss { paths: Option<CachePaths> },
 }
 
-fn choose_cache_root<SD: SdFilesystem>(
+fn resolve_cache_state<SD: SdFilesystem>(
     fs: &SD,
-    candidates: &[CachePaths; 2],
-) -> Option<CachePaths> {
-    candidates
-        .iter()
-        .find(|paths| fs.ensure_directory(paths.directory.as_str()).is_ok())
-        .cloned()
+    paths: &CachePaths,
+    source_size: u32,
+    page_index: Option<usize>,
+) -> CacheProbe {
+    if page_index.is_none() {
+        return CacheProbe {
+            start_page: read_cached_progress(fs, paths),
+            selection: CacheSelection::Miss { paths: None },
+            work_paths: None,
+        };
+    }
+
+    let selection = if let Some(meta) = read_cache_meta_if_valid(fs, paths, source_size) {
+        let cached_pages = usize::try_from(meta.cached_pages).ok();
+        match (page_index, cached_pages) {
+            (Some(page_index), Some(cached_pages)) if meta.complete || page_index < cached_pages => {
+                CacheSelection::Hit {
+                    paths: paths.clone(),
+                    meta,
+                }
+            }
+            (Some(_), Some(_)) if !meta.complete => CacheSelection::Resume {
+                paths: paths.clone(),
+                meta,
+            },
+            _ => CacheSelection::Miss {
+                paths: Some(paths.clone()),
+            },
+        }
+    } else {
+        CacheSelection::Miss {
+            paths: Some(paths.clone()),
+        }
+    };
+
+    let work_paths = match &selection {
+        CacheSelection::Hit { paths, .. } | CacheSelection::Resume { paths, .. } => {
+            Some(paths.clone())
+        }
+        CacheSelection::Miss { paths } => paths.clone(),
+    };
+
+    CacheProbe {
+        start_page: None,
+        selection,
+        work_paths,
+    }
 }
 
 fn read_cache_meta<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<CacheMeta, EpubError> {
@@ -479,7 +478,7 @@ fn read_epub_source_to_cache_and_render<SD>(
     display: &mut Framebuffer,
     source: SD::EpubSource<'_>,
     source_size: u32,
-    source_path: &str,
+    _source_path: &str,
     paths: &CachePaths,
     page_index: usize,
     should_cancel: &mut impl FnMut() -> bool,
@@ -492,11 +491,11 @@ where
         paths.directory.as_str(),
         paths.content.as_str()
     );
-    if let Err(err) = fs.ensure_directory(paths.directory.as_str()) {
+    if let Err(_err) = fs.ensure_directory(paths.directory.as_str()) {
         logln!(
             "EPUB cache ensure_directory failed: {} -> {:?}",
             paths.directory.as_str(),
-            err
+            _err
         );
     }
     let mut content = match fs.open_cache_file_write(paths.content.as_str()) {
@@ -504,11 +503,11 @@ where
             logln!("EPUB cache content open ok: {}", paths.content.as_str());
             Some(file)
         }
-        Err(err) => {
+        Err(_err) => {
             logln!(
                 "EPUB cache content open failed: {} -> {:?}",
                 paths.content.as_str(),
-                err
+                _err
             );
             None
         }

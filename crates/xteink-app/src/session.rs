@@ -1,11 +1,15 @@
+#[path = "session_ui.rs"]
+mod session_ui;
+
 use heapless::{String, Vec};
 use xteink_browser::EntryKind;
 use xteink_buttons::Button;
 use xteink_controller::{
     AppController, BrowserRefresh, ControllerCommand, DirectoryPageInfo as ControllerPageInfo,
-    ScreenMode, UiEntry,
+    ScreenMode,
 };
-use xteink_render::bookerly;
+
+use session_ui::SessionUi;
 
 const PATH_CAPACITY: usize = 256;
 const MAX_ENTRIES: usize = 24;
@@ -98,6 +102,7 @@ pub trait AppStorage<R: AppRenderer> {
 pub struct Session<S, R> {
     storage: S,
     renderer: R,
+    ui: SessionUi,
     controller: AppController,
     current_path: String<PATH_CAPACITY>,
     page: DirectoryPage,
@@ -115,6 +120,7 @@ where
         Self {
             storage,
             renderer,
+            ui: SessionUi::new(),
             controller: AppController::new(page_size),
             current_path,
             page_size,
@@ -139,14 +145,7 @@ where
             .browser()
             .selected_index(self.page.entries.len())
             .and_then(|index| self.page.entries.get(index))
-            .map(|entry| {
-                let mut name = String::new();
-                let _ = name.push_str(entry.fs_name.as_str());
-                UiEntry {
-                    name,
-                    kind: entry.kind,
-                }
-            });
+            .map(|entry| self.ui.listed_entry_to_ui(entry));
         let command = self.controller.handle_button_with_selected_entry(
             button,
             self.page.entries.len(),
@@ -156,7 +155,14 @@ where
         match command {
             ControllerCommand::None => Ok(None),
             ControllerCommand::RenderBrowser { refresh } => {
-                self.render_browser();
+                self.ui.render_browser(
+                    &mut self.renderer,
+                    self.current_path.as_str(),
+                    self.page.entries.as_slice(),
+                    self.controller
+                        .browser()
+                        .selected_index(self.page.entries.len()),
+                );
                 Ok(Some(refresh))
             }
             ControllerCommand::LoadDirectory {
@@ -170,7 +176,7 @@ where
                 self.load_directory(page_start, selected, refresh).map(Some)
             }
             ControllerCommand::OpenEpub { entry, .. } => {
-                let listed = self.ui_entry_to_listed(&entry);
+                let listed = self.ui.ui_entry_to_listed(&entry);
                 let rendered = self.storage.render_epub_from_entry(
                     &mut self.renderer,
                     self.current_path.as_str(),
@@ -185,7 +191,7 @@ where
                 fast,
                 ..
             } => {
-                let listed = self.ui_entry_to_listed(&entry);
+                let listed = self.ui.ui_entry_to_listed(&entry);
                 let rendered = self.storage.render_epub_page_from_entry(
                     &mut self.renderer,
                     self.current_path.as_str(),
@@ -242,54 +248,15 @@ where
             self.page.entries.len(),
             selected,
         );
-        self.render_browser();
+        self.ui.render_browser(
+            &mut self.renderer,
+            self.current_path.as_str(),
+            self.page.entries.as_slice(),
+            self.controller
+                .browser()
+                .selected_index(self.page.entries.len()),
+        );
         Ok(refresh)
-    }
-
-    fn render_browser(&mut self) {
-        self.renderer.clear(0xFF);
-        self.renderer.draw_text(4, 4, self.current_path.as_str());
-        let line_height = bookerly::BOOKERLY.line_height_px();
-        let mut cursor_y = 4 + line_height * 2;
-        for (index, entry) in self.page.entries.iter().enumerate() {
-            if cursor_y.saturating_add(line_height) > xteink_render::DISPLAY_HEIGHT {
-                break;
-            }
-            let mut line = String::<96>::new();
-            let _ = line.push(
-                if self
-                    .controller
-                    .browser()
-                    .selected_index(self.page.entries.len())
-                    == Some(index)
-                {
-                    '>'
-                } else {
-                    ' '
-                },
-            );
-            let _ = line.push(' ');
-            let _ = line.push_str(match entry.kind {
-                EntryKind::Directory => "[D] ",
-                EntryKind::Epub => "[E] ",
-                EntryKind::Other => "[ ] ",
-            });
-            let _ = line.push_str(entry.label.as_str());
-            self.renderer.draw_text(4, cursor_y, line.as_str());
-            cursor_y = cursor_y.saturating_add(line_height);
-        }
-    }
-
-    fn ui_entry_to_listed(&self, entry: &UiEntry) -> ListedEntry {
-        let mut label = String::new();
-        let mut fs_name = String::new();
-        let _ = label.push_str(entry.name.as_str());
-        let _ = fs_name.push_str(entry.name.as_str());
-        ListedEntry {
-            label,
-            fs_name,
-            kind: entry.kind,
-        }
     }
 
     fn controller_page_info(&self) -> ControllerPageInfo {
