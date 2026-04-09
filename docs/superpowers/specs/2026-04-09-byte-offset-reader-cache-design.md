@@ -176,8 +176,8 @@ On a cache miss:
 
 1. open EPUB source
 2. parse chapters in order
-3. normalize text and append it to `content.txt`
-4. append the corresponding chapter start offsets to `chapters.idx`
+3. append the corresponding chapter start offset to `chapters.idx`
+4. normalize text and append it to `content.txt`
 5. as soon as enough bytes exist to render page `0`, render page `0`
 6. continue building the remaining cache incrementally afterward
 7. append discovered page starts to `pages.idx` as pagination advances
@@ -201,6 +201,25 @@ Once `content.txt` is complete:
 
 - EPUB parsing state is no longer relevant to reading
 - all reading state is byte-offset based
+
+## Incomplete-Build Recovery
+
+If an incomplete build cannot be resumed safely, recovery restarts from chapter `0` by recreating:
+
+- `content.txt`
+- `chapters.idx`
+- `pages.idx`
+
+It does not append into partially trusted files in place.
+
+Crash-safe write ordering for incremental build is:
+
+1. append chapter offset to `chapters.idx`
+2. append normalized chapter bytes to `content.txt`
+3. append any newly discovered page starts to `pages.idx`
+4. flush files
+5. overwrite `meta.txt`
+6. overwrite `progress.bin` only after a successful rendered page exists
 
 ## Page Rendering
 
