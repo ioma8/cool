@@ -1,5 +1,5 @@
 use minifb::{Scale, Window, WindowOptions};
-use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, DISPLAY_WIDTH_BYTES, Framebuffer};
+use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, SHADE_BLACK};
 
 pub struct SimulatorWindow {
     window: Window,
@@ -43,11 +43,7 @@ impl SimulatorWindow {
 
         for y in 0..height {
             for x in 0..width {
-                let py = width - 1 - x;
-                let idx = py * usize::from(DISPLAY_WIDTH_BYTES) + (y / 8);
-                let bit = 7 - (y as u16 % 8);
-                let black = (framebuffer.bytes()[idx] & (1 << bit)) == 0;
-                let color = if black { 0x00000000 } else { 0x00FF_FFFF };
+                let color = shade_to_rgb(framebuffer.shade_at(x as u16, y as u16));
 
                 let start_x = x * self.scale;
                 let start_y = y * self.scale;
@@ -62,5 +58,28 @@ impl SimulatorWindow {
 
         self.window
             .update_with_buffer(&self.pixels, width * self.scale, height * self.scale)
+    }
+}
+
+fn shade_to_rgb(shade: u8) -> u32 {
+    let value: u8 = match shade.min(SHADE_BLACK) {
+        0 => 0xFF,
+        1 => 0xAA,
+        2 => 0x55,
+        _ => 0x00,
+    };
+    (u32::from(value) << 16) | (u32::from(value) << 8) | u32::from(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shade_to_rgb;
+
+    #[test]
+    fn shade_mapping_uses_four_distinct_grayscale_values() {
+        assert_eq!(shade_to_rgb(0), 0x00FF_FFFF);
+        assert_eq!(shade_to_rgb(1), 0x00AA_AAAA);
+        assert_eq!(shade_to_rgb(2), 0x0055_5555);
+        assert_eq!(shade_to_rgb(3), 0x0000_0000);
     }
 }
