@@ -114,6 +114,19 @@ impl Framebuffer {
         self.shades[byte_index] = (self.shades[byte_index] & clear_mask) | (shade << shift);
     }
 
+    #[must_use]
+    pub fn has_intermediate_shades(&self) -> bool {
+        for y in 0..DISPLAY_HEIGHT {
+            for x in 0..DISPLAY_WIDTH {
+                let shade = self.shade_at(x, y);
+                if shade != SHADE_WHITE && shade != SHADE_BLACK {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn write_binary_mask(&self, threshold: u8, out: &mut [u8; BUFFER_SIZE]) {
         out.fill(0xFF);
 

@@ -1,12 +1,15 @@
 #![no_std]
 
+use core::cmp::min;
+
 use embedded_hal::{
     delay::DelayNs,
     digital::{InputPin, OutputPin},
     spi::SpiDevice,
 };
 
-pub use xteink_render::{BUFFER_SIZE, DISPLAY_HEIGHT, DISPLAY_WIDTH, DISPLAY_WIDTH_BYTES};
+pub use xteink_render::{BUFFER_SIZE, DISPLAY_HEIGHT, DISPLAY_WIDTH, DISPLAY_WIDTH_BYTES, Framebuffer};
+use xteink_render::{SHADE_BLACK, SHADE_DARK, SHADE_LIGHT};
 
 const PHYSICAL_WIDTH: u16 = 800;
 const PHYSICAL_HEIGHT: u16 = 480;
@@ -93,7 +96,7 @@ where
 
     pub fn display_buffer(
         &mut self,
-        framebuffer: &[u8; BUFFER_SIZE],
+        framebuffer: &Framebuffer,
         mode: RefreshMode,
         wait_for_ready: bool,
     ) -> Result<(), RefreshScheduleError> {
@@ -101,16 +104,29 @@ where
             return Err(RefreshScheduleError::Busy);
         }
 
+        if framebuffer.has_intermediate_shades() {
+            return self.display_grayscale(framebuffer, wait_for_ready);
+        }
+
+        self.display_binary(framebuffer, mode, wait_for_ready)
+    }
+
+    fn display_binary(
+        &mut self,
+        framebuffer: &Framebuffer,
+        mode: RefreshMode,
+        wait_for_ready: bool,
+    ) -> Result<(), RefreshScheduleError> {
         self.set_ram_area(0, 0, PHYSICAL_WIDTH, PHYSICAL_HEIGHT);
 
         if mode != RefreshMode::Fast {
             self.send_command(CMD_WRITE_RAM_BW);
-            self.write_framebuffer(framebuffer);
+            self.write_framebuffer_thresholded(framebuffer, SHADE_DARK);
             self.send_command(CMD_WRITE_RAM_RED);
-            self.write_framebuffer(framebuffer);
+            self.write_framebuffer_thresholded(framebuffer, SHADE_DARK);
         } else {
             self.send_command(CMD_WRITE_RAM_BW);
-            self.write_framebuffer(framebuffer);
+            self.write_framebuffer_thresholded(framebuffer, SHADE_DARK);
         }
 
         self.refresh_display(mode, false);
@@ -118,7 +134,7 @@ where
         if mode == RefreshMode::Fast {
             self.set_ram_area(0, 0, PHYSICAL_WIDTH, PHYSICAL_HEIGHT);
             self.send_command(CMD_WRITE_RAM_RED);
-            self.write_framebuffer(framebuffer);
+            self.write_framebuffer_thresholded(framebuffer, SHADE_DARK);
         }
 
         if wait_for_ready {
@@ -128,24 +144,46 @@ where
         Ok(())
     }
 
-    pub fn refresh_full(&mut self, framebuffer: &[u8; BUFFER_SIZE]) {
+    fn display_grayscale(
+        &mut self,
+        framebuffer: &Framebuffer,
+        wait_for_ready: bool,
+    ) -> Result<(), RefreshScheduleError> {
+        for threshold in [SHADE_LIGHT, SHADE_DARK, SHADE_BLACK] {
+            self.set_ram_area(0, 0, PHYSICAL_WIDTH, PHYSICAL_HEIGHT);
+            self.send_command(CMD_WRITE_RAM_BW);
+            self.write_framebuffer_thresholded(framebuffer, threshold);
+            self.refresh_display(RefreshMode::Fast, false);
+            self.set_ram_area(0, 0, PHYSICAL_WIDTH, PHYSICAL_HEIGHT);
+            self.send_command(CMD_WRITE_RAM_RED);
+            self.write_framebuffer_thresholded(framebuffer, threshold);
+        }
+
+        if wait_for_ready {
+            self.wait_while_busy();
+        }
+
+        Ok(())
+    }
+
+    pub fn refresh_full(&mut self, framebuffer: &Framebuffer) {
         let _ = self.display_buffer(framebuffer, RefreshMode::Full, true);
     }
 
-    pub fn refresh_fast(&mut self, framebuffer: &[u8; BUFFER_SIZE]) {
+    pub fn refresh_fast(&mut self, framebuffer: &Framebuffer) {
         let _ = self.display_buffer(framebuffer, RefreshMode::Fast, true);
     }
 
     pub fn refresh_full_nonblocking(
         &mut self,
-        framebuffer: &[u8; BUFFER_SIZE],
+        framebuffer: &Framebuffer,
     ) -> Result<(), RefreshScheduleError> {
         self.display_buffer(framebuffer, RefreshMode::Full, false)
     }
 
     pub fn refresh_fast_nonblocking(
         &mut self,
-        framebuffer: &[u8; BUFFER_SIZE],
+        framebuffer: &Framebuffer,
     ) -> Result<(), RefreshScheduleError> {
         self.display_buffer(framebuffer, RefreshMode::Fast, false)
     }
@@ -292,17 +330,48 @@ where
         let _ = self.spi.write(&[data]);
     }
 
-    fn write_framebuffer(&mut self, framebuffer: &[u8; BUFFER_SIZE]) {
+    fn write_framebuffer_thresholded(&mut self, framebuffer: &Framebuffer, threshold: u8) {
         let _ = self.dc.set_high();
         for _ in 0..10 {
             core::hint::spin_loop();
         }
+
+        const CHUNK_SIZE: usize = 1024;
+        let mut chunk = [0xFFu8; CHUNK_SIZE];
         let mut offset = 0;
         while offset < BUFFER_SIZE {
-            let end = (offset + 4096).min(BUFFER_SIZE);
-            let _ = self.spi.write(&framebuffer[offset..end]);
+            let end = min(offset + CHUNK_SIZE, BUFFER_SIZE);
+            fill_binary_chunk(framebuffer, threshold, offset, &mut chunk[..end - offset]);
+            let _ = self.spi.write(&chunk[..end - offset]);
             offset = end;
         }
+    }
+}
+
+fn fill_binary_chunk(
+    framebuffer: &Framebuffer,
+    threshold: u8,
+    byte_offset: usize,
+    out: &mut [u8],
+) {
+    for (index, byte) in out.iter_mut().enumerate() {
+        let absolute = byte_offset + index;
+        let py = absolute / usize::from(DISPLAY_WIDTH_BYTES);
+        let y_byte = absolute % usize::from(DISPLAY_WIDTH_BYTES);
+        let x = DISPLAY_WIDTH - 1 - py as u16;
+        let mut value = 0xFFu8;
+
+        for bit in 0..8u16 {
+            let y = (y_byte as u16) * 8 + bit;
+            if y >= DISPLAY_HEIGHT {
+                continue;
+            }
+            if framebuffer.shade_at(x, y) >= threshold {
+                value &= !(1 << (7 - bit));
+            }
+        }
+
+        *byte = value;
     }
 }
 
@@ -410,9 +479,9 @@ mod tests {
     #[test]
     fn refresh_full_streams_borrowed_framebuffer_bytes() {
         let mut display = new_display();
-        let mut framebuffer = [0xFF; BUFFER_SIZE];
-        framebuffer[0] = 0x00;
-        framebuffer[BUFFER_SIZE - 1] = 0xAA;
+        let mut framebuffer = Framebuffer::new();
+        framebuffer.set_pixel(DISPLAY_WIDTH - 1, 0, true);
+        framebuffer.set_pixel(0, DISPLAY_HEIGHT - 1, true);
 
         display.refresh_full(&framebuffer);
 
@@ -421,15 +490,35 @@ mod tests {
                 .spi()
                 .writes
                 .iter()
-                .any(|chunk| chunk.first() == Some(&0x00))
+                .any(|chunk| chunk.iter().any(|byte| *byte != 0xFF))
         );
         assert!(
             display
                 .spi()
                 .writes
                 .iter()
-                .any(|chunk| chunk.last() == Some(&0xAA))
+                .any(|chunk| chunk.iter().any(|byte| *byte == 0xFE || *byte == 0x7F))
         );
+    }
+
+    #[test]
+    fn fill_binary_chunk_thresholds_grayscale_shades() {
+        let mut framebuffer = Framebuffer::new();
+        framebuffer.set_shade(DISPLAY_WIDTH - 1, 0, SHADE_LIGHT);
+        framebuffer.set_shade(DISPLAY_WIDTH - 1, 1, SHADE_DARK);
+        framebuffer.set_shade(DISPLAY_WIDTH - 1, 2, SHADE_BLACK);
+
+        let mut threshold1 = [0xFFu8; 1];
+        let mut threshold2 = [0xFFu8; 1];
+        let mut threshold3 = [0xFFu8; 1];
+
+        fill_binary_chunk(&framebuffer, SHADE_LIGHT, 0, &mut threshold1);
+        fill_binary_chunk(&framebuffer, SHADE_DARK, 0, &mut threshold2);
+        fill_binary_chunk(&framebuffer, SHADE_BLACK, 0, &mut threshold3);
+
+        assert_eq!(threshold1[0], 0x1F);
+        assert_eq!(threshold2[0], 0x9F);
+        assert_eq!(threshold3[0], 0xDF);
     }
 
     #[test]

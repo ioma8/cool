@@ -308,7 +308,7 @@ fn log_firmware_memory_report(footprint: DeviceMemoryFootprint) {
 
 fn apply_refresh<SPI, DC, RST, BUSY, DELAY>(
     display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
-    framebuffer: &[u8; xteink_display::BUFFER_SIZE],
+    framebuffer: &Framebuffer,
     refresh: BrowserRefresh,
 ) where
     SPI: SpiDevice,
@@ -495,7 +495,7 @@ async fn main(spawner: Spawner) -> ! {
         );
         service_display_refresh(
             &mut display,
-            framebuffer.bytes(),
+            &framebuffer,
             &mut pending_display_refresh,
         );
         loop {
@@ -530,7 +530,7 @@ async fn main(spawner: Spawner) -> ! {
             let footprint = firmware_memory_footprint(&spi_bus, &session, &display);
             log_firmware_memory_report(footprint);
             enforce_firmware_memory_budget(&spi_bus, &session, &display);
-            apply_refresh(&mut display, session.renderer().bytes(), refresh);
+            apply_refresh(&mut display, session.renderer(), refresh);
         }
         Err(err) => {
             esp_println::println!("Session bootstrap failed: {:?}", err);
@@ -542,7 +542,7 @@ async fn main(spawner: Spawner) -> ! {
             );
             service_display_refresh(
                 &mut display,
-                session.renderer().bytes(),
+                session.renderer(),
                 &mut pending_display_refresh,
             );
             loop {
@@ -643,7 +643,7 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
         let button = receiver.receive().await;
         match session.handle_button(button) {
             Ok(Some(refresh)) => {
-                apply_refresh(display, session.renderer().bytes(), refresh);
+                apply_refresh(display, session.renderer(), refresh);
             }
             Ok(None) => {}
             Err(err) => {
@@ -656,7 +656,7 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
                 );
                 service_display_refresh(
                     display,
-                    session.renderer().bytes(),
+                    session.renderer(),
                     &mut pending_display_refresh,
                 );
             }
@@ -683,7 +683,7 @@ fn render_error_screen(
 
 fn service_display_refresh<SPI, DC, RST, BUSY, DELAY>(
     display: &mut SSD1677Display<SPI, DC, RST, BUSY, DELAY>,
-    framebuffer: &[u8; xteink_display::BUFFER_SIZE],
+    framebuffer: &Framebuffer,
     pending_display_refresh: &mut PendingDisplayRefresh,
 ) where
     SPI: SpiDevice,
