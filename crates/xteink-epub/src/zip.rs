@@ -293,8 +293,9 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<MAX_ENTRI
                 if remaining < CENTRAL_DIR_FILE_HEADER_SIZE {
                     break;
                 }
-                let entry =
-                    parse_central_directory_entry_header(&scratch[local_cursor..local_cursor + CENTRAL_DIR_FILE_HEADER_SIZE])?;
+                let entry = parse_central_directory_entry_header(
+                    &scratch[local_cursor..local_cursor + CENTRAL_DIR_FILE_HEADER_SIZE],
+                )?;
                 let total_len = CENTRAL_DIR_FILE_HEADER_SIZE
                     .checked_add(usize::from(entry.name_len))
                     .and_then(|value| value.checked_add(usize::from(entry.extra_length)))
@@ -349,7 +350,11 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<MAX_ENTRI
         if cd_size > scratch.len() {
             return Ok(None);
         }
-        read_exact_at(source, u64::from(self.eocd.cd_offset), &mut scratch[..cd_size])?;
+        read_exact_at(
+            source,
+            u64::from(self.eocd.cd_offset),
+            &mut scratch[..cd_size],
+        )?;
         Ok(Some(&scratch[..cd_size]))
     }
 
@@ -365,7 +370,9 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<MAX_ENTRI
             let name_start = cursor + CENTRAL_DIR_FILE_HEADER_SIZE;
             let name_end = name_start + usize::from(entry.name_len);
             if name_end > cd.len() {
-                return Err(Error::InvalidArchive("entry name exceeds central directory"));
+                return Err(Error::InvalidArchive(
+                    "entry name exceeds central directory",
+                ));
             }
             if &cd[name_start..name_end] == needle {
                 let data_offset =
@@ -422,8 +429,9 @@ impl<const MAX_ENTRIES: usize, const NAME_CAPACITY: usize> EpubArchive<MAX_ENTRI
                 if remaining < CENTRAL_DIR_FILE_HEADER_SIZE {
                     break;
                 }
-                let entry =
-                    parse_central_directory_entry_header(&scratch[local_cursor..local_cursor + CENTRAL_DIR_FILE_HEADER_SIZE])?;
+                let entry = parse_central_directory_entry_header(
+                    &scratch[local_cursor..local_cursor + CENTRAL_DIR_FILE_HEADER_SIZE],
+                )?;
                 let total_len = CENTRAL_DIR_FILE_HEADER_SIZE
                     .checked_add(usize::from(entry.name_len))
                     .and_then(|value| value.checked_add(usize::from(entry.extra_length)))
@@ -482,7 +490,9 @@ where
         let name_start = cursor + CENTRAL_DIR_FILE_HEADER_SIZE;
         let name_end = name_start + usize::from(entry.name_len);
         if name_end > cd.len() {
-            return Err(Error::InvalidArchive("entry name exceeds central directory"));
+            return Err(Error::InvalidArchive(
+                "entry name exceeds central directory",
+            ));
         }
         let data_offset = compute_local_data_offset(source, u64::from(entry.local_header_offset))?;
         visitor(

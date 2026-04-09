@@ -8,8 +8,8 @@ use xteink_epub::{
 use xteink_memory::SHARED_RENDER_EPUB_WORKSPACE_LIMIT_BYTES;
 
 use crate::{
-    CACHE_LAYOUT_STREAM_MARKER, CACHE_LINE_BREAK_MARKER, CACHE_PAGE_BREAK_MARKER, CACHE_PARAGRAPH_BREAK_MARKER,
-    Framebuffer,
+    CACHE_LAYOUT_STREAM_MARKER, CACHE_LINE_BREAK_MARKER, CACHE_PAGE_BREAK_MARKER,
+    CACHE_PARAGRAPH_BREAK_MARKER, Framebuffer,
     paginator::{PaginationConfig, PaginationEvent, PaginationObserver, PaginatorState},
 };
 
@@ -67,7 +67,9 @@ enum RenderMode {
 
 fn mode_draws_page(mode: RenderMode, _current_page: usize, _target_page: usize) -> bool {
     match mode {
-        RenderMode::TargetPageOnly | RenderMode::FullBook | RenderMode::ThroughChapterBoundaryAfterTarget => true,
+        RenderMode::TargetPageOnly
+        | RenderMode::FullBook
+        | RenderMode::ThroughChapterBoundaryAfterTarget => true,
         RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => false,
     }
 }
@@ -131,7 +133,9 @@ fn with_epub_render_workspace<R>(f: impl FnOnce(&mut EpubRenderWorkspace) -> R) 
 
     #[cfg(all(not(target_arch = "riscv32"), test))]
     {
-        let _guard = EPUB_RENDER_WORKSPACE_MUTEX.lock().expect("workspace mutex poisoned");
+        let _guard = EPUB_RENDER_WORKSPACE_MUTEX
+            .lock()
+            .expect("workspace mutex poisoned");
         let workspace = init_epub_render_workspace();
         f(workspace)
     }
@@ -148,7 +152,11 @@ fn init_epub_render_workspace() -> &'static mut EpubRenderWorkspace {
         if !EPUB_RENDER_WORKSPACE_READY {
             let workspace_ptr =
                 core::ptr::addr_of_mut!(EPUB_RENDER_WORKSPACE) as *mut EpubRenderWorkspace;
-            core::ptr::write_bytes(core::ptr::addr_of_mut!((*workspace_ptr).zip_cd).cast::<u8>(), 0, EPUB_WORKSPACE_ZIP_CD);
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!((*workspace_ptr).zip_cd).cast::<u8>(),
+                0,
+                EPUB_WORKSPACE_ZIP_CD,
+            );
             core::ptr::write_bytes(
                 core::ptr::addr_of_mut!((*workspace_ptr).inflate).cast::<u8>(),
                 0,
@@ -159,7 +167,11 @@ fn init_epub_render_workspace() -> &'static mut EpubRenderWorkspace {
                 0,
                 EPUB_WORKSPACE_STREAM_INPUT,
             );
-            core::ptr::write_bytes(core::ptr::addr_of_mut!((*workspace_ptr).xml).cast::<u8>(), 0, EPUB_WORKSPACE_XML);
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!((*workspace_ptr).xml).cast::<u8>(),
+                0,
+                EPUB_WORKSPACE_XML,
+            );
             core::ptr::write_bytes(
                 core::ptr::addr_of_mut!((*workspace_ptr).catalog).cast::<u8>(),
                 0,
@@ -402,12 +414,21 @@ impl Framebuffer {
                     )?,
                     EpubEvent::Image { alt, .. } => {
                         if let Some(alt) = alt {
-                            let progress =
-                                paginator.feed(self, &mut observer, config, PaginationEvent::Text(alt))?;
+                            let progress = paginator.feed(
+                                self,
+                                &mut observer,
+                                config,
+                                PaginationEvent::Text(alt),
+                            )?;
                             if progress.target_complete {
                                 progress
                             } else {
-                                paginator.feed(self, &mut observer, config, PaginationEvent::LineBreak)?
+                                paginator.feed(
+                                    self,
+                                    &mut observer,
+                                    config,
+                                    PaginationEvent::LineBreak,
+                                )?
                             }
                         } else {
                             continue;
@@ -429,10 +450,12 @@ impl Framebuffer {
                         RenderMode::FullBook => {}
                     }
                 }
-                if matches!(mode, RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget)
-                    && stop_after_spine_index
-                        .map(|stop| epub.next_spine_index() > stop)
-                        .unwrap_or(false)
+                if matches!(
+                    mode,
+                    RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget
+                ) && stop_after_spine_index
+                    .map(|stop| epub.next_spine_index() > stop)
+                    .unwrap_or(false)
                 {
                     chapter_end_override = Some((page_before_event, cursor_before_event));
                     break;
@@ -447,7 +470,8 @@ impl Framebuffer {
                 start_page: 0,
                 start_cursor_y: 0,
             };
-            let finish = paginator.feed(self, &mut observer, finish_config, PaginationEvent::End)?;
+            let finish =
+                paginator.feed(self, &mut observer, finish_config, PaginationEvent::End)?;
             let rendered_page = finish.current_page.min(target_page);
             let (current_page, cursor_y) =
                 chapter_end_override.unwrap_or((paginator.current_page(), paginator.cursor_y()));
@@ -459,7 +483,8 @@ impl Framebuffer {
                 current_page.max(1)
             };
             let rendered_page = rendered_page.min(target_page);
-            let (consumed_book_bytes, total_book_bytes) = epub.progress_bytes(unsafe { &(*workspace_ptr).catalog })?;
+            let (consumed_book_bytes, total_book_bytes) =
+                epub.progress_bytes(unsafe { &(*workspace_ptr).catalog })?;
             let cached_progress_percent =
                 percent_from_book_bytes(consumed_book_bytes, total_book_bytes, epub.is_complete());
             let rendered_progress_percent = if epub.is_complete() {
@@ -510,7 +535,11 @@ fn percent_from_cached_prefix_bytes(
     progress.clamp(1, usize::from(cached_progress_percent).max(1)) as u8
 }
 
-fn percent_from_book_bytes(consumed_book_bytes: usize, total_book_bytes: usize, complete: bool) -> u8 {
+fn percent_from_book_bytes(
+    consumed_book_bytes: usize,
+    total_book_bytes: usize,
+    complete: bool,
+) -> u8 {
     if total_book_bytes == 0 {
         return 0;
     }

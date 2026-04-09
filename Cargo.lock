@@ -2040,6 +2040,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-simulator"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "heapless 0.8.0",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "web-sys",
+ "xteink-app",
+ "xteink-browser",
+ "xteink-buttons",
+ "xteink-epub",
+ "xteink-fs",
+ "xteink-render",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.94"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2272,6 +2291,7 @@ dependencies = [
  "esp-rtos",
  "esp32c3",
  "heapless 0.8.0",
+ "tempfile",
  "xteink-browser",
  "xteink-epub",
  "xteink-render",

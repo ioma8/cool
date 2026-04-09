@@ -75,8 +75,7 @@ mod tests {
 
     #[test]
     fn footprint_reports_remaining_device_bytes() {
-        let footprint =
-            DeviceMemoryFootprint::with_breakdown(100 * 1024, 32 * 1024, 512 * 1024);
+        let footprint = DeviceMemoryFootprint::with_breakdown(100 * 1024, 32 * 1024, 512 * 1024);
         assert!(footprint.fits_device_budget());
         assert_eq!(
             footprint.remaining_device_bytes(),

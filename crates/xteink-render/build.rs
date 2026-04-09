@@ -56,9 +56,10 @@ fn main() {
         panic!("failed to read {}: {err}", font_path.display());
     });
 
-    let font = Font::from_bytes(font_bytes.clone(), FontSettings::default()).unwrap_or_else(|err| {
-        panic!("failed to parse {}: {err}", font_path.display());
-    });
+    let font =
+        Font::from_bytes(font_bytes.clone(), FontSettings::default()).unwrap_or_else(|err| {
+            panic!("failed to parse {}: {err}", font_path.display());
+        });
     let shape_face = Face::from_slice(&font_bytes, 0).expect("failed to parse shaping face");
     let library = Library::init().expect("failed to init freetype");
     let face = library
@@ -95,7 +96,11 @@ fn main() {
             .unwrap_or_else(|err| panic!("failed to render {ch:?} in freetype: {err}"));
         let glyph_slot = face.glyph();
         let bitmap = glyph_slot.bitmap();
-        let packed = pack_bitmap(bitmap.buffer(), bitmap.width() as usize, bitmap.rows() as usize);
+        let packed = pack_bitmap(
+            bitmap.buffer(),
+            bitmap.width() as usize,
+            bitmap.rows() as usize,
+        );
         let data_offset = bitmaps.len() as u32;
         bitmaps.extend_from_slice(&packed);
 
@@ -164,9 +169,15 @@ fn main() {
                 continue;
             };
 
-            let Some(pair) =
-                shape_pair_positioning(left_glyph.codepoint, right_glyph.codepoint, &shape_face, left_char, right_char, left_glyph, right_glyph)
-            else {
+            let Some(pair) = shape_pair_positioning(
+                left_glyph.codepoint,
+                right_glyph.codepoint,
+                &shape_face,
+                left_char,
+                right_char,
+                left_glyph,
+                right_glyph,
+            ) else {
                 continue;
             };
 

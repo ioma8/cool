@@ -1,4 +1,6 @@
-use xteink_app::{AppStorage, DirectoryPage, DirectoryPageInfo, EpubRenderResult, ListedEntry, Session};
+use xteink_app::{
+    AppStorage, DirectoryPage, DirectoryPageInfo, EpubRenderResult, ListedEntry, Session,
+};
 use xteink_browser::EntryKind;
 use xteink_buttons::Button;
 use xteink_render::Framebuffer;

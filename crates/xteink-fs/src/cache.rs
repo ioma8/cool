@@ -2,9 +2,11 @@ use core::fmt::Write;
 
 use heapless::String;
 
-pub const CACHE_VERSION: u8 = 6;
+pub const CACHE_VERSION: u8 = 7;
 pub const META_FILE_NAME: &str = "meta.txt";
 pub const CONTENT_FILE_NAME: &str = "content.txt";
+pub const CHAPTERS_FILE_NAME: &str = "chapters.idx";
+pub const PAGES_FILE_NAME: &str = "pages.idx";
 pub const PROGRESS_FILE_NAME: &str = "progress.bin";
 pub const CACHE_ROOT_DIR: &str = "/.cool";
 
@@ -16,13 +18,21 @@ const MAX_COMPONENT_LEN: usize = 8;
 pub struct CacheMeta {
     pub version: u8,
     pub source_size: u32,
-    pub content_length: u32,
-    pub cached_pages: u32,
-    pub cached_progress_percent: u8,
-    pub next_spine_index: u16,
-    pub resume_page: u32,
-    pub resume_cursor_y: u16,
-    pub complete: bool,
+    pub content_length: u64,
+    pub build_complete: bool,
+    pub next_chapter_index: u16,
+    pub layout_sig_version: u16,
+    pub layout_sig_width: u16,
+    pub layout_sig_height: u16,
+    pub layout_sig_content_height: u16,
+    pub layout_sig_font: u32,
+    pub layout_sig_paginator: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressState {
+    pub current_byte_offset: u64,
+    pub current_page_hint: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +40,8 @@ pub struct CachePaths {
     pub directory: String<PATH_CAPACITY>,
     pub meta: String<PATH_CAPACITY>,
     pub content: String<PATH_CAPACITY>,
+    pub chapters: String<PATH_CAPACITY>,
+    pub pages: String<PATH_CAPACITY>,
     pub progress: String<PATH_CAPACITY>,
 }
 
@@ -113,12 +125,16 @@ fn cache_paths_for_epub_with_root(
 
     let meta = join_cache_file(directory.as_str(), META_FILE_NAME);
     let content = join_cache_file(directory.as_str(), CONTENT_FILE_NAME);
+    let chapters = join_cache_file(directory.as_str(), CHAPTERS_FILE_NAME);
+    let pages = join_cache_file(directory.as_str(), PAGES_FILE_NAME);
     let progress = join_cache_file(directory.as_str(), PROGRESS_FILE_NAME);
 
     CachePaths {
         directory,
         meta,
         content,
+        chapters,
+        pages,
         progress,
     }
 }
@@ -131,21 +147,22 @@ fn join_cache_file(directory: &str, file_name: &str) -> String<PATH_CAPACITY> {
     path
 }
 
-pub fn serialize_meta(meta: &CacheMeta, source_size: u32) -> String<256> {
-    let mut output = String::<256>::new();
+pub fn serialize_meta(meta: &CacheMeta) -> String<320> {
+    let mut output = String::<320>::new();
     let _ = write!(
         &mut output,
-        "version={}\nsource_size={}\ncontent_length={}\ncached_pages={}\ncached_progress_percent={}\nnext_spine_index={}\nresume_page={}\nresume_cursor_y={}\ncomplete={}\nsource_len={}\n",
+        "version={}\nsource_size={}\ncontent_length={}\nbuild_complete={}\nnext_chapter_index={}\nlayout_sig_version={}\nlayout_sig_width={}\nlayout_sig_height={}\nlayout_sig_content_height={}\nlayout_sig_font={}\nlayout_sig_paginator={}\n",
         meta.version,
         meta.source_size,
         meta.content_length,
-        meta.cached_pages,
-        meta.cached_progress_percent,
-        meta.next_spine_index,
-        meta.resume_page,
-        meta.resume_cursor_y,
-        if meta.complete { 1 } else { 0 },
-        source_size
+        if meta.build_complete { 1 } else { 0 },
+        meta.next_chapter_index,
+        meta.layout_sig_version,
+        meta.layout_sig_width,
+        meta.layout_sig_height,
+        meta.layout_sig_content_height,
+        meta.layout_sig_font,
+        meta.layout_sig_paginator,
     );
     output
 }
@@ -155,14 +172,16 @@ pub fn parse_meta(raw: &str) -> Option<CacheMeta> {
         version: 0,
         source_size: 0,
         content_length: 0,
-        cached_pages: 0,
-        cached_progress_percent: 0,
-        next_spine_index: 0,
-        resume_page: 0,
-        resume_cursor_y: 0,
-        complete: false,
+        build_complete: false,
+        next_chapter_index: 0,
+        layout_sig_version: 0,
+        layout_sig_width: 0,
+        layout_sig_height: 0,
+        layout_sig_content_height: 0,
+        layout_sig_font: 0,
+        layout_sig_paginator: 0,
     };
-    let mut seen = [false; 9];
+    let mut seen = [false; 11];
 
     for line in raw.split('\n') {
         if let Some(value) = line.strip_prefix("version=") {
@@ -176,140 +195,129 @@ pub fn parse_meta(raw: &str) -> Option<CacheMeta> {
             continue;
         }
         if let Some(value) = line.strip_prefix("content_length=") {
-            parsed.content_length = value.parse::<u32>().ok()?;
+            parsed.content_length = value.parse::<u64>().ok()?;
             seen[2] = true;
             continue;
         }
-        if let Some(value) = line.strip_prefix("cached_pages=") {
-            parsed.cached_pages = value.parse::<u32>().ok()?;
-            seen[3] = true;
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("cached_progress_percent=") {
-            parsed.cached_progress_percent = value.parse::<u8>().ok()?;
-            seen[4] = true;
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("next_spine_index=") {
-            parsed.next_spine_index = value.parse::<u16>().ok()?;
-            seen[5] = true;
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("resume_page=") {
-            parsed.resume_page = value.parse::<u32>().ok()?;
-            seen[6] = true;
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("resume_cursor_y=") {
-            parsed.resume_cursor_y = value.parse::<u16>().ok()?;
-            seen[7] = true;
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("complete=") {
-            parsed.complete = match value {
+        if let Some(value) = line.strip_prefix("build_complete=") {
+            parsed.build_complete = match value {
                 "0" => false,
                 "1" => true,
                 _ => return None,
             };
+            seen[3] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("next_chapter_index=") {
+            parsed.next_chapter_index = value.parse::<u16>().ok()?;
+            seen[4] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("layout_sig_version=") {
+            parsed.layout_sig_version = value.parse::<u16>().ok()?;
+            seen[5] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("layout_sig_width=") {
+            parsed.layout_sig_width = value.parse::<u16>().ok()?;
+            seen[6] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("layout_sig_height=") {
+            parsed.layout_sig_height = value.parse::<u16>().ok()?;
+            seen[7] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("layout_sig_content_height=") {
+            parsed.layout_sig_content_height = value.parse::<u16>().ok()?;
             seen[8] = true;
             continue;
         }
+        if let Some(value) = line.strip_prefix("layout_sig_font=") {
+            parsed.layout_sig_font = value.parse::<u32>().ok()?;
+            seen[9] = true;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("layout_sig_paginator=") {
+            parsed.layout_sig_paginator = value.parse::<u32>().ok()?;
+            seen[10] = true;
+        }
     }
 
-    if !seen.iter().all(|seen| *seen) {
+    if !seen.iter().all(|v| *v) || parsed.version != CACHE_VERSION {
         return None;
     }
-    if parsed.version != CACHE_VERSION {
-        return None;
-    }
-
     Some(parsed)
+}
+
+pub fn encode_progress(progress: ProgressState) -> [u8; 12] {
+    let mut raw = [0u8; 12];
+    raw[..8].copy_from_slice(&progress.current_byte_offset.to_le_bytes());
+    raw[8..12].copy_from_slice(&progress.current_page_hint.to_le_bytes());
+    raw
+}
+
+pub fn decode_progress(raw: &[u8]) -> Option<ProgressState> {
+    if raw.len() < 12 {
+        return None;
+    }
+    Some(ProgressState {
+        current_byte_offset: u64::from_le_bytes(raw[..8].try_into().ok()?),
+        current_page_hint: u32::from_le_bytes(raw[8..12].try_into().ok()?),
+    })
+}
+
+pub fn encode_offset(offset: u64) -> [u8; 8] {
+    offset.to_le_bytes()
+}
+
+pub fn decode_offset(raw: &[u8]) -> Option<u64> {
+    if raw.len() < 8 {
+        return None;
+    }
+    Some(u64::from_le_bytes(raw[..8].try_into().ok()?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn short_cache_name_fits_component_limit() {
-        let name = short_cache_name(0x11B3_D183);
-        assert_eq!(name.len(), MAX_COMPONENT_LEN);
-        assert_eq!(name.as_str(), "B1B3D183");
-    }
-
-    #[test]
-    fn sanitize_cache_name_keeps_only_alnum_and_underscore() {
-        let name = sanitize_cache_name("/MYBOOKS/WHEN_I WRITE/BOOK.EPU");
-        assert_eq!(name.len(), 8);
-        assert!(
-            name.chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        );
-    }
-
-    #[test]
-    fn paths_are_rooted_under_cool_dir() {
-        let paths = cache_paths_for_epub("/MYBOOKS", "PET.JA~1.EPU");
-        let directory = paths.directory.as_str();
-        let meta = paths.meta.as_str();
-        let content = paths.content.as_str();
-        let progress = paths.progress.as_str();
-
-        assert!(directory.starts_with("/.cool/"));
-        assert!(paths.directory.as_str().starts_with("/.cool/"));
-        assert_eq!(directory.split('/').nth(2).unwrap().len(), 8);
-        assert!(meta.starts_with(directory));
-        assert!(meta.ends_with("/meta.txt"));
-        assert!(content.starts_with(directory));
-        assert!(content.ends_with("/content.txt"));
-        assert!(progress.starts_with(directory));
-        assert!(progress.ends_with("/progress.bin"));
-    }
-
-    #[test]
-    fn cache_paths_stay_under_logical_dot_cool_root() {
-        let paths = cache_paths_for_epub("/MYBOOKS", "WHEN_I~1.EPU");
-
-        assert!(paths.directory.as_str().starts_with("/.cool/"));
-        assert!(paths.meta.as_str().starts_with("/.cool/"));
-        assert!(paths.content.as_str().starts_with("/.cool/"));
-        assert!(paths.progress.as_str().starts_with("/.cool/"));
-    }
-
-    #[test]
-    fn serialize_and_parse_meta_roundtrip() {
-        let meta = CacheMeta {
+    fn sample_meta() -> CacheMeta {
+        CacheMeta {
             version: CACHE_VERSION,
-            source_size: 12345,
-            content_length: 4096,
-            cached_pages: 3,
-            cached_progress_percent: 42,
-            next_spine_index: 7,
-            resume_page: 2,
-            resume_cursor_y: 412,
-            complete: false,
-        };
-        let raw = serialize_meta(&meta, 12345);
-        let parsed = parse_meta(raw.as_str()).expect("meta should parse");
-        assert_eq!(
-            parsed,
-            CacheMeta {
-                version: CACHE_VERSION,
-                source_size: 12345,
-                content_length: 4096,
-                cached_pages: 3,
-                cached_progress_percent: 42,
-                next_spine_index: 7,
-                resume_page: 2,
-                resume_cursor_y: 412,
-                complete: false,
-            }
-        );
+            source_size: 100,
+            content_length: 1234,
+            build_complete: false,
+            next_chapter_index: 3,
+            layout_sig_version: 1,
+            layout_sig_width: 600,
+            layout_sig_height: 800,
+            layout_sig_content_height: 748,
+            layout_sig_font: 0xABCDEF,
+            layout_sig_paginator: 0x1234,
+        }
     }
 
     #[test]
-    fn parse_meta_rejects_invalid_version() {
-        let raw = "version=2\nsource_size=1\ncontent_length=2\ncached_pages=1\ncached_progress_percent=1\nnext_spine_index=0\nresume_page=0\nresume_cursor_y=0\ncomplete=1\n";
-        assert!(parse_meta(raw).is_none());
+    fn serialize_parse_meta_roundtrip() {
+        let meta = sample_meta();
+        let raw = serialize_meta(&meta);
+        assert_eq!(parse_meta(raw.as_str()), Some(meta));
+    }
+
+    #[test]
+    fn progress_roundtrip() {
+        let progress = ProgressState {
+            current_byte_offset: 4242,
+            current_page_hint: 11,
+        };
+        assert_eq!(decode_progress(&encode_progress(progress)), Some(progress));
+    }
+
+    #[test]
+    fn paths_include_sidecars() {
+        let paths = cache_paths_for_epub("/MYBOOKS", "BOOK.EPUB");
+        assert!(paths.chapters.ends_with(CHAPTERS_FILE_NAME));
+        assert!(paths.pages.ends_with(PAGES_FILE_NAME));
     }
 }

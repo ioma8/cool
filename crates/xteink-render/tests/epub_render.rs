@@ -1,6 +1,6 @@
-use xteink_render::{Framebuffer, bookerly};
-use std::time::Instant;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+use xteink_render::{Framebuffer, bookerly};
 
 static EPUB_RENDER_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -229,12 +229,10 @@ fn epub_render_api_returns_error_for_invalid_empty_source() {
 #[test]
 fn real_fixture_first_page_does_not_fail_with_out_of_space() {
     let _guard = lock_render_mutex();
-    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("test")
-        .join("epubs")
-        .join("Decisive - Chip Heath.epub");
+    let Some(fixture_root) = fixture_dir() else {
+        return;
+    };
+    let fixture = fixture_root.join("Decisive - Chip Heath.epub");
     let bytes = std::fs::read(fixture).expect("fixture should be readable");
     let mut framebuffer = Framebuffer::new();
 
@@ -248,19 +246,41 @@ fn real_fixture_first_page_does_not_fail_with_out_of_space() {
     );
 }
 
-fn fixture_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+fn fixture_dir() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("test")
-        .join("epubs")
+        .join("epubs");
+    if dir.exists() {
+        Some(dir)
+    } else if fixtures_required() {
+        panic!(
+            "EPUB fixtures required but missing. Set up test/epubs or unset REQUIRE_EPUB_FIXTURES."
+        );
+    } else {
+        None
+    }
+}
+
+fn fixtures_required() -> bool {
+    matches!(
+        std::env::var("REQUIRE_EPUB_FIXTURES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }
 
 fn epub_fixture_paths() -> Vec<std::path::PathBuf> {
-    let mut fixtures = std::fs::read_dir(fixture_dir())
-        .expect("fixture directory should exist")
+    let Some(dir) = fixture_dir() else {
+        return Vec::new();
+    };
+    let mut fixtures = std::fs::read_dir(dir)
+        .expect("fixture directory should be readable")
         .map(|entry| entry.expect("fixture entry should be readable").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("epub")))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("epub"))
+        })
         .collect::<Vec<_>>();
     fixtures.sort();
     fixtures
@@ -270,7 +290,13 @@ fn epub_fixture_paths() -> Vec<std::path::PathBuf> {
 fn all_epub_fixtures_first_page_render_without_out_of_space() {
     let _guard = lock_render_mutex();
     let fixtures = epub_fixture_paths();
-    assert!(!fixtures.is_empty(), "expected at least one epub fixture");
+    if fixtures.is_empty() {
+        assert!(
+            !fixtures_required(),
+            "REQUIRE_EPUB_FIXTURES is set but no .epub files were found under test/epubs"
+        );
+        return;
+    }
 
     for fixture in fixtures {
         let name = fixture
@@ -292,7 +318,10 @@ fn all_epub_fixtures_first_page_render_without_out_of_space() {
 #[test]
 fn large_fixture_cold_parse_to_cache_without_out_of_space() {
     let _guard = lock_render_mutex();
-    let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let Some(fixture_root) = fixture_dir() else {
+        return;
+    };
+    let fixture = fixture_root.join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
     let mut framebuffer = Framebuffer::new();
     let mut emitted_text_bytes = 0usize;
@@ -309,14 +338,20 @@ fn large_fixture_cold_parse_to_cache_without_out_of_space() {
     );
 
     assert!(!matches!(result, Err(xteink_epub::EpubError::OutOfSpace)));
-    assert!(result.is_ok(), "large fixture cold parse should succeed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "large fixture cold parse should succeed: {result:?}"
+    );
     assert!(emitted_text_bytes > 0);
 }
 
 #[test]
 fn cache_prefix_build_stops_before_full_book_for_large_fixture() {
     let _guard = lock_render_mutex();
-    let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let Some(fixture_root) = fixture_dir() else {
+        return;
+    };
+    let fixture = fixture_root.join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
     let mut framebuffer = Framebuffer::new();
     let mut emitted_text_bytes = 0usize;
@@ -340,12 +375,20 @@ fn cache_prefix_build_stops_before_full_book_for_large_fixture() {
 #[test]
 fn prints_cold_first_page_baselines_for_large_fixture() {
     let _guard = lock_render_mutex();
-    let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let Some(fixture_root) = fixture_dir() else {
+        return;
+    };
+    let fixture = fixture_root.join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
 
     let mut direct = Framebuffer::new();
     let direct_start = Instant::now();
-    let direct_result = direct.render_epub_page(VecSource { bytes: bytes.clone() }, 0);
+    let direct_result = direct.render_epub_page(
+        VecSource {
+            bytes: bytes.clone(),
+        },
+        0,
+    );
     let direct_elapsed = direct_start.elapsed();
     assert_eq!(direct_result.expect("direct render should succeed"), 0);
 
@@ -362,21 +405,27 @@ fn prints_cold_first_page_baselines_for_large_fixture() {
         || false,
     );
     let cached_elapsed = cached_start.elapsed();
-    assert_eq!(cached_result.expect("cache prefix build should succeed").rendered_page, 0);
+    assert_eq!(
+        cached_result
+            .expect("cache prefix build should succeed")
+            .rendered_page,
+        0
+    );
     assert!(emitted_text_bytes > 0);
 
     eprintln!(
         "cold first-page baselines: direct={:?} cached_prefix={:?} emitted_text_bytes={}",
-        direct_elapsed,
-        cached_elapsed,
-        emitted_text_bytes
+        direct_elapsed, cached_elapsed, emitted_text_bytes
     );
 }
 
 #[test]
 fn prints_cold_first_page_io_profile_for_large_fixture() {
     let _guard = lock_render_mutex();
-    let fixture = fixture_dir().join("Happiness Trap Pocketbook, The - Russ Harris.epub");
+    let Some(fixture_root) = fixture_dir() else {
+        return;
+    };
+    let fixture = fixture_root.join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let source = CountingSource::new(std::fs::read(&fixture).expect("fixture should be readable"));
     let mut framebuffer = Framebuffer::new();
 
@@ -392,13 +441,24 @@ fn prints_cold_first_page_io_profile_for_large_fixture() {
 #[test]
 fn cached_page_matches_direct_epub_render_for_following_page() {
     let _guard = lock_render_mutex();
-    let fixture = fixture_dir().join("Decisive - Chip Heath.epub");
+    let Some(fixture_root) = fixture_dir() else {
+        return;
+    };
+    let fixture = fixture_root.join("Decisive - Chip Heath.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
     let target_page = 1usize;
 
     let mut direct = Framebuffer::new();
-    let direct_result = direct.render_epub_page(VecSource { bytes: bytes.clone() }, target_page);
-    assert_eq!(direct_result.expect("direct render should succeed"), target_page);
+    let direct_result = direct.render_epub_page(
+        VecSource {
+            bytes: bytes.clone(),
+        },
+        target_page,
+    );
+    assert_eq!(
+        direct_result.expect("direct render should succeed"),
+        target_page
+    );
     assert!(
         direct.bytes().iter().any(|byte| *byte != 0xFF),
         "direct target page should not be blank"
@@ -416,8 +476,14 @@ fn cached_page_matches_direct_epub_render_for_following_page() {
         true,
         || false,
     );
-    assert_eq!(build_result.expect("cache build should succeed"), target_page);
-    assert!(!cached_text.is_empty(), "expected cached text to be emitted");
+    assert_eq!(
+        build_result.expect("cache build should succeed"),
+        target_page
+    );
+    assert!(
+        !cached_text.is_empty(),
+        "expected cached text to be emitted"
+    );
 
     let mut cached = Framebuffer::new();
     let mut offset = 0usize;
@@ -434,7 +500,10 @@ fn cached_page_matches_direct_epub_render_for_following_page() {
         },
         target_page,
     );
-    assert_eq!(cached_result.expect("cached render should succeed"), target_page);
+    assert_eq!(
+        cached_result.expect("cached render should succeed"),
+        target_page
+    );
     assert!(
         cached.bytes().iter().any(|byte| *byte != 0xFF),
         "cached target page should not be blank"
@@ -450,9 +519,7 @@ fn cached_page_matches_direct_epub_render_for_following_page() {
         let direct_nonwhite = direct.bytes().iter().filter(|&&b| b != 0xFF).count();
         panic!(
             "cached page rendering must match direct EPUB rendering for the same page: first_diff_byte={} cached_nonwhite={} direct_nonwhite={}",
-            first_diff,
-            cached_nonwhite,
-            direct_nonwhite,
+            first_diff, cached_nonwhite, direct_nonwhite,
         );
     }
     assert_eq!(
@@ -465,11 +532,19 @@ fn cached_page_matches_direct_epub_render_for_following_page() {
 #[test]
 fn cold_open_prefix_render_matches_direct_first_page() {
     let _guard = lock_render_mutex();
-    let fixture = fixture_dir().join("Decisive - Chip Heath.epub");
+    let Some(fixture_root) = fixture_dir() else {
+        return;
+    };
+    let fixture = fixture_root.join("Decisive - Chip Heath.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
 
     let mut direct = Framebuffer::new();
-    let direct_result = direct.render_epub_page(VecSource { bytes: bytes.clone() }, 0);
+    let direct_result = direct.render_epub_page(
+        VecSource {
+            bytes: bytes.clone(),
+        },
+        0,
+    );
     assert_eq!(direct_result.expect("direct render should succeed"), 0);
 
     let mut cached_text = Vec::<u8>::new();
@@ -485,7 +560,10 @@ fn cold_open_prefix_render_matches_direct_first_page() {
     );
     let build = build_result.expect("cold-open prefix build should succeed");
     assert_eq!(build.rendered_page, 0);
-    assert!(!cached_text.is_empty(), "expected cached text to be emitted");
+    assert!(
+        !cached_text.is_empty(),
+        "expected cached text to be emitted"
+    );
     assert_eq!(
         cold_open.bytes(),
         direct.bytes(),

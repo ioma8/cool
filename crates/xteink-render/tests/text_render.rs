@@ -1,7 +1,7 @@
 use fontdue::{Font, FontSettings};
 use freetype::Library;
-use rustybuzz::{Face, Feature, UnicodeBuffer};
 use rustybuzz::ttf_parser::Tag;
+use rustybuzz::{Face, Feature, UnicodeBuffer};
 use xteink_render::{Framebuffer, bookerly};
 
 #[test]
@@ -71,18 +71,29 @@ fn generated_bookerly_pair_positioning_matches_gpos_for_common_pairs() {
             continue;
         };
         let actual = bookerly::BOOKERLY.positioning_for_pair(left, right);
-        assert_eq!(actual.pen_adjust, expected.pen_adjust, "pen adjust mismatch for {left}{right}");
-        assert_eq!(actual.x_offset, expected.x_offset, "x offset mismatch for {left}{right}");
-        assert_eq!(actual.y_offset, expected.y_offset, "y offset mismatch for {left}{right}");
         assert_eq!(
-            actual.advance_adjust,
-            expected.advance_adjust,
+            actual.pen_adjust, expected.pen_adjust,
+            "pen adjust mismatch for {left}{right}"
+        );
+        assert_eq!(
+            actual.x_offset, expected.x_offset,
+            "x offset mismatch for {left}{right}"
+        );
+        assert_eq!(
+            actual.y_offset, expected.y_offset,
+            "y offset mismatch for {left}{right}"
+        );
+        assert_eq!(
+            actual.advance_adjust, expected.advance_adjust,
             "advance adjust mismatch for {left}{right}"
         );
         matched_any = true;
     }
 
-    assert!(matched_any, "expected at least one common pair to use GPOS positioning");
+    assert!(
+        matched_any,
+        "expected at least one common pair to use GPOS positioning"
+    );
 }
 
 #[test]
@@ -126,10 +137,18 @@ fn generated_bookerly_metrics_match_hinted_freetype_metrics() {
         let ascender = bookerly::BOOKERLY.ascender_px();
         let expected_top = ascender - glyph_slot.bitmap_top() as i16;
 
-        assert_eq!(glyph.left, glyph_slot.bitmap_left() as i16, "left mismatch for {ch}");
+        assert_eq!(
+            glyph.left,
+            glyph_slot.bitmap_left() as i16,
+            "left mismatch for {ch}"
+        );
         assert_eq!(glyph.top, expected_top, "top mismatch for {ch}");
         assert_eq!(glyph.width, bitmap.width() as u8, "width mismatch for {ch}");
-        assert_eq!(glyph.height, bitmap.rows() as u8, "height mismatch for {ch}");
+        assert_eq!(
+            glyph.height,
+            bitmap.rows() as u8,
+            "height mismatch for {ch}"
+        );
         assert_eq!(
             glyph.advance_x,
             (glyph_slot.advance().x >> 6) as u16,
@@ -229,7 +248,8 @@ fn shaped_positions(face: &Face<'_>, scale: f32, text: &str) -> Vec<i32> {
     let mut positions = Vec::with_capacity(output.glyph_positions().len());
     for (ch, position) in text.chars().zip(output.glyph_positions()) {
         let glyph = bookerly::BOOKERLY.glyph_for_char(ch);
-        positions.push(pen + (position.x_offset as f32 * scale).round() as i32 + i32::from(glyph.left));
+        positions
+            .push(pen + (position.x_offset as f32 * scale).round() as i32 + i32::from(glyph.left));
         pen += (position.x_advance as f32 * scale).round() as i32;
     }
 

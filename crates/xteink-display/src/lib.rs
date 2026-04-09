@@ -416,16 +416,20 @@ mod tests {
 
         display.refresh_full(&framebuffer);
 
-        assert!(display
-            .spi()
-            .writes
-            .iter()
-            .any(|chunk| chunk.first() == Some(&0x00)));
-        assert!(display
-            .spi()
-            .writes
-            .iter()
-            .any(|chunk| chunk.last() == Some(&0xAA)));
+        assert!(
+            display
+                .spi()
+                .writes
+                .iter()
+                .any(|chunk| chunk.first() == Some(&0x00))
+        );
+        assert!(
+            display
+                .spi()
+                .writes
+                .iter()
+                .any(|chunk| chunk.last() == Some(&0xAA))
+        );
     }
 
     #[test]
@@ -474,7 +478,8 @@ mod tests {
         );
     }
 
-    fn new_display() -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay> {
+    fn new_display()
+    -> SSD1677Display<FakeSpi, FakeOutputPin, FakeOutputPin, FakeInputPin, FakeDelay> {
         SSD1677Display::new(
             FakeSpi::default(),
             FakeOutputPin::default(),
