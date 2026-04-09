@@ -1,7 +1,8 @@
 # Cool
 
 Rust `no_std` e-reader firmware for the Xteink X4 device (ESP32-C3 + SSD1677 e-ink display).
-The repo now also includes a native desktop simulator that reuses the same monochrome framebuffer and Bookerly text rendering path as the device.
+The repo now also includes a native desktop simulator that reuses the same shared framebuffer and Bookerly text rendering path as the device.
+The current renderer preserves 4-shade grayscale antialiasing for text and shares the same grayscale framebuffer model across hardware, the desktop simulator, and the web simulator.
 
 ## Features
 
@@ -66,7 +67,7 @@ firmware/src/
 Custom logic now lives in dedicated crates:
 
 - `xteink-display` drives the e-ink panel and rendering pipeline
-- `xteink-render` owns the shared framebuffer, font rendering, wrapping, and EPUB page composition
+- `xteink-render` owns the shared grayscale framebuffer, font rendering, wrapping, and EPUB page composition
 - `xteink-app` owns shared browse/reader session flow for non-hardware runtimes
 - `xteink-fs` and `xteink-sdspi` provide SD-backed browsing and file access
 - `xteink-epub` parses EPUB content for on-device rendering
@@ -105,7 +106,8 @@ cargo test --workspace --target aarch64-apple-darwin
 
 ## Simulator
 
-The desktop simulator renders the same 1-bit framebuffer the device uses and reads books from `simulator/sdcard/`.
+The desktop simulator renders the same shared framebuffer model the device uses and reads books from `simulator/sdcard/`.
+The simulator now maps the shared 4-shade framebuffer directly to desktop pixels so grayscale antialiasing is visible during host testing.
 
 ```bash
 bash scripts/run-simulator.sh
@@ -123,6 +125,7 @@ Keyboard mapping:
 A wasm/web version of the simulator is available and reuses the same shared app/session + render + fs reader pipeline.
 
 - framebuffer is rendered into an HTML `<canvas>`
+- grayscale shades are rendered directly in the canvas output
 - button footer maps to device-style actions
 - EPUB uploads persist to browser `localStorage`
 - cache sidecars are written under `/.cool` in the simulated browser-backed SD filesystem
