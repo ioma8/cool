@@ -25,6 +25,14 @@ pub(crate) const CACHE_PAGE_BREAK_MARKER: char = '\u{001D}';
 pub(crate) const CACHE_LAYOUT_STREAM_MARKER: char = '\u{001C}';
 pub const DISPLAY_WIDTH_BYTES: u16 = PHYSICAL_WIDTH / 8;
 pub const BUFFER_SIZE: usize = (DISPLAY_WIDTH_BYTES as usize) * (PHYSICAL_HEIGHT as usize);
+pub const GRAY_LEVELS: u8 = 4;
+pub const SHADE_BITS_PER_PIXEL: u8 = 2;
+pub const SHADE_BUFFER_SIZE: usize =
+    (DISPLAY_WIDTH as usize * DISPLAY_HEIGHT as usize * SHADE_BITS_PER_PIXEL as usize).div_ceil(8);
+pub const SHADE_WHITE: u8 = 0;
+pub const SHADE_LIGHT: u8 = 1;
+pub const SHADE_DARK: u8 = 2;
+pub const SHADE_BLACK: u8 = GRAY_LEVELS - 1;
 
 pub const DISPLAY_WIDTH: u16 = 480;
 pub const DISPLAY_HEIGHT: u16 = 800;
@@ -58,51 +66,90 @@ struct ReplayProgress {
 }
 
 pub struct Framebuffer {
-    bytes: [u8; BUFFER_SIZE],
+    shades: [u8; SHADE_BUFFER_SIZE],
 }
 
 impl Framebuffer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            bytes: [0xFF; BUFFER_SIZE],
+            shades: [0; SHADE_BUFFER_SIZE],
         }
     }
 
     #[must_use]
-    pub fn bytes(&self) -> &[u8; BUFFER_SIZE] {
-        &self.bytes
+    pub fn shade_storage(&self) -> &[u8; SHADE_BUFFER_SIZE] {
+        &self.shades
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> [u8; BUFFER_SIZE] {
+        let mut out = [0xFF; BUFFER_SIZE];
+        self.write_binary_mask(SHADE_DARK, &mut out);
+        out
+    }
+
+    #[must_use]
+    pub fn shade_at(&self, x: u16, y: u16) -> u8 {
+        if x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT {
+            return SHADE_WHITE;
+        }
+
+        let pixel_index = usize::from(y) * usize::from(DISPLAY_WIDTH) + usize::from(x);
+        let byte_index = pixel_index / 4;
+        let shift = 6 - ((pixel_index % 4) * 2);
+        (self.shades[byte_index] >> shift) & 0b11
+    }
+
+    pub fn set_shade(&mut self, x: u16, y: u16, shade: u8) {
+        if x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT {
+            return;
+        }
+
+        let shade = shade.min(SHADE_BLACK);
+        let pixel_index = usize::from(y) * usize::from(DISPLAY_WIDTH) + usize::from(x);
+        let byte_index = pixel_index / 4;
+        let shift = 6 - ((pixel_index % 4) * 2);
+        let clear_mask = !(0b11 << shift);
+        self.shades[byte_index] = (self.shades[byte_index] & clear_mask) | (shade << shift);
+    }
+
+    pub fn write_binary_mask(&self, threshold: u8, out: &mut [u8; BUFFER_SIZE]) {
+        out.fill(0xFF);
+
+        for y in 0..DISPLAY_HEIGHT {
+            for x in 0..DISPLAY_WIDTH {
+                if self.shade_at(x, y) < threshold {
+                    continue;
+                }
+
+                let px = y;
+                let py = (DISPLAY_WIDTH - 1) - x;
+                let idx =
+                    (py as usize) * (DISPLAY_WIDTH_BYTES as usize) + (px as usize / 8);
+                let bit = 7 - (px % 8);
+                out[idx] &= !(1 << bit);
+            }
+        }
     }
 
     pub fn clear(&mut self, color: u8) {
-        self.bytes.fill(color);
+        self.fill_shade(if color == 0 { SHADE_BLACK } else { SHADE_WHITE });
     }
 
     pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: u8) {
         let end_x = x.saturating_add(width).min(DISPLAY_WIDTH);
         let end_y = y.saturating_add(height).min(DISPLAY_HEIGHT);
+        let shade = if color == 0 { SHADE_BLACK } else { SHADE_WHITE };
         for py in y..end_y {
             for px in x..end_x {
-                self.set_pixel(px, py, color == 0);
+                self.set_shade(px, py, shade);
             }
         }
     }
 
     pub fn set_pixel(&mut self, x: u16, y: u16, black: bool) {
-        if x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT {
-            return;
-        }
-
-        let px = y;
-        let py = (DISPLAY_WIDTH - 1) - x;
-        let idx = (py as usize) * (DISPLAY_WIDTH_BYTES as usize) + (px as usize / 8);
-        let bit = 7 - (px % 8);
-
-        if black {
-            self.bytes[idx] &= !(1 << bit);
-        } else {
-            self.bytes[idx] |= 1 << bit;
-        }
+        self.set_shade(x, y, if black { SHADE_BLACK } else { SHADE_WHITE });
     }
 
     pub fn draw_text(&mut self, x: u16, y: u16, text: &str) {
@@ -443,6 +490,12 @@ impl Framebuffer {
                 self.set_pixel(px as u16, py as u16, true);
             }
         }
+    }
+
+    fn fill_shade(&mut self, shade: u8) {
+        let shade = shade.min(SHADE_BLACK);
+        let packed = (shade << 6) | (shade << 4) | (shade << 2) | shade;
+        self.shades.fill(packed);
     }
 }
 
