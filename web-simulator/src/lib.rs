@@ -46,7 +46,7 @@ mod wasm {
         ListedEntry as FsListedEntry, SdFilesystem, SdFsFile, listed_entry_from_parts,
         load_directory_page, render_epub_from_entry, render_epub_page_from_entry,
     };
-    use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, DISPLAY_WIDTH_BYTES, Framebuffer};
+    use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, SHADE_BLACK};
 
     const STORAGE_KEY: &str = "xteink_web_sdcard_v1";
 
@@ -673,11 +673,7 @@ mod wasm {
 
             for y in 0..height {
                 for x in 0..width {
-                    let py = width - 1 - x;
-                    let idx = py * usize::from(DISPLAY_WIDTH_BYTES) + (y / 8);
-                    let bit = 7 - (y as u16 % 8);
-                    let black = (fb.bytes()[idx] & (1 << bit)) == 0;
-                    let color = if black { 0 } else { 255 };
+                    let color = shade_to_u8(fb.shade_at(x as u16, y as u16));
                     let o = (y * width + x) * 4;
                     self.rgba[o] = color;
                     self.rgba[o + 1] = color;
@@ -698,6 +694,15 @@ mod wasm {
         fn handle_button(&mut self, button: Button) {
             let _ = self.session.handle_button(button);
             self.render();
+        }
+    }
+
+    fn shade_to_u8(shade: u8) -> u8 {
+        match shade.min(SHADE_BLACK) {
+            0 => 0xFF,
+            1 => 0xAA,
+            2 => 0x55,
+            _ => 0x00,
         }
     }
 
