@@ -48,8 +48,10 @@ pub struct CacheBuildResult {
     pub rendered_page: usize,
     pub cached_pages: usize,
     pub next_spine_index: u16,
+    pub spine_count: u16,
     pub resume_page: usize,
     pub resume_cursor_y: u16,
+    pub progress_percent: u8,
     pub complete: bool,
 }
 
@@ -173,6 +175,21 @@ fn init_epub_render_workspace() -> &'static mut EpubRenderWorkspace {
 }
 
 impl Framebuffer {
+    pub fn render_epub_page_with_progress<S: EpubSource>(
+        &mut self,
+        source: S,
+        target_page: usize,
+    ) -> Result<CacheBuildResult, EpubError> {
+        self.render_epub_with_mode(
+            source,
+            target_page,
+            &mut |_| Ok(()),
+            RenderMode::ThroughChapterBoundaryAfterTarget,
+            None,
+            &mut || false,
+        )
+    }
+
     pub fn render_epub_page<S: EpubSource>(
         &mut self,
         source: S,
@@ -307,6 +324,11 @@ impl Framebuffer {
             }
             let mut observer = CacheTextObserver { on_text_chunk: &mut on_text_chunk };
             let mut stop_after_spine_index: Option<u16> = None;
+            let mut active_chapter_index: Option<u16> = None;
+            let mut active_chapter_start_page = paginator.current_page();
+            let mut target_chapter_index: Option<u16> = None;
+            let mut target_chapter_start_page: Option<usize> = None;
+            let mut chapter_end_override: Option<(usize, u16)> = None;
 
             if mode != RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget {
                 self.clear(0xFF);
@@ -344,6 +366,8 @@ impl Framebuffer {
                 })?;
 
                 let Some(event) = event else { break };
+                let page_before_event = paginator.current_page();
+                let cursor_before_event = paginator.cursor_y();
                 let config = PaginationConfig {
                     target_page,
                     draw_target_page: mode_draws_page(mode, paginator.current_page(), target_page),
@@ -381,11 +405,18 @@ impl Framebuffer {
                     }
                     EpubEvent::UnsupportedTag => continue,
                 };
+                let event_chapter_index = epub.next_spine_index().saturating_sub(1);
+                if active_chapter_index != Some(event_chapter_index) {
+                    active_chapter_index = Some(event_chapter_index);
+                    active_chapter_start_page = page_before_event;
+                }
 
                 if progress.target_complete {
                     match mode {
                         RenderMode::TargetPageOnly => break,
                         RenderMode::ThroughChapterBoundaryAfterTarget => {
+                            target_chapter_index.get_or_insert(event_chapter_index);
+                            target_chapter_start_page.get_or_insert(active_chapter_start_page);
                             mode = RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget;
                             stop_after_spine_index.get_or_insert(epub.next_spine_index());
                         }
@@ -400,6 +431,7 @@ impl Framebuffer {
                         .map(|stop| epub.next_spine_index() > stop)
                         .unwrap_or(false)
                 {
+                    chapter_end_override = Some((page_before_event, cursor_before_event));
                     break;
                 }
             }
@@ -414,8 +446,8 @@ impl Framebuffer {
             };
             let finish = paginator.feed(self, &mut observer, finish_config, PaginationEvent::End)?;
             let rendered_page = finish.current_page.min(target_page);
-            let current_page = paginator.current_page();
-            let cursor_y = paginator.cursor_y();
+            let (current_page, cursor_y) =
+                chapter_end_override.unwrap_or((paginator.current_page(), paginator.cursor_y()));
             let cached_pages = if epub.is_complete() {
                 current_page.saturating_add(1)
             } else if cursor_y > 0 {
@@ -423,14 +455,77 @@ impl Framebuffer {
             } else {
                 current_page.max(1)
             };
+            let rendered_page = rendered_page.min(target_page);
+            let progress_percent = if epub.is_complete() {
+                percent_from_pages(rendered_page, cached_pages)
+            } else if let (Some(chapter_index), Some(chapter_start_page)) =
+                (target_chapter_index, target_chapter_start_page)
+            {
+                percent_from_chapter_pages(
+                    rendered_page,
+                    chapter_start_page,
+                    current_page,
+                    cursor_y,
+                    chapter_index,
+                    epub.spine_count(),
+                )
+            } else {
+                percent_from_spine(epub.next_spine_index(), epub.spine_count())
+            };
             Ok(CacheBuildResult {
-                rendered_page: rendered_page.min(target_page),
+                rendered_page,
                 cached_pages,
                 next_spine_index: epub.next_spine_index(),
+                spine_count: epub.spine_count(),
                 resume_page: current_page,
                 resume_cursor_y: cursor_y,
+                progress_percent,
                 complete: epub.is_complete(),
             })
         })
     }
+}
+
+fn percent_from_pages(rendered_page: usize, total_pages: usize) -> u8 {
+    if total_pages == 0 {
+        return 0;
+    }
+    let progress = ((rendered_page.saturating_add(1)) * 100) / total_pages.max(1);
+    progress.clamp(1, 100) as u8
+}
+
+fn percent_from_spine(next_spine_index: u16, spine_count: u16) -> u8 {
+    if spine_count == 0 {
+        return 0;
+    }
+    let progress = (u32::from(next_spine_index).saturating_mul(99)) / u32::from(spine_count);
+    progress.clamp(1, 99) as u8
+}
+
+fn percent_from_chapter_pages(
+    rendered_page: usize,
+    chapter_start_page: usize,
+    current_page: usize,
+    cursor_y: u16,
+    chapter_index: u16,
+    spine_count: u16,
+) -> u8 {
+    if spine_count == 0 {
+        return 0;
+    }
+    let chapter_pages = if cursor_y > 0 {
+        current_page.saturating_sub(chapter_start_page).saturating_add(1)
+    } else {
+        current_page.saturating_sub(chapter_start_page).max(1)
+    };
+    let page_in_chapter = rendered_page
+        .saturating_sub(chapter_start_page)
+        .saturating_add(1)
+        .min(chapter_pages);
+    let numerator = usize::from(chapter_index)
+        .saturating_mul(chapter_pages)
+        .saturating_add(page_in_chapter);
+    let denominator = usize::from(spine_count).saturating_mul(chapter_pages).max(1);
+    let progress = numerator.saturating_mul(100) / denominator;
+    progress.clamp(1, 99) as u8
 }

@@ -18,7 +18,7 @@ use esp_hal::{
     spi::master::{Config as SpiConfig, Spi},
     time::Rate,
 };
-use xteink_app::{AppStorage, ListedEntry as AppListedEntry, Session};
+use xteink_app::{AppStorage, EpubRenderResult as AppEpubRenderResult, ListedEntry as AppListedEntry, Session};
 use xteink_buttons::{
     Button as RawButton, ButtonState, get_button_from_adc_1, get_button_from_adc_2,
 };
@@ -212,9 +212,12 @@ where
         renderer: &mut Framebuffer,
         current_path: &str,
         entry: &AppListedEntry,
-    ) -> Result<usize, Self::Error> {
+    ) -> Result<AppEpubRenderResult, Self::Error> {
         let rendered = render_epub_from_entry(self.sd, renderer, current_path, &clone_listed_entry(entry))?;
-        Ok(rendered.rendered_page)
+        Ok(AppEpubRenderResult {
+            rendered_page: rendered.rendered_page,
+            progress_percent: rendered.progress_percent,
+        })
     }
 
     fn render_epub_page_from_entry(
@@ -223,7 +226,7 @@ where
         current_path: &str,
         entry: &AppListedEntry,
         target_page: usize,
-    ) -> Result<usize, Self::Error> {
+    ) -> Result<AppEpubRenderResult, Self::Error> {
         let rendered = render_epub_page_from_entry(
             self.sd,
             renderer,
@@ -232,7 +235,10 @@ where
             target_page,
             true,
         )?;
-        Ok(rendered.rendered_page)
+        Ok(AppEpubRenderResult {
+            rendered_page: rendered.rendered_page,
+            progress_percent: rendered.progress_percent,
+        })
     }
 }
 

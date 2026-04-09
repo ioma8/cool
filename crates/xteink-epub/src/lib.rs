@@ -390,6 +390,10 @@ impl<S: EpubSource> Epub<S> {
         self.state.spine_index
     }
 
+    pub fn spine_count(&self) -> u16 {
+        self.state.spine_count
+    }
+
     pub fn is_complete(&self) -> bool {
         self.state.done || self.state.spine_index >= self.state.spine_count
     }

@@ -1,4 +1,4 @@
-use xteink_app::{AppStorage, DirectoryPage, DirectoryPageInfo, ListedEntry, Session};
+use xteink_app::{AppStorage, DirectoryPage, DirectoryPageInfo, EpubRenderResult, ListedEntry, Session};
 use xteink_browser::EntryKind;
 use xteink_buttons::Button;
 use xteink_render::Framebuffer;
@@ -29,8 +29,11 @@ impl AppStorage<Framebuffer> for FakeStorage {
         _framebuffer: &mut xteink_render::Framebuffer,
         _current_path: &str,
         _entry: &ListedEntry,
-    ) -> Result<usize, Self::Error> {
-        Ok(0)
+    ) -> Result<EpubRenderResult, Self::Error> {
+        Ok(EpubRenderResult {
+            rendered_page: 0,
+            progress_percent: 25,
+        })
     }
 
     fn render_epub_page_from_entry(
@@ -39,8 +42,11 @@ impl AppStorage<Framebuffer> for FakeStorage {
         _current_path: &str,
         _entry: &ListedEntry,
         target_page: usize,
-    ) -> Result<usize, Self::Error> {
-        Ok(target_page)
+    ) -> Result<EpubRenderResult, Self::Error> {
+        Ok(EpubRenderResult {
+            rendered_page: target_page,
+            progress_percent: 25,
+        })
     }
 }
 
@@ -87,9 +93,12 @@ impl AppStorage<Framebuffer> for MultiStorage {
         framebuffer: &mut xteink_render::Framebuffer,
         _current_path: &str,
         _entry: &ListedEntry,
-    ) -> Result<usize, Self::Error> {
+    ) -> Result<EpubRenderResult, Self::Error> {
         framebuffer.draw_text(4, 4, "epub");
-        Ok(0)
+        Ok(EpubRenderResult {
+            rendered_page: 0,
+            progress_percent: 33,
+        })
     }
 
     fn render_epub_page_from_entry(
@@ -98,8 +107,11 @@ impl AppStorage<Framebuffer> for MultiStorage {
         _current_path: &str,
         _entry: &ListedEntry,
         target_page: usize,
-    ) -> Result<usize, Self::Error> {
-        Ok(target_page)
+    ) -> Result<EpubRenderResult, Self::Error> {
+        Ok(EpubRenderResult {
+            rendered_page: target_page,
+            progress_percent: 33,
+        })
     }
 }
 
@@ -119,6 +131,24 @@ fn opening_an_epub_from_loaded_directory_transitions_to_reader_page_zero() {
     assert_eq!(session.reader_page(), 0);
     assert!(session.renderer().bytes().iter().any(|byte| *byte != 0xFF));
     assert_eq!(session.current_entries()[0].kind, EntryKind::Epub);
+}
+
+#[test]
+fn opening_an_epub_draws_reader_progress_footer() {
+    let mut session = Session::new(FakeStorage, Framebuffer::new(), 8);
+    session.bootstrap().expect("bootstrap should work");
+
+    session
+        .handle_button(Button::Back)
+        .expect("open should work");
+
+    let non_white = session
+        .renderer()
+        .bytes()
+        .iter()
+        .filter(|byte| **byte != 0xFF)
+        .count();
+    assert!(non_white > 0);
 }
 
 #[test]

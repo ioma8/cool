@@ -50,6 +50,16 @@ impl Framebuffer {
         self.bytes.fill(color);
     }
 
+    pub fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: u8) {
+        let end_x = x.saturating_add(width).min(DISPLAY_WIDTH);
+        let end_y = y.saturating_add(height).min(DISPLAY_HEIGHT);
+        for py in y..end_y {
+            for px in x..end_x {
+                self.set_pixel(px, py, color == 0);
+            }
+        }
+    }
+
     pub fn set_pixel(&mut self, x: u16, y: u16, black: bool) {
         if x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT {
             return;

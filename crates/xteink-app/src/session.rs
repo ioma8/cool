@@ -62,6 +62,7 @@ pub struct DirectoryPage {
 
 pub trait AppRenderer {
     fn clear(&mut self, color: u8);
+    fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: u8);
     fn draw_text(&mut self, x: u16, y: u16, text: &str);
 }
 
@@ -70,9 +71,19 @@ impl AppRenderer for xteink_render::Framebuffer {
         xteink_render::Framebuffer::clear(self, color);
     }
 
+    fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: u8) {
+        xteink_render::Framebuffer::fill_rect(self, x, y, width, height, color);
+    }
+
     fn draw_text(&mut self, x: u16, y: u16, text: &str) {
         xteink_render::Framebuffer::draw_text(self, x, y, text);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpubRenderResult {
+    pub rendered_page: usize,
+    pub progress_percent: u8,
 }
 
 pub trait AppStorage<R: AppRenderer> {
@@ -89,14 +100,14 @@ pub trait AppStorage<R: AppRenderer> {
         renderer: &mut R,
         current_path: &str,
         entry: &ListedEntry,
-    ) -> Result<usize, Self::Error>;
+    ) -> Result<EpubRenderResult, Self::Error>;
     fn render_epub_page_from_entry(
         &self,
         renderer: &mut R,
         current_path: &str,
         entry: &ListedEntry,
         target_page: usize,
-    ) -> Result<usize, Self::Error>;
+    ) -> Result<EpubRenderResult, Self::Error>;
 }
 
 pub struct Session<S, R> {
@@ -182,7 +193,9 @@ where
                     self.current_path.as_str(),
                     &listed,
                 )?;
-                self.controller.apply_epub_opened(rendered);
+                self.ui
+                    .render_reader_progress(&mut self.renderer, rendered.progress_percent);
+                self.controller.apply_epub_opened(rendered.rendered_page);
                 Ok(Some(BrowserRefresh::Fast))
             }
             ControllerCommand::RenderReaderPage {
@@ -198,7 +211,10 @@ where
                     &listed,
                     target_page,
                 )?;
-                self.controller.apply_reader_page_rendered(rendered);
+                self.ui
+                    .render_reader_progress(&mut self.renderer, rendered.progress_percent);
+                self.controller
+                    .apply_reader_page_rendered(rendered.rendered_page);
                 Ok(Some(if fast {
                     BrowserRefresh::Fast
                 } else {

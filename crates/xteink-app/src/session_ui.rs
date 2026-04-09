@@ -43,6 +43,23 @@ impl SessionUi {
         }
     }
 
+    pub fn render_reader_progress<R: AppRenderer>(&self, renderer: &mut R, progress_percent: u8) {
+        let line_height = bookerly::BOOKERLY.line_height_px();
+        let footer_height = line_height.saturating_add(8);
+        let footer_y = xteink_render::DISPLAY_HEIGHT.saturating_sub(footer_height);
+        renderer.fill_rect(
+            0,
+            footer_y,
+            xteink_render::DISPLAY_WIDTH,
+            footer_height,
+            0xFF,
+        );
+
+        let mut label = String::<16>::new();
+        let _ = core::fmt::write(&mut label, format_args!("{}%", progress_percent));
+        renderer.draw_text(4, footer_y.saturating_add(4), label.as_str());
+    }
+
     pub fn ui_entry_to_listed(&self, entry: &UiEntry) -> ListedEntry {
         let mut label = String::new();
         let mut fs_name = String::new();
@@ -74,12 +91,17 @@ mod tests {
     #[derive(Default)]
     struct RecordingRenderer {
         clears: Vec<u8, 4>,
+        fills: Vec<(u16, u16, u16, u16, u8), 4>,
         texts: Vec<(u16, u16, String<128>), 8>,
     }
 
     impl AppRenderer for RecordingRenderer {
         fn clear(&mut self, color: u8) {
             let _ = self.clears.push(color);
+        }
+
+        fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: u8) {
+            let _ = self.fills.push((x, y, width, height, color));
         }
 
         fn draw_text(&mut self, x: u16, y: u16, text: &str) {
@@ -128,5 +150,19 @@ mod tests {
             .texts
             .iter()
             .any(|(_, _, text)| text.as_str().contains("> [E] book.epub")));
+    }
+
+    #[test]
+    fn render_reader_progress_draws_footer_percent() {
+        let ui = SessionUi::new();
+        let mut renderer = RecordingRenderer::default();
+
+        ui.render_reader_progress(&mut renderer, 42);
+
+        assert_eq!(renderer.fills.len(), 1);
+        assert!(renderer
+            .texts
+            .iter()
+            .any(|(_, _, text)| text.as_str() == "42%"));
     }
 }

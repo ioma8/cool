@@ -78,6 +78,7 @@ pub enum EpubRefreshMode {
 pub struct EpubRenderResult {
     pub rendered_page: usize,
     pub refresh: EpubRefreshMode,
+    pub progress_percent: u8,
 }
 
 pub fn render_epub_from_entry<SD>(
@@ -122,7 +123,8 @@ where
         cache_paths.progress.as_str()
     );
     let cache_state = resolve_cache_state(fs, &cache_paths, 0, None);
-    let start_page = cache_state.start_page.unwrap_or(0);
+    let saved_progress = cache_state.start_page;
+    let start_page = saved_progress.map(|progress| progress.page).unwrap_or(0);
     logln!(
         "EPUB render progress: cached_start_page={} cache_root={}",
         start_page,
@@ -195,9 +197,10 @@ where
         fast_refresh
     );
 
+    let saved_progress = read_cached_progress(fs, &cache_paths);
     let cache_state = resolve_cache_state(fs, &cache_paths, source_size, Some(page_index));
     let mut cache_paths_for_work = cache_state.work_paths;
-    let rendered_page = match cache_state.selection {
+    let (rendered_page, progress_percent) = match cache_state.selection {
         CacheSelection::Hit { paths, meta: _meta } => {
             cache_paths_for_work = Some(paths.clone());
             logln!(
@@ -213,11 +216,19 @@ where
             let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
                 content.read(buffer).map_err(|_| EpubError::Io)
             };
-            display.render_cached_text_page_with_cancel(
+            let rendered_page = display.render_cached_text_page_with_cancel(
                 &mut read_text,
                 page_index,
                 &mut should_cancel,
-            )?
+            )?;
+            let progress_percent = if _meta.complete {
+                percent_from_pages(rendered_page, _meta.cached_pages)
+            } else if let Some(saved) = saved_progress {
+                estimate_percent_with_saved_progress(rendered_page, saved)
+            } else {
+                estimate_percent_from_cached_prefix(rendered_page, _meta.cached_pages)
+            };
+            (rendered_page, progress_percent)
         }
         CacheSelection::Resume { paths, meta: _meta } => {
             cache_paths_for_work = Some(paths.clone());
@@ -231,7 +242,7 @@ where
                 _meta.resume_cursor_y
             );
             let source = source.take().ok_or(EpubError::Io)?;
-            read_epub_source_to_cache_and_render(
+            let build = read_epub_source_to_cache_and_render(
                 fs,
                 display,
                 source,
@@ -240,7 +251,8 @@ where
                 &paths,
                 page_index,
                 &mut should_cancel,
-            )?
+            )?;
+            (build.rendered_page, build.progress_percent)
         }
         CacheSelection::Miss { paths } => {
             logln!("EPUB cache miss, parsing source: {}", source_path.as_str());
@@ -257,7 +269,7 @@ where
                 source_path.as_str(),
                 cache_paths_for_render.directory.as_str()
             );
-            let rendered_page = read_epub_source_to_cache_and_render(
+            let build = read_epub_source_to_cache_and_render(
                 fs,
                 display,
                 source,
@@ -270,14 +282,19 @@ where
             logln!(
                 "EPUB parse complete: source={} rendered_page={}",
                 source_path.as_str(),
-                rendered_page
+                build.rendered_page
             );
-            rendered_page
+            (build.rendered_page, build.progress_percent)
         }
     };
 
     if let Some(paths) = cache_paths_for_work {
-        if let Err(_err) = write_cached_progress(fs, paths.progress.as_str(), rendered_page) {
+        if let Err(_err) = write_cached_progress(
+            fs,
+            paths.progress.as_str(),
+            rendered_page,
+            progress_percent,
+        ) {
             logln!(
                 "EPUB progress write failed: {} -> {:?}",
                 paths.progress.as_str(),
@@ -293,6 +310,7 @@ where
         } else {
             EpubRefreshMode::Full
         },
+        progress_percent,
     })
 }
 
@@ -315,7 +333,7 @@ fn read_cache_meta_if_valid<SD: SdFilesystem>(
 
 #[derive(Debug, Clone)]
 struct CacheProbe {
-    start_page: Option<usize>,
+    start_page: Option<SavedProgress>,
     selection: CacheSelection,
     work_paths: Option<CachePaths>,
 }
@@ -398,44 +416,45 @@ fn read_cache_meta<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<CacheMeta, E
         .ok_or(EpubError::InvalidFormat)
 }
 
-fn read_cached_progress<SD: SdFilesystem>(fs: &SD, paths: &CachePaths) -> Option<usize> {
-    read_u32_le(fs, paths.progress.as_str())
-        .ok()
-        .flatten()
-        .and_then(|value| usize::try_from(value).ok())
+#[derive(Debug, Clone, Copy)]
+struct SavedProgress {
+    page: usize,
+    progress_percent: u8,
+}
+
+fn read_cached_progress<SD: SdFilesystem>(fs: &SD, paths: &CachePaths) -> Option<SavedProgress> {
+    let mut file = fs.open_cache_file_read(paths.progress.as_str()).ok()?;
+    let mut raw = [0u8; 5];
+    let mut total = 0usize;
+    while total < raw.len() {
+        let n = file.read(&mut raw[total..]).ok()?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    if total < 4 {
+        return None;
+    }
+    let page = usize::try_from(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]])).ok()?;
+    let progress_percent = if total >= 5 { raw[4] } else { 0 };
+    Some(SavedProgress {
+        page,
+        progress_percent,
+    })
 }
 
 fn write_cached_progress<SD: SdFilesystem>(
     fs: &SD,
     path: &str,
     page: usize,
+    progress_percent: u8,
 ) -> Result<(), EpubError> {
-    write_u32_le(
-        fs,
-        path,
-        u32::try_from(page).map_err(|_| EpubError::OutOfSpace)?,
-    )
-}
-
-fn read_u32_le<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<Option<u32>, EpubError> {
-    let mut file = match fs.open_cache_file_read(path) {
-        Ok(file) => file,
-        Err(_) => return Ok(None),
-    };
-    let mut raw = [0u8; 4];
-    let mut total = 0usize;
-    while total < raw.len() {
-        let n = file.read(&mut raw[total..]).map_err(|_| EpubError::Io)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        total += n;
-    }
-    Ok(Some(u32::from_le_bytes(raw)))
-}
-
-fn write_u32_le<SD: SdFilesystem>(fs: &SD, path: &str, value: u32) -> Result<(), EpubError> {
-    write_bytes(fs, path, &value.to_le_bytes())
+    let page = u32::try_from(page).map_err(|_| EpubError::OutOfSpace)?;
+    let mut raw = [0u8; 5];
+    raw[..4].copy_from_slice(&page.to_le_bytes());
+    raw[4] = progress_percent;
+    write_bytes(fs, path, &raw)
 }
 
 fn write_bytes<SD: SdFilesystem>(fs: &SD, path: &str, data: &[u8]) -> Result<(), EpubError> {
@@ -482,7 +501,7 @@ fn read_epub_source_to_cache_and_render<SD>(
     paths: &CachePaths,
     page_index: usize,
     should_cancel: &mut impl FnMut() -> bool,
-) -> Result<usize, EpubError>
+) -> Result<CacheBuildResult, EpubError>
 where
     SD: SdFilesystem,
 {
@@ -553,5 +572,33 @@ where
         }
     }
 
-    Ok(build.rendered_page)
+    Ok(build)
+}
+
+fn percent_from_pages(rendered_page: usize, total_pages: u32) -> u8 {
+    if total_pages == 0 {
+        return 0;
+    }
+    let progress = ((rendered_page.saturating_add(1)) * 100) / usize::try_from(total_pages).unwrap_or(1);
+    progress.clamp(1, 100) as u8
+}
+
+fn estimate_percent_from_cached_prefix(rendered_page: usize, cached_pages: u32) -> u8 {
+    if cached_pages == 0 {
+        return 0;
+    }
+    let progress = ((rendered_page.saturating_add(1)) * 99) / usize::try_from(cached_pages).unwrap_or(1);
+    progress.clamp(1, 99) as u8
+}
+
+fn estimate_percent_with_saved_progress(rendered_page: usize, saved: SavedProgress) -> u8 {
+    if saved.progress_percent == 0 {
+        return 0;
+    }
+    if rendered_page >= saved.page {
+        return saved.progress_percent;
+    }
+    let scaled = ((rendered_page.saturating_add(1)) * usize::from(saved.progress_percent))
+        / saved.page.saturating_add(1);
+    scaled.clamp(1, usize::from(saved.progress_percent)) as u8
 }
