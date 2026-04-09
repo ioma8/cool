@@ -1,18 +1,40 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
+fn truncate_for_entry_label(name: &str, max_bytes: usize) -> &str {
+    if name.len() <= max_bytes {
+        return name;
+    }
+
+    let mut end = 0;
+    for (idx, ch) in name.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+
+    if end == 0 { "" } else { &name[..end] }
+}
+
+fn is_hidden_entry_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn not_wasm_build_placeholder() {}
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use js_sys::Uint8ClampedArray;
+    use crate::{is_hidden_entry_name, truncate_for_entry_label};
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use serde::{Deserialize, Serialize};
     use std::{
         cell::RefCell,
         collections::{BTreeMap, BTreeSet},
         rc::Rc,
     };
-    use wasm_bindgen::{JsCast, prelude::*};
+    use wasm_bindgen::{Clamped, JsCast, prelude::*};
     use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
     use xteink_app::{
         AppStorage, DirectoryPage as AppDirectoryPage, DirectoryPageInfo as AppDirectoryPageInfo,
@@ -135,6 +157,29 @@ mod wasm {
             FsError::OpenFailed(error)
         }
 
+        fn epub_error(error: xteink_epub::EpubError) -> FsError {
+            match error {
+                xteink_epub::EpubError::Io => Self::host_error("epub io"),
+                xteink_epub::EpubError::Zip => Self::host_error("epub zip"),
+                xteink_epub::EpubError::Utf8 => Self::host_error("epub utf8"),
+                xteink_epub::EpubError::InvalidFormat => Self::host_error("epub invalid format"),
+                xteink_epub::EpubError::Compression => Self::host_error("epub compression"),
+                xteink_epub::EpubError::OutOfSpace => Self::host_error("epub out of space"),
+                xteink_epub::EpubError::Unsupported => Self::host_error("epub unsupported"),
+                xteink_epub::EpubError::Cancelled => Self::host_error("epub cancelled"),
+            }
+        }
+
+        fn error_message(error: &FsError) -> String {
+            match error {
+                FsError::CardInitFailed(message)
+                | FsError::MountFailed(message)
+                | FsError::OpenFailed(message) => message.as_str().to_string(),
+                FsError::TooManyEntries => "too many directory entries".to_string(),
+                FsError::InvalidUtf8 => "invalid utf-8".to_string(),
+            }
+        }
+
         fn load() -> Self {
             Self {
                 vfs: Rc::new(RefCell::new(Vfs::load())),
@@ -222,11 +267,7 @@ mod wasm {
             let start = page_start.min(total);
             let end = (start + page_size).min(total);
             for (name, is_dir) in all[start..end].iter() {
-                let label = if name.len() > Self::MAX_ENTRY_TEXT {
-                    &name[..Self::MAX_ENTRY_TEXT]
-                } else {
-                    name
-                };
+                let label = truncate_for_entry_label(name, Self::MAX_ENTRY_TEXT);
                 let fs_name = if listed_entry_from_parts(label, name, *is_dir).is_ok() {
                     name.clone()
                 } else {
@@ -325,7 +366,8 @@ mod wasm {
                 entry.fs_name.as_str(),
                 entry.kind == xteink_browser::EntryKind::Directory,
             )?;
-            let rendered = render_epub_from_entry(self, renderer, current_path, &fs_entry)?;
+            let rendered = render_epub_from_entry(self, renderer, current_path, &fs_entry)
+                .map_err(Self::epub_error)?;
             Ok(EpubRenderResult {
                 rendered_page: rendered.rendered_page,
                 progress_percent: rendered.progress_percent,
@@ -351,7 +393,8 @@ mod wasm {
                 &fs_entry,
                 target_page,
                 true,
-            )?;
+            )
+            .map_err(Self::epub_error)?;
             Ok(EpubRenderResult {
                 rendered_page: rendered.rendered_page,
                 progress_percent: rendered.progress_percent,
@@ -385,7 +428,7 @@ mod wasm {
                 state.dirs.insert(normalize(dir.as_str()));
             }
             for (path, encoded) in parsed.files {
-                if let Some(bytes) = decode_hex(encoded.as_str()) {
+                if let Some(bytes) = decode_storage_bytes(encoded.as_str()) {
                     state.files.insert(normalize(path.as_str()), bytes);
                 }
             }
@@ -398,7 +441,7 @@ mod wasm {
             };
             let mut files = BTreeMap::new();
             for (path, bytes) in &self.files {
-                files.insert(path.clone(), encode_hex(bytes));
+                files.insert(path.clone(), encode_storage_bytes(bytes));
             }
             let dirs = self.dirs.iter().cloned().collect::<Vec<_>>();
             let payload = serde_json::to_string(&StoredVfs { files, dirs })
@@ -449,11 +492,17 @@ mod wasm {
 
             for child in self.dirs.iter().filter(|entry| parent_dir(entry) == dir) {
                 if child != &dir {
-                    entries.insert(base_name(child), true);
+                    let name = base_name(child);
+                    if !is_hidden_entry_name(name.as_str()) {
+                        entries.insert(name, true);
+                    }
                 }
             }
             for file in self.files.keys().filter(|entry| parent_dir(entry) == dir) {
-                entries.insert(base_name(file), false);
+                let name = base_name(file);
+                if !is_hidden_entry_name(name.as_str()) {
+                    entries.insert(name, false);
+                }
             }
 
             Ok(entries.into_iter().collect())
@@ -578,17 +627,17 @@ mod wasm {
         window.local_storage().ok().flatten()
     }
 
-    fn encode_hex(bytes: &[u8]) -> String {
-        let mut out = String::with_capacity(bytes.len() * 2);
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for byte in bytes {
-            out.push(HEX[usize::from(byte >> 4)] as char);
-            out.push(HEX[usize::from(byte & 0x0f)] as char);
-        }
+    fn encode_storage_bytes(bytes: &[u8]) -> String {
+        let mut out = String::from("b64:");
+        out.push_str(BASE64.encode(bytes).as_str());
         out
     }
 
-    fn decode_hex(input: &str) -> Option<Vec<u8>> {
+    fn decode_storage_bytes(input: &str) -> Option<Vec<u8>> {
+        if let Some(encoded) = input.strip_prefix("b64:") {
+            return BASE64.decode(encoded).ok();
+        }
+
         if input.len() % 2 != 0 {
             return None;
         }
@@ -612,7 +661,6 @@ mod wasm {
 
     struct WebApp {
         session: Session<WebStorage, Framebuffer>,
-        canvas: HtmlCanvasElement,
         ctx: CanvasRenderingContext2d,
         rgba: Vec<u8>,
     }
@@ -638,9 +686,8 @@ mod wasm {
                 }
             }
 
-            let clamped = Uint8ClampedArray::from(self.rgba.as_slice());
             if let Ok(image) = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-                clamped,
+                Clamped(self.rgba.as_slice()),
                 u32::from(DISPLAY_WIDTH),
                 u32::from(DISPLAY_HEIGHT),
             ) {
@@ -682,7 +729,6 @@ mod wasm {
 
         let mut app = WebApp {
             session,
-            canvas,
             ctx,
             rgba: vec![255; usize::from(DISPLAY_WIDTH) * usize::from(DISPLAY_HEIGHT) * 4],
         };
@@ -743,8 +789,31 @@ mod wasm {
     #[wasm_bindgen]
     pub fn upload_epub(name: String, bytes: Vec<u8>) -> Result<(), JsValue> {
         WebStorage::add_uploaded_file(name.as_str(), bytes)
-            .map_err(|_| JsValue::from_str("failed to store file"))?;
+            .map_err(|error| JsValue::from_str(WebStorage::error_message(&error).as_str()))?;
         WebStorage::reset_session()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_hidden_entry_name, truncate_for_entry_label};
+
+    #[test]
+    fn truncate_label_preserves_utf8_boundaries() {
+        let name = "A".repeat(95) + "ébook";
+        assert_eq!(truncate_for_entry_label(name.as_str(), 96), "A".repeat(95));
+    }
+
+    #[test]
+    fn truncate_label_keeps_complete_ascii_prefix() {
+        assert_eq!(truncate_for_entry_label("chapter-one", 7), "chapter");
+    }
+
+    #[test]
+    fn hidden_entries_match_dot_prefix() {
+        assert!(is_hidden_entry_name(".cool"));
+        assert!(is_hidden_entry_name(".cache"));
+        assert!(!is_hidden_entry_name("book.epub"));
     }
 }
