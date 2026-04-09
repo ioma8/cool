@@ -16,9 +16,7 @@ require_command() {
 }
 
 run_wasm_pack_build() {
-  CARGO_TERM_VERBOSE=true \
-    CARGO_TERM_PROGRESS_WHEN=always \
-    wasm-pack build web-simulator --target web --release --out-dir "$DIST_DIR/pkg" --out-name web_simulator &
+  wasm-pack build web-simulator --target web --release --out-dir "$DIST_DIR/pkg" --out-name web_simulator &
   local pid=$!
   local elapsed=0
 
