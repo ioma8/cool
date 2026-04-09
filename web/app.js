@@ -19,6 +19,12 @@ const actions = {
   power: press_power,
 };
 
+function setStatus(message, tone = "info") {
+  const status = document.getElementById("status");
+  status.textContent = message;
+  status.dataset.tone = tone;
+}
+
 function fitCanvas() {
   const wrap = document.getElementById("screen-wrap");
   const canvas = document.getElementById("screen");
@@ -38,6 +44,7 @@ function fitCanvas() {
 
 async function main() {
   await init();
+  setStatus("Ready. Upload an EPUB to add it to the simulated SD card.");
 
   document.querySelectorAll("button[data-action]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -49,9 +56,17 @@ async function main() {
   document.getElementById("upload").addEventListener("change", async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    upload_epub(file.name, bytes);
-    event.target.value = "";
+    setStatus(`Uploading ${file.name}...`);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      upload_epub(file.name, bytes);
+      setStatus(`Uploaded ${file.name}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`Upload failed: ${message}`, "error");
+    } finally {
+      event.target.value = "";
+    }
   });
 
   window.addEventListener("resize", fitCanvas);

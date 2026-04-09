@@ -16,12 +16,12 @@ require_command() {
 }
 
 run_wasm_pack_build() {
-  wasm-pack build web-simulator --target web --release --out-dir "$DIST_DIR/pkg" --out-name web_simulator &
+  wasm-pack build web-simulator --target web --release --out-dir "$DIST_DIR/pkg" --out-name web_simulator -- -vv &
   local pid=$!
   local elapsed=0
 
   log "wasm-pack pid: $pid"
-  log "cargo verbosity: verbose"
+  log "cargo verbosity: -vv"
   while kill -0 "$pid" >/dev/null 2>&1; do
     sleep 5
     elapsed=$((elapsed + 5))

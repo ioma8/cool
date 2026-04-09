@@ -81,6 +81,14 @@
       grid-template-columns: 1fr;
       gap: var(--gap);
     }
+    #status {
+      min-height: 18px;
+      font-size: 12px;
+      color: #b9c3d1;
+    }
+    #status[data-tone="error"] {
+      color: #ff8e8e;
+    }
     #upload {
       width: 100%;
       font-size: 13px;
@@ -104,6 +112,7 @@
       </div>
       <div id="upload-row">
         <input id="upload" type="file" accept=".epub,application/epub+zip" />
+        <div id="status" aria-live="polite"></div>
       </div>
     </div>
   </div>
