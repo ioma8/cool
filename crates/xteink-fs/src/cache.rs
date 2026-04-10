@@ -6,7 +6,6 @@ pub const CACHE_VERSION: u8 = 7;
 pub const META_FILE_NAME: &str = "meta.txt";
 pub const CONTENT_FILE_NAME: &str = "content.txt";
 pub const CHAPTERS_FILE_NAME: &str = "chapters.idx";
-pub const PAGES_FILE_NAME: &str = "pages.idx";
 pub const PROGRESS_FILE_NAME: &str = "progress.bin";
 pub const CACHE_ROOT_DIR: &str = "/.cool";
 
@@ -31,8 +30,9 @@ pub struct CacheMeta {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressState {
-    pub current_byte_offset: u64,
-    pub current_page_hint: u32,
+    pub previous_page_start_offset: u64,
+    pub current_page_start_offset: u64,
+    pub next_page_start_offset: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +41,6 @@ pub struct CachePaths {
     pub meta: String<PATH_CAPACITY>,
     pub content: String<PATH_CAPACITY>,
     pub chapters: String<PATH_CAPACITY>,
-    pub pages: String<PATH_CAPACITY>,
     pub progress: String<PATH_CAPACITY>,
 }
 
@@ -126,7 +125,6 @@ fn cache_paths_for_epub_with_root(
     let meta = join_cache_file(directory.as_str(), META_FILE_NAME);
     let content = join_cache_file(directory.as_str(), CONTENT_FILE_NAME);
     let chapters = join_cache_file(directory.as_str(), CHAPTERS_FILE_NAME);
-    let pages = join_cache_file(directory.as_str(), PAGES_FILE_NAME);
     let progress = join_cache_file(directory.as_str(), PROGRESS_FILE_NAME);
 
     CachePaths {
@@ -134,7 +132,6 @@ fn cache_paths_for_epub_with_root(
         meta,
         content,
         chapters,
-        pages,
         progress,
     }
 }
@@ -250,20 +247,22 @@ pub fn parse_meta(raw: &str) -> Option<CacheMeta> {
     Some(parsed)
 }
 
-pub fn encode_progress(progress: ProgressState) -> [u8; 12] {
-    let mut raw = [0u8; 12];
-    raw[..8].copy_from_slice(&progress.current_byte_offset.to_le_bytes());
-    raw[8..12].copy_from_slice(&progress.current_page_hint.to_le_bytes());
+pub fn encode_progress(progress: ProgressState) -> [u8; 24] {
+    let mut raw = [0u8; 24];
+    raw[..8].copy_from_slice(&progress.previous_page_start_offset.to_le_bytes());
+    raw[8..16].copy_from_slice(&progress.current_page_start_offset.to_le_bytes());
+    raw[16..24].copy_from_slice(&progress.next_page_start_offset.to_le_bytes());
     raw
 }
 
 pub fn decode_progress(raw: &[u8]) -> Option<ProgressState> {
-    if raw.len() < 12 {
+    if raw.len() < 24 {
         return None;
     }
     Some(ProgressState {
-        current_byte_offset: u64::from_le_bytes(raw[..8].try_into().ok()?),
-        current_page_hint: u32::from_le_bytes(raw[8..12].try_into().ok()?),
+        previous_page_start_offset: u64::from_le_bytes(raw[..8].try_into().ok()?),
+        current_page_start_offset: u64::from_le_bytes(raw[8..16].try_into().ok()?),
+        next_page_start_offset: u64::from_le_bytes(raw[16..24].try_into().ok()?),
     })
 }
 
@@ -308,8 +307,9 @@ mod tests {
     #[test]
     fn progress_roundtrip() {
         let progress = ProgressState {
-            current_byte_offset: 4242,
-            current_page_hint: 11,
+            previous_page_start_offset: 1111,
+            current_page_start_offset: 4242,
+            next_page_start_offset: 9898,
         };
         assert_eq!(decode_progress(&encode_progress(progress)), Some(progress));
     }
@@ -318,6 +318,6 @@ mod tests {
     fn paths_include_sidecars() {
         let paths = cache_paths_for_epub("/MYBOOKS", "BOOK.EPUB");
         assert!(paths.chapters.ends_with(CHAPTERS_FILE_NAME));
-        assert!(paths.pages.ends_with(PAGES_FILE_NAME));
+        assert!(paths.progress.ends_with(PROGRESS_FILE_NAME));
     }
 }

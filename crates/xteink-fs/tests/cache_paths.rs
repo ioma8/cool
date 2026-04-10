@@ -30,10 +30,8 @@ fn cache_paths_use_logical_dot_cool_root() {
     assert!(paths.meta.as_str().starts_with("/.cool/"));
     assert!(paths.content.as_str().starts_with("/.cool/"));
     assert!(paths.chapters.as_str().starts_with("/.cool/"));
-    assert!(paths.pages.as_str().starts_with("/.cool/"));
     assert!(paths.progress.as_str().starts_with("/.cool/"));
     assert!(paths.chapters.ends_with("chapters.idx"));
-    assert!(paths.pages.ends_with("pages.idx"));
 }
 
 #[test]
@@ -45,8 +43,9 @@ fn cache_meta_roundtrip() {
 #[test]
 fn progress_roundtrip() {
     let progress = ProgressState {
-        current_byte_offset: 123_456,
-        current_page_hint: 33,
+        previous_page_start_offset: 12_345,
+        current_page_start_offset: 123_456,
+        next_page_start_offset: 234_567,
     };
     assert_eq!(decode_progress(&encode_progress(progress)), Some(progress));
 }
