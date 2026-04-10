@@ -783,7 +783,10 @@ mod tests {
         assert!(clipped.len() < "An Extremely Long Chapter Title That Must Be Clipped".len());
         let space_width = text_width(" ");
         assert!(
-            layout.left_x.saturating_add(text_width(clipped)).saturating_add(space_width)
+            layout
+                .left_x
+                .saturating_add(text_width(clipped))
+                .saturating_add(space_width)
                 <= layout.right_x,
             "left text must leave room for a separating space before progress"
         );
