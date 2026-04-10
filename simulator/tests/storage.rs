@@ -1,6 +1,16 @@
 use std::fs;
 use std::sync::{Mutex, OnceLock};
 
+fn read_u64_records(path: &std::path::Path) -> Vec<u64> {
+    let raw = fs::read(path).expect("read offset records");
+    raw.chunks_exact(8)
+        .map(|chunk| {
+            let bytes: [u8; 8] = chunk.try_into().expect("record width");
+            u64::from_le_bytes(bytes)
+        })
+        .collect()
+}
+
 fn decisive_fixture_path() -> Option<std::path::PathBuf> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -75,6 +85,9 @@ fn host_storage_uses_shared_cache_reader_and_writes_cache_artifacts() {
     let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
     let meta = tmp.path().join(cache_paths.meta.trim_start_matches('/'));
     let content = tmp.path().join(cache_paths.content.trim_start_matches('/'));
+    let chapters = tmp
+        .path()
+        .join(cache_paths.chapters.trim_start_matches('/'));
     let progress = tmp
         .path()
         .join(cache_paths.progress.trim_start_matches('/'));
@@ -85,8 +98,59 @@ fn host_storage_uses_shared_cache_reader_and_writes_cache_artifacts() {
         "expected shared reader to write cached content"
     );
     assert!(
+        chapters.is_file(),
+        "expected shared reader to write chapter offsets"
+    );
+    assert!(
         progress.is_file(),
         "expected shared reader to write progress"
+    );
+}
+
+#[test]
+fn host_storage_writes_multiple_real_chapter_offsets() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let mut framebuffer = Framebuffer::new();
+
+    storage
+        .render_epub_from_entry(&mut framebuffer, "/", &entry)
+        .expect("render should succeed");
+
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+    let content_len = fs::metadata(tmp.path().join(cache_paths.content.trim_start_matches('/')))
+        .expect("content metadata")
+        .len();
+    let chapter_offsets = read_u64_records(
+        &tmp.path()
+            .join(cache_paths.chapters.trim_start_matches('/')),
+    );
+
+    assert!(
+        chapter_offsets.len() > 2,
+        "expected multiple chapter offsets, got {chapter_offsets:?}"
+    );
+    assert_eq!(chapter_offsets.first().copied(), Some(0));
+    assert!(
+        chapter_offsets
+            .windows(2)
+            .all(|window| window[0] < window[1]),
+        "expected strictly increasing chapter offsets, got {chapter_offsets:?}"
+    );
+    assert!(
+        chapter_offsets
+            .last()
+            .copied()
+            .is_some_and(|offset| offset < content_len),
+        "expected last chapter offset before EOF, got {chapter_offsets:?} with content_len={content_len}"
     );
 }
 

@@ -241,14 +241,6 @@ where
             layout_sig_paginator: LAYOUT_SIG_PAGINATOR,
         };
         write_meta(fs, cache_paths.meta.as_str(), &new_meta)?;
-        // initialize sidecars
-        write_offset_record(fs, cache_paths.chapters.as_str(), 0, true)?;
-        write_chapter_index_record(
-            fs,
-            cache_paths.chapters.as_str(),
-            usize::from(new_meta.next_chapter_index),
-            new_meta.content_length,
-        )?;
         meta = Some(new_meta);
     }
 
@@ -475,25 +467,6 @@ where
     Ok((page_start_offset, next_page_offset))
 }
 
-fn read_page_offset<SD: SdFilesystem>(fs: &SD, path: &str, page: usize) -> Option<u64> {
-    let mut file = fs.open_cache_file_read(path).ok()?;
-    let mut raw = [0u8; 8];
-    for current in 0..=page {
-        let mut total = 0usize;
-        while total < raw.len() {
-            let n = file.read(&mut raw[total..]).ok()?;
-            if n == 0 {
-                return None;
-            }
-            total += n;
-        }
-        if current == page {
-            return Some(u64::from_le_bytes(raw));
-        }
-    }
-    None
-}
-
 struct BuildResult {
     content_length: usize,
     complete: bool,
@@ -517,6 +490,9 @@ where
     let mut content = fs
         .open_cache_file_write(paths.content.as_str())
         .map_err(|_| EpubError::Io)?;
+    let mut chapters = fs
+        .open_cache_file_write(paths.chapters.as_str())
+        .map_err(|_| EpubError::Io)?;
     let mut content_buffer = CacheWriteBuffer::new();
 
     let mut on_text_chunk = |chunk: &str| -> Result<(), EpubError> {
@@ -525,16 +501,24 @@ where
         }
         Ok(())
     };
+    let mut on_chapter_start = |_: u16, offset: usize| -> Result<(), EpubError> {
+        write_offset_bytes(
+            &mut chapters,
+            u64::try_from(offset).map_err(|_| EpubError::OutOfSpace)?,
+        )
+    };
 
-    let build = display.build_epub_cache_prefix_with_text_sink_and_cancel(
+    let build = display.build_epub_cache_prefix_with_callbacks_and_cancel(
         source,
         page_index,
         &mut on_text_chunk,
+        &mut on_chapter_start,
         should_cancel,
     )?;
 
     content_buffer.flush(&mut content)?;
     content.flush().map_err(|_| EpubError::Io)?;
+    chapters.flush().map_err(|_| EpubError::Io)?;
 
     Ok(BuildResult {
         content_length: content_buffer.total_written(),
@@ -615,66 +599,6 @@ fn write_cached_progress<SD: SdFilesystem>(
 fn write_meta<SD: SdFilesystem>(fs: &SD, path: &str, meta: &CacheMeta) -> Result<(), EpubError> {
     let serialized = serialize_meta(meta);
     write_bytes(fs, path, serialized.as_bytes())
-}
-
-fn write_offset_record<SD: SdFilesystem>(
-    fs: &SD,
-    path: &str,
-    offset: u64,
-    truncate: bool,
-) -> Result<(), EpubError> {
-    let mut file = if truncate {
-        fs.open_cache_file_write(path)
-    } else {
-        fs.open_cache_file_append(path)
-    }
-    .map_err(|_| EpubError::Io)?;
-    let raw = encode_offset(offset);
-    let mut written = 0usize;
-    while written < raw.len() {
-        let count = file.write(&raw[written..]).map_err(|_| EpubError::Io)?;
-        if count == 0 {
-            return Err(EpubError::Io);
-        }
-        written += count;
-    }
-    file.flush().map_err(|_| EpubError::Io)?;
-    Ok(())
-}
-
-fn write_chapter_index_record<SD: SdFilesystem>(
-    fs: &SD,
-    path: &str,
-    chapter: usize,
-    offset: u64,
-) -> Result<(), EpubError> {
-    let existing_records = fs
-        .open_cache_file_read(path)
-        .map(|file| file.len() / 8)
-        .unwrap_or(0);
-
-    if chapter < existing_records {
-        return Ok(());
-    }
-
-    let mut file = if existing_records == 0 {
-        fs.open_cache_file_write(path).map_err(|_| EpubError::Io)?
-    } else {
-        fs.open_cache_file_append(path).map_err(|_| EpubError::Io)?
-    };
-
-    let last_offset = if existing_records == 0 {
-        0
-    } else {
-        read_page_offset(fs, path, existing_records - 1).unwrap_or(0)
-    };
-
-    for _ in existing_records..chapter {
-        write_offset_bytes(&mut file, last_offset)?;
-    }
-    write_offset_bytes(&mut file, offset)?;
-    file.flush().map_err(|_| EpubError::Io)?;
-    Ok(())
 }
 
 fn write_offset_bytes<F: SdFsFile>(file: &mut F, offset: u64) -> Result<(), EpubError> {
