@@ -7,9 +7,17 @@ use xteink_memory::{
     DEVICE_PERSISTENT_BUDGET_BYTES, DEVICE_STACK_RESERVE_BYTES, DEVICE_TOTAL_RAM_BYTES,
     DEVICE_TRANSIENT_HEADROOM_BYTES, DeviceMemoryFootprint,
 };
+use xteink_render::bookerly;
 use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, EPUB_RENDER_WORKSPACE_BYTES, Framebuffer};
 
 const SIMULATOR_DEVICE_HEAP_BYTES: usize = 0;
+
+pub fn browser_page_size() -> usize {
+    let line_height = usize::from(bookerly::BOOKERLY.line_height_px());
+    let used_top = 4 + line_height * 2;
+    let visible = usize::from(DISPLAY_HEIGHT).saturating_sub(used_top) / line_height.max(1);
+    visible.clamp(1, xteink_fs::MAX_ENTRIES)
+}
 
 pub fn bootstrap_session<S: AppStorage<Framebuffer>>(
     storage: S,

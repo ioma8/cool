@@ -6,5 +6,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("simulator/sdcard"));
     std::fs::create_dir_all(&root)?;
-    simulator::runtime::run(&root, 8, 1)
+    simulator::runtime::run(&root, simulator::runtime::browser_page_size(), 1)
 }
