@@ -2361,6 +2361,7 @@ dependencies = [
  "esp-println",
  "fontdue",
  "freetype-rs",
+ "heapless 0.8.0",
  "miniz_oxide",
  "rustybuzz",
  "xteink-epub",

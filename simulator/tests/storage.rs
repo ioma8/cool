@@ -164,7 +164,7 @@ fn host_storage_writes_multiple_real_chapter_offsets() {
         chapters.len() > 2,
         "expected multiple chapter records, got {chapters:?}"
     );
-    assert_eq!(chapters.first().map(|chapter| chapter.offset), Some(0));
+    assert_eq!(chapters.first().map(|chapter| chapter.offset), Some(1));
     assert!(
         chapters
             .windows(2)
@@ -424,5 +424,86 @@ fn host_storage_renders_requested_toc_chapter_jump() {
     assert!(
         chapter_framebuffer.bytes().iter().any(|byte| *byte != 0xFF),
         "chapter jump should render visible content"
+    );
+}
+
+#[test]
+fn host_storage_chapter_offsets_land_near_actual_chapter_start_text() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let mut framebuffer = Framebuffer::new();
+
+    storage
+        .render_epub_from_entry(&mut framebuffer, "/", &entry)
+        .expect("initial render should build cache");
+
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+    let chapters = read_cached_chapters(
+        &tmp.path()
+            .join(cache_paths.chapters.trim_start_matches('/')),
+    );
+    let content = fs::read_to_string(tmp.path().join(cache_paths.content.trim_start_matches('/')))
+        .expect("content should be readable");
+    let chapter = chapters
+        .iter()
+        .find(|chapter| chapter.title == "1. The Four Villains of Decision Making")
+        .expect("expected chapter metadata");
+    let search_start = usize::try_from(chapter.offset).expect("offset fits usize");
+    let body_start = content[search_start..]
+        .find("Steve Cole, the VP of research and development")
+        .map(|relative| search_start + relative)
+        .expect("expected chapter opener after chapter offset");
+
+    assert!(
+        body_start.saturating_sub(search_start) <= 128,
+        "chapter offset should land near the actual chapter start, offset={} body_start={body_start}",
+        search_start
+    );
+}
+
+#[test]
+fn host_storage_chapter_cache_starts_new_chapter_page_with_title_and_spacing() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+
+    let mut framebuffer = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut framebuffer, "/", &entry)
+        .expect("render should succeed");
+
+    let chapters = read_cached_chapters(
+        &tmp.path()
+            .join(cache_paths.chapters.trim_start_matches('/')),
+    );
+    let chapter = chapters
+        .iter()
+        .find(|chapter| chapter.title == "1. The Four Villains of Decision Making")
+        .expect("expected numbered chapter metadata");
+    let content = fs::read_to_string(tmp.path().join(cache_paths.content.trim_start_matches('/')))
+        .expect("read cached content");
+    let start = usize::try_from(chapter.offset).expect("chapter offset usize");
+    let slice = &content[start..];
+
+    assert!(
+        slice.starts_with("1. The Four Villains of Decision Making\u{001E}\u{001E}"),
+        "expected chapter page to begin with title and two blank lines, got {:?}",
+        &slice[..slice.len().min(96)]
     );
 }

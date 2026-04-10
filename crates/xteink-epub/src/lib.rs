@@ -266,6 +266,14 @@ impl<S: EpubSource> Epub<S> {
         &'a mut self,
         workspace: ReaderBuffers<'a>,
     ) -> Result<Option<EpubEvent<'a>>, EpubError> {
+        self.next_event_with_spine_index(workspace)
+            .map(|event| event.map(|(_, event)| event))
+    }
+
+    pub fn next_event_with_spine_index<'a>(
+        &'a mut self,
+        workspace: ReaderBuffers<'a>,
+    ) -> Result<Option<(u16, EpubEvent<'a>)>, EpubError> {
         let scratch = ReaderScratch::new(workspace);
         let inflate_ptr = scratch.inflate_ptr();
         let stream_input_ptr = scratch.stream_input_ptr();
@@ -358,7 +366,7 @@ impl<S: EpubSource> Epub<S> {
                     &mut *xml_ptr
                 })?
             {
-                return Ok(Some(event));
+                return Ok(Some((self.state.spine_index, event)));
             }
 
             if self.state.cursor == cursor_before && !self.state.chapter_finished {

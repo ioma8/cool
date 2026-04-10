@@ -223,6 +223,18 @@ impl<const N: usize> PaginatorState<N> {
         self.state.cursor_y()
     }
 
+    pub(crate) fn pending_output_bytes(&self) -> usize {
+        self.text.len
+            + match self.state.pending_action() {
+                PendingAction::None => 0,
+                PendingAction::LineBreak | PendingAction::ParagraphBreak => 1,
+            }
+    }
+
+    pub(crate) fn has_visible_page_content_or_pending_output(&self) -> bool {
+        self.state.page_has_content() || self.pending_output_bytes() > 0
+    }
+
     pub(crate) fn feed<R, O>(
         &mut self,
         renderer: &mut R,

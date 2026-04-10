@@ -1,5 +1,6 @@
 use core::mem::MaybeUninit;
 
+use heapless::String;
 use miniz_oxide::inflate::stream::InflateState;
 use xteink_epub::{
     Epub, EpubArchive, EpubError, EpubEvent, EpubSource, MAX_ARCHIVE_ENTRIES,
@@ -20,6 +21,7 @@ const EPUB_WORKSPACE_XML: usize = 16 * 1024;
 const EPUB_WORKSPACE_CATALOG: usize = 8192;
 const EPUB_WORKSPACE_PATH_BUF: usize = 256;
 const TEXT_LEN: usize = 2048;
+const CHAPTER_TITLE_LEN: usize = 64;
 
 struct EpubRenderWorkspace {
     zip_cd: [u8; EPUB_WORKSPACE_ZIP_CD],
@@ -105,7 +107,7 @@ struct ResumeCheckpoint {
 
 struct CacheTextObserver<'a, F> {
     on_text_chunk: &'a mut F,
-    emitted_text_bytes: usize,
+    emitted_cache_bytes: usize,
 }
 
 impl<F> PaginationObserver for CacheTextObserver<'_, F>
@@ -113,26 +115,33 @@ where
     F: FnMut(&str) -> Result<(), EpubError>,
 {
     fn on_text(&mut self, text: &str) -> Result<(), EpubError> {
-        self.emitted_text_bytes = self.emitted_text_bytes.saturating_add(text.len());
-        (self.on_text_chunk)(text)
+        self.emit_cache_chunk(text)
     }
 
     fn on_line_break(&mut self) -> Result<(), EpubError> {
-        (self.on_text_chunk)(CACHE_LINE_BREAK_MARKER.encode_utf8(&mut [0; 4]))
+        self.emit_cache_chunk(CACHE_LINE_BREAK_MARKER.encode_utf8(&mut [0; 4]))
     }
 
     fn on_paragraph_break(&mut self) -> Result<(), EpubError> {
-        (self.on_text_chunk)(CACHE_PARAGRAPH_BREAK_MARKER.encode_utf8(&mut [0; 4]))
+        self.emit_cache_chunk(CACHE_PARAGRAPH_BREAK_MARKER.encode_utf8(&mut [0; 4]))
     }
 
     fn on_page_break(&mut self) -> Result<(), EpubError> {
-        (self.on_text_chunk)(CACHE_PAGE_BREAK_MARKER.encode_utf8(&mut [0; 4]))
+        self.emit_cache_chunk(CACHE_PAGE_BREAK_MARKER.encode_utf8(&mut [0; 4]))
     }
 }
 
 impl<F> CacheTextObserver<'_, F> {
-    fn emitted_text_bytes(&self) -> usize {
-        self.emitted_text_bytes
+    fn emit_cache_chunk(&mut self, chunk: &str) -> Result<(), EpubError>
+    where
+        F: FnMut(&str) -> Result<(), EpubError>,
+    {
+        self.emitted_cache_bytes = self.emitted_cache_bytes.saturating_add(chunk.len());
+        (self.on_text_chunk)(chunk)
+    }
+
+    fn emitted_cache_bytes(&self) -> usize {
+        self.emitted_cache_bytes
     }
 }
 
@@ -221,6 +230,7 @@ impl Framebuffer {
             target_page,
             &mut |_| Ok(()),
             &mut |_, _| Ok(()),
+            &mut |_| None,
             RenderMode::ThroughChapterBoundaryAfterTarget,
             None,
             &mut || false,
@@ -263,6 +273,7 @@ impl Framebuffer {
             target_page,
             &mut on_text_chunk,
             &mut |_, _| Ok(()),
+            &mut |_| None,
             mode,
             None,
             &mut should_cancel,
@@ -286,21 +297,24 @@ impl Framebuffer {
             target_page,
             &mut on_text_chunk,
             &mut |_, _| Ok(()),
+            &mut |_| None,
             &mut should_cancel,
         )
     }
 
-    pub fn build_epub_cache_prefix_with_callbacks_and_cancel<S: EpubSource, F, G, C>(
+    pub fn build_epub_cache_prefix_with_callbacks_and_cancel<S: EpubSource, F, G, H, C>(
         &mut self,
         source: S,
         target_page: usize,
         mut on_text_chunk: F,
         mut on_chapter_start: G,
+        mut chapter_title_for_index: H,
         mut should_cancel: C,
     ) -> Result<CacheBuildResult, EpubError>
     where
         F: FnMut(&str) -> Result<(), EpubError>,
         G: FnMut(u16, usize) -> Result<(), EpubError>,
+        H: FnMut(u16) -> Option<String<CHAPTER_TITLE_LEN>>,
         C: FnMut() -> bool,
     {
         self.render_epub_with_mode(
@@ -308,6 +322,7 @@ impl Framebuffer {
             target_page,
             &mut on_text_chunk,
             &mut on_chapter_start,
+            &mut chapter_title_for_index,
             RenderMode::FullBookPreserveTargetPage,
             None,
             &mut should_cancel,
@@ -333,6 +348,7 @@ impl Framebuffer {
             target_page,
             &mut on_text_chunk,
             &mut |_, _| Ok(()),
+            &mut |_| None,
             RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget,
             Some(ResumeCheckpoint {
                 page: resume_page,
@@ -343,12 +359,13 @@ impl Framebuffer {
         )
     }
 
-    fn render_epub_with_mode<S: EpubSource, F, G, C>(
+    fn render_epub_with_mode<S: EpubSource, F, G, H, C>(
         &mut self,
         source: S,
         target_page: usize,
         mut on_text_chunk: &mut F,
         on_chapter_start: &mut G,
+        chapter_title_for_index: &mut H,
         mut mode: RenderMode,
         resume: Option<ResumeCheckpoint>,
         should_cancel: &mut C,
@@ -356,6 +373,7 @@ impl Framebuffer {
     where
         F: FnMut(&str) -> Result<(), EpubError>,
         G: FnMut(u16, usize) -> Result<(), EpubError>,
+        H: FnMut(u16) -> Option<String<CHAPTER_TITLE_LEN>>,
         C: FnMut() -> bool,
     {
         with_epub_render_workspace(|workspace| {
@@ -384,16 +402,21 @@ impl Framebuffer {
                 start_cursor_y: resume.map_or(0, |checkpoint| checkpoint.cursor_y),
             });
             if resume.is_none() {
-                on_text_chunk(CACHE_LAYOUT_STREAM_MARKER.encode_utf8(&mut [0; 4]))?;
+                // The layout marker is part of the serialized cache stream.
             }
             let mut observer = CacheTextObserver {
                 on_text_chunk: &mut on_text_chunk,
-                emitted_text_bytes: 0,
+                emitted_cache_bytes: 0,
             };
+            if resume.is_none() {
+                observer.emit_cache_chunk(CACHE_LAYOUT_STREAM_MARKER.encode_utf8(&mut [0; 4]))?;
+            }
             let mut stop_after_spine_index: Option<u16> = None;
             let mut chapter_end_override: Option<(usize, u16)> = None;
             let mut rendered_prefix_text_bytes: Option<usize> = None;
             let mut reported_next_spine_index = 0u16;
+            let mut skip_injected_chapter_heading = false;
+            let mut inside_skipped_heading = false;
 
             if mode != RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget {
                 self.clear(0xFF);
@@ -419,7 +442,7 @@ impl Framebuffer {
                 if should_cancel() {
                     return Err(EpubError::Cancelled);
                 }
-                let event = epub.next_event(ReaderBuffers {
+                let event = epub.next_event_with_spine_index(ReaderBuffers {
                     zip_cd: unsafe { &mut (*workspace_ptr).zip_cd },
                     inflate: unsafe { &mut (*workspace_ptr).inflate },
                     stream_input: unsafe { &mut (*workspace_ptr).stream_input },
@@ -430,10 +453,11 @@ impl Framebuffer {
                     archive: unsafe { &mut (*workspace_ptr).archive },
                 })?;
 
-                let Some(event) = event else { break };
+                let Some((next_spine_index, event)) = event else {
+                    break;
+                };
                 let page_before_event = paginator.current_page();
                 let cursor_before_event = paginator.cursor_y();
-                let chapter_start_offset = observer.emitted_text_bytes();
                 let config = PaginationConfig {
                     target_page,
                     draw_target_page: should_draw_current_page(
@@ -446,22 +470,126 @@ impl Framebuffer {
                     start_page: 0,
                     start_cursor_y: 0,
                 };
+                if next_spine_index > reported_next_spine_index {
+                    let chapter_title_index = reported_next_spine_index;
+                    if paginator.has_visible_page_content_or_pending_output() {
+                        let chapter_break = paginator.feed(
+                            self,
+                            &mut observer,
+                            config,
+                            PaginationEvent::ExplicitPageBreak,
+                        )?;
+                        if chapter_break.target_complete {
+                            rendered_prefix_text_bytes
+                                .get_or_insert(observer.emitted_cache_bytes());
+                            match mode {
+                                RenderMode::TargetPageOnly => break,
+                                RenderMode::ThroughChapterBoundaryAfterTarget => {
+                                    mode = RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget;
+                                    stop_after_spine_index.get_or_insert(next_spine_index);
+                                }
+                                RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => {
+                                    stop_after_spine_index.get_or_insert(next_spine_index);
+                                }
+                                RenderMode::FullBook | RenderMode::FullBookPreserveTargetPage => {}
+                            }
+                        }
+                    }
+                    let chapter_start_offset = observer
+                        .emitted_cache_bytes()
+                        .saturating_add(paginator.pending_output_bytes());
+                    report_chapter_starts(
+                        &mut reported_next_spine_index,
+                        next_spine_index,
+                        chapter_start_offset,
+                        on_chapter_start,
+                    )?;
+                    if let Some(title) = chapter_title_for_index(chapter_title_index)
+                        && !title.is_empty()
+                    {
+                        let title_progress = paginator.feed(
+                            self,
+                            &mut observer,
+                            config,
+                            PaginationEvent::Text(title.as_str()),
+                        )?;
+                        if title_progress.target_complete {
+                            rendered_prefix_text_bytes
+                                .get_or_insert(observer.emitted_cache_bytes());
+                            match mode {
+                                RenderMode::TargetPageOnly => break,
+                                RenderMode::ThroughChapterBoundaryAfterTarget => {
+                                    mode = RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget;
+                                    stop_after_spine_index.get_or_insert(next_spine_index);
+                                }
+                                RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => {
+                                    stop_after_spine_index.get_or_insert(next_spine_index);
+                                }
+                                RenderMode::FullBook | RenderMode::FullBookPreserveTargetPage => {}
+                            }
+                        } else {
+                            for _ in 0..2 {
+                                let spacing_progress = paginator.feed(
+                                    self,
+                                    &mut observer,
+                                    config,
+                                    PaginationEvent::LineBreak,
+                                )?;
+                                if spacing_progress.target_complete {
+                                    rendered_prefix_text_bytes
+                                        .get_or_insert(observer.emitted_cache_bytes());
+                                    match mode {
+                                        RenderMode::TargetPageOnly => break,
+                                        RenderMode::ThroughChapterBoundaryAfterTarget => {
+                                            mode = RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget;
+                                            stop_after_spine_index.get_or_insert(next_spine_index);
+                                        }
+                                        RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => {
+                                            stop_after_spine_index.get_or_insert(next_spine_index);
+                                        }
+                                        RenderMode::FullBook
+                                        | RenderMode::FullBookPreserveTargetPage => {}
+                                    }
+                                }
+                            }
+                        }
+                        skip_injected_chapter_heading = true;
+                        inside_skipped_heading = false;
+                    }
+                }
                 let progress = match event {
-                    EpubEvent::Text(chunk) => {
-                        paginator.feed(self, &mut observer, config, PaginationEvent::Text(chunk))?
+                    EpubEvent::HeadingStart(_) if skip_injected_chapter_heading => {
+                        inside_skipped_heading = true;
+                        None
                     }
-                    EpubEvent::LineBreak => {
-                        paginator.feed(self, &mut observer, config, PaginationEvent::LineBreak)?
+                    EpubEvent::HeadingEnd if inside_skipped_heading => {
+                        inside_skipped_heading = false;
+                        skip_injected_chapter_heading = false;
+                        None
                     }
-                    EpubEvent::ParagraphStart | EpubEvent::HeadingStart(_) => continue,
-                    EpubEvent::ParagraphEnd | EpubEvent::HeadingEnd => paginator.feed(
+                    EpubEvent::Text(_) | EpubEvent::LineBreak if inside_skipped_heading => None,
+                    EpubEvent::Text(chunk) => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::Text(chunk),
+                    )?),
+                    EpubEvent::LineBreak => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::LineBreak,
+                    )?),
+                    EpubEvent::ParagraphStart | EpubEvent::HeadingStart(_) => None,
+                    EpubEvent::ParagraphEnd | EpubEvent::HeadingEnd => Some(paginator.feed(
                         self,
                         &mut observer,
                         config,
                         PaginationEvent::ParagraphBreak,
-                    )?,
-                    EpubEvent::Image { alt, .. } => {
-                        if let Some(alt) = alt {
+                    )?),
+                    EpubEvent::Image { alt, .. } => alt
+                        .map(|alt| {
+                            skip_injected_chapter_heading = false;
                             let progress = paginator.feed(
                                 self,
                                 &mut observer,
@@ -469,37 +597,41 @@ impl Framebuffer {
                                 PaginationEvent::Text(alt),
                             )?;
                             if progress.target_complete {
-                                progress
+                                Ok(progress)
                             } else {
                                 paginator.feed(
                                     self,
                                     &mut observer,
                                     config,
                                     PaginationEvent::LineBreak,
-                                )?
+                                )
                             }
-                        } else {
-                            continue;
-                        }
-                    }
-                    EpubEvent::UnsupportedTag => continue,
+                        })
+                        .transpose()?,
+                    EpubEvent::UnsupportedTag => None,
                 };
-                report_chapter_starts(
-                    &mut reported_next_spine_index,
-                    epub.next_spine_index(),
-                    chapter_start_offset,
-                    on_chapter_start,
-                )?;
+                if !matches!(
+                    event,
+                    EpubEvent::ParagraphStart
+                        | EpubEvent::UnsupportedTag
+                        | EpubEvent::HeadingStart(_)
+                ) && !inside_skipped_heading
+                {
+                    skip_injected_chapter_heading = false;
+                }
+                let Some(progress) = progress else {
+                    continue;
+                };
                 if progress.target_complete {
-                    rendered_prefix_text_bytes.get_or_insert(observer.emitted_text_bytes());
+                    rendered_prefix_text_bytes.get_or_insert(observer.emitted_cache_bytes());
                     match mode {
                         RenderMode::TargetPageOnly => break,
                         RenderMode::ThroughChapterBoundaryAfterTarget => {
                             mode = RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget;
-                            stop_after_spine_index.get_or_insert(epub.next_spine_index());
+                            stop_after_spine_index.get_or_insert(next_spine_index);
                         }
                         RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => {
-                            stop_after_spine_index.get_or_insert(epub.next_spine_index());
+                            stop_after_spine_index.get_or_insert(next_spine_index);
                         }
                         RenderMode::FullBook | RenderMode::FullBookPreserveTargetPage => {}
                     }
@@ -508,7 +640,7 @@ impl Framebuffer {
                     mode,
                     RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget
                 ) && stop_after_spine_index
-                    .map(|stop| epub.next_spine_index() > stop)
+                    .map(|stop| next_spine_index > stop)
                     .unwrap_or(false)
                 {
                     chapter_end_override = Some((page_before_event, cursor_before_event));
@@ -519,7 +651,9 @@ impl Framebuffer {
             report_chapter_starts(
                 &mut reported_next_spine_index,
                 epub.next_spine_index(),
-                observer.emitted_text_bytes(),
+                observer
+                    .emitted_cache_bytes()
+                    .saturating_add(paginator.pending_output_bytes()),
                 on_chapter_start,
             )?;
 
@@ -556,8 +690,8 @@ impl Framebuffer {
                 percent_from_pages(rendered_page, cached_pages)
             } else {
                 percent_from_cached_prefix_bytes(
-                    rendered_prefix_text_bytes.unwrap_or_else(|| observer.emitted_text_bytes()),
-                    observer.emitted_text_bytes(),
+                    rendered_prefix_text_bytes.unwrap_or_else(|| observer.emitted_cache_bytes()),
+                    observer.emitted_cache_bytes(),
                     cached_progress_percent,
                 )
             };

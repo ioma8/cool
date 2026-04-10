@@ -757,6 +757,7 @@ where
         page_index,
         &mut on_text_chunk,
         &mut on_chapter_start,
+        |index| chapter_titles.get(usize::from(index)).cloned(),
         should_cancel,
     )?;
 
