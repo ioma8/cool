@@ -7,6 +7,12 @@ struct CachedChapter {
     title: String,
 }
 
+fn strip_cached_markup(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !matches!(ch, '\u{0001}'..='\u{0008}' | '\u{001C}'))
+        .collect()
+}
+
 fn read_cached_chapters(path: &std::path::Path) -> Vec<CachedChapter> {
     let raw = fs::read(path).expect("read chapter records");
     assert!(
@@ -499,7 +505,7 @@ fn host_storage_chapter_cache_starts_new_chapter_page_with_title_and_spacing() {
     let content = fs::read_to_string(tmp.path().join(cache_paths.content.trim_start_matches('/')))
         .expect("read cached content");
     let start = usize::try_from(chapter.offset).expect("chapter offset usize");
-    let slice = &content[start..];
+    let slice = strip_cached_markup(&content[start..]);
 
     assert!(
         slice.starts_with("1. The Four Villains of Decision Making\u{001E}\u{001E}"),

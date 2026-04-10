@@ -260,7 +260,24 @@ fn renderer_positions(text: &str) -> Vec<i32> {
     positions
 }
 
+fn renderer_positions_with_font(font: &bookerly::Font, text: &str) -> Vec<i32> {
+    let mut positions = Vec::new();
+    font.shape_text(text, |glyph, glyph_x, _| {
+        positions.push(glyph_x + i32::from(glyph.left));
+    });
+    positions
+}
+
 fn shaped_positions(face: &Face<'_>, scale: f32, text: &str) -> Vec<i32> {
+    shaped_positions_with_font(face, scale, text, &bookerly::BOOKERLY)
+}
+
+fn shaped_positions_with_font(
+    face: &Face<'_>,
+    scale: f32,
+    text: &str,
+    font: &bookerly::Font,
+) -> Vec<i32> {
     let features = [
         Feature::new(Tag::from_bytes(b"liga"), 0, ..),
         Feature::new(Tag::from_bytes(b"clig"), 0, ..),
@@ -272,7 +289,7 @@ fn shaped_positions(face: &Face<'_>, scale: f32, text: &str) -> Vec<i32> {
     let mut pen = 0i32;
     let mut positions = Vec::with_capacity(output.glyph_positions().len());
     for (ch, position) in text.chars().zip(output.glyph_positions()) {
-        let glyph = bookerly::BOOKERLY.glyph_for_char(ch);
+        let glyph = font.glyph_for_char(ch);
         positions
             .push(pen + (position.x_offset as f32 * scale).round() as i32 + i32::from(glyph.left));
         pen += (position.x_advance as f32 * scale).round() as i32;
@@ -282,8 +299,12 @@ fn shaped_positions(face: &Face<'_>, scale: f32, text: &str) -> Vec<i32> {
 }
 
 fn unpack_bookerly_bitmap(glyph: &bookerly::Glyph) -> Vec<u8> {
-    let bitmap = &bookerly::BOOKERLY.bitmap
-        [glyph.data_offset as usize..(glyph.data_offset + glyph.data_length) as usize];
+    unpack_bitmap(&bookerly::BOOKERLY, glyph)
+}
+
+fn unpack_bitmap(font: &bookerly::Font, glyph: &bookerly::Glyph) -> Vec<u8> {
+    let bitmap =
+        &font.bitmap[glyph.data_offset as usize..(glyph.data_offset + glyph.data_length) as usize];
     let row_bytes = usize::from(glyph.width).div_ceil(4);
     let mut unpacked = Vec::with_capacity(usize::from(glyph.width) * usize::from(glyph.height));
 
@@ -305,5 +326,130 @@ fn quantize_coverage(value: u8) -> u8 {
         64..=127 => 1,
         128..=191 => 2,
         _ => 3,
+    }
+}
+
+#[test]
+fn heading_font_is_taller_than_body_and_footer_font_is_smaller() {
+    assert!(xteink_render::heading_line_height_px() > xteink_render::body_line_height_px());
+    assert!(xteink_render::footer_line_height_px() < xteink_render::body_line_height_px());
+}
+
+#[test]
+fn footer_renderer_positions_match_full_shaping() {
+    const FONT_SIZE: f32 = 26.0;
+    let font_bytes = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../xteink-display/assets/Bookerly-Regular.ttf"
+    )) as &[u8];
+    let face = Face::from_slice(font_bytes, 0).expect("Bookerly shaping face should parse");
+    let scale = FONT_SIZE / face.units_per_em() as f32;
+    let text = "Minimalism 28%";
+
+    assert_eq!(
+        renderer_positions_with_font(&bookerly::BOOKERLY_FOOTER, text),
+        shaped_positions_with_font(&face, scale, text, &bookerly::BOOKERLY_FOOTER),
+        "footer renderer should match full shaping positions"
+    );
+}
+
+#[test]
+fn draw_footer_text_uses_footer_font_bitmap_data() {
+    let mut framebuffer = Framebuffer::new();
+    let glyph = bookerly::BOOKERLY_FOOTER.glyph_for_char('%');
+    let draw_x = 4u16;
+    let draw_y = 4u16;
+
+    framebuffer.draw_footer_text(draw_x, draw_y, "%");
+
+    for row in 0..glyph.height {
+        for col in 0..glyph.width {
+            let expected = unpack_bitmap(&bookerly::BOOKERLY_FOOTER, glyph)
+                [usize::from(row) * usize::from(glyph.width) + usize::from(col)];
+            let px = draw_x
+                .saturating_add(glyph.left.max(0) as u16)
+                .saturating_add(u16::from(col));
+            let py = draw_y
+                .saturating_add(glyph.top.max(0) as u16)
+                .saturating_add(u16::from(row));
+            assert_eq!(
+                framebuffer.shade_at(px, py),
+                expected,
+                "footer pixel mismatch at ({col}, {row})"
+            );
+        }
+    }
+}
+
+#[test]
+fn footer_glyph_metrics_match_hinted_freetype_metrics() {
+    let library = Library::init().expect("freetype should init");
+    let face = library
+        .new_face(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../xteink-display/assets/Bookerly-Regular.ttf"
+            ),
+            0,
+        )
+        .expect("Bookerly should load in freetype");
+    face.set_pixel_sizes(0, 26).expect("pixel size should set");
+
+    for ch in ['M', 'i', 'n', '2', '8', '%'] {
+        face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
+            .expect("glyph should render");
+        let glyph_slot = face.glyph();
+        let bitmap = glyph_slot.bitmap();
+        let glyph = bookerly::BOOKERLY_FOOTER.glyph_for_char(ch);
+        let ascender = bookerly::BOOKERLY_FOOTER.ascender_px();
+        let expected_top = ascender - glyph_slot.bitmap_top() as i16;
+
+        assert_eq!(
+            glyph.left,
+            glyph_slot.bitmap_left() as i16,
+            "left mismatch for {ch}"
+        );
+        assert_eq!(glyph.top, expected_top, "top mismatch for {ch}");
+        assert_eq!(glyph.width, bitmap.width() as u8, "width mismatch for {ch}");
+        assert_eq!(
+            glyph.height,
+            bitmap.rows() as u8,
+            "height mismatch for {ch}"
+        );
+        assert_eq!(
+            glyph.advance_x,
+            (glyph_slot.advance().x >> 6) as u16,
+            "advance mismatch for {ch}"
+        );
+    }
+}
+
+#[test]
+fn footer_glyph_bitmaps_match_hinted_freetype_rasterization() {
+    let library = Library::init().expect("freetype should init");
+    let face = library
+        .new_face(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../xteink-display/assets/Bookerly-Regular.ttf"
+            ),
+            0,
+        )
+        .expect("Bookerly should load in freetype");
+    face.set_pixel_sizes(0, 26).expect("pixel size should set");
+
+    for ch in ['M', 'i', 'n', '2', '8', '%'] {
+        face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
+            .expect("glyph should render");
+        let slot = face.glyph();
+        let bitmap = slot.bitmap();
+        let glyph = bookerly::BOOKERLY_FOOTER.glyph_for_char(ch);
+        let actual = unpack_bitmap(&bookerly::BOOKERLY_FOOTER, glyph);
+        let expected = bitmap
+            .buffer()
+            .iter()
+            .map(|value| quantize_coverage(*value))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "bitmap mismatch for {ch}");
     }
 }

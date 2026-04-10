@@ -482,3 +482,15 @@ fn down_in_reader_uses_next_page_storage_path() {
     assert_eq!(session.storage().next_calls.borrow().as_slice(), &[1]);
     assert!(session.storage().full_page_calls.borrow().is_empty());
 }
+
+#[test]
+fn opening_an_epub_draws_footer_with_footer_variant() {
+    let mut session = Session::new(FakeStorage, Framebuffer::new(), 8);
+    session.bootstrap().expect("bootstrap should work");
+
+    session
+        .handle_button(Button::Back)
+        .expect("open should work");
+
+    assert!(session.renderer().bytes().iter().any(|byte| *byte != 0xFF));
+}

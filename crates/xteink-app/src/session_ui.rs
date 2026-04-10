@@ -1,7 +1,6 @@
 use heapless::String;
 use xteink_browser::EntryKind;
 use xteink_controller::UiEntry;
-use xteink_render::bookerly;
 
 use super::{AppRenderer, ListedEntry};
 
@@ -59,9 +58,9 @@ impl SessionUi {
         let layout = xteink_render::layout_reader_footer(chapter_title, None, right.as_str());
 
         if let Some(text) = layout.left_text {
-            renderer.draw_text(layout.left_x, footer_y.saturating_add(4), text);
+            renderer.draw_footer_text(layout.left_x, footer_y.saturating_add(4), text);
         }
-        renderer.draw_text(
+        renderer.draw_footer_text(
             layout.right_x,
             footer_y.saturating_add(4),
             layout.right_text,
@@ -98,10 +97,10 @@ impl SessionUi {
         show_kind: bool,
     ) {
         renderer.clear(0xFF);
-        renderer.draw_text(4, 4, title);
+        renderer.draw_heading_text(4, 4, title);
 
-        let line_height = bookerly::BOOKERLY.line_height_px();
-        let mut cursor_y = 4 + line_height * 2;
+        let line_height = xteink_render::body_line_height_px();
+        let mut cursor_y = 4 + xteink_render::heading_line_height_px() + line_height;
         for (index, entry) in entries.iter().enumerate() {
             if cursor_y.saturating_add(line_height) > xteink_render::DISPLAY_HEIGHT {
                 break;
@@ -139,6 +138,8 @@ mod tests {
         clears: Vec<u8, 4>,
         fills: Vec<(u16, u16, u16, u16, u8), 4>,
         texts: Vec<(u16, u16, String<128>), 8>,
+        heading_texts: Vec<(u16, u16, String<128>), 4>,
+        footer_texts: Vec<(u16, u16, String<128>), 4>,
     }
 
     impl AppRenderer for RecordingRenderer {
@@ -154,6 +155,18 @@ mod tests {
             let mut rendered_text = String::new();
             let _ = rendered_text.push_str(text);
             let _ = self.texts.push((x, y, rendered_text));
+        }
+
+        fn draw_heading_text(&mut self, x: u16, y: u16, text: &str) {
+            let mut rendered_text = String::new();
+            let _ = rendered_text.push_str(text);
+            let _ = self.heading_texts.push((x, y, rendered_text));
+        }
+
+        fn draw_footer_text(&mut self, x: u16, y: u16, text: &str) {
+            let mut rendered_text = String::new();
+            let _ = rendered_text.push_str(text);
+            let _ = self.footer_texts.push((x, y, rendered_text));
         }
     }
 
@@ -193,6 +206,12 @@ mod tests {
         );
         assert!(
             renderer
+                .heading_texts
+                .iter()
+                .any(|(_, _, text)| text.as_str() == "/")
+        );
+        assert!(
+            renderer
                 .texts
                 .iter()
                 .any(|(_, _, text)| text.as_str().contains("[D] Books"))
@@ -220,17 +239,17 @@ mod tests {
         assert_eq!(renderer.fills.len(), 1);
         assert!(
             renderer
-                .texts
+                .footer_texts
                 .iter()
                 .any(|(_, _, text)| text.as_str() == "42%")
         );
         let left = renderer
-            .texts
+            .footer_texts
             .iter()
             .find(|(_, _, text)| text.as_str().starts_with("A Very Long"))
             .expect("left chapter title");
         let right = renderer
-            .texts
+            .footer_texts
             .iter()
             .find(|(_, _, text)| text.as_str() == "42%")
             .expect("right progress");
@@ -248,13 +267,13 @@ mod tests {
 
         assert!(
             renderer
-                .texts
+                .footer_texts
                 .iter()
                 .any(|(_, _, text)| text.as_str() == "100%")
         );
         assert!(
             renderer
-                .texts
+                .footer_texts
                 .iter()
                 .any(|(_, _, text)| text.as_str() == "Introduction")
         );
@@ -273,7 +292,7 @@ mod tests {
 
         assert!(
             renderer
-                .texts
+                .heading_texts
                 .iter()
                 .any(|(_, _, text)| text.as_str() == "Table of contents")
         );

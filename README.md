@@ -149,6 +149,32 @@ Cache files for each EPUB are written under `/.cool/<book>/`:
 - `chapters.idx`: `CHP1` header followed by chapter records of `u64 start_offset`, `u16 title_len`, and UTF-8 title bytes
 - `progress.bin`: three little-endian `u64` values in order `previous`, `current`, `next`
 
+`content.txt` is not plain visible text anymore. It is a UTF-8 text stream with invisible inline control markers embedded directly in the byte stream. These markers are part of offset truth and therefore count toward chapter offsets, resume offsets, and progress offsets, but they do not render as visible glyphs.
+
+Current marker set:
+
+- `U+001C`: layout stream marker
+- `U+001D`: hard page break
+- `U+001E`: hard line break
+- `U+001F`: paragraph break
+- `U+0001`: heading start
+- `U+0002`: heading end
+- `U+0003`: bold start
+- `U+0004`: bold end
+- `U+0005`: italic start
+- `U+0006`: italic end
+- `U+0007`: quote start
+- `U+0008`: quote end
+
+Renderer rules for inline markers:
+
+- markers are zero-width and are never drawn directly
+- raw byte offsets continue to point into `content.txt` including these marker bytes
+- cached replay maintains a style state while consuming the stream
+- heading runs render with the larger heading font
+- bold runs render with heavier emphasis
+- italic and quote markers are preserved in the stream and can affect styling without changing offset semantics
+
 Reader behavior:
 
 - cold open builds the full cache before later pages are read from it

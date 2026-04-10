@@ -1,8 +1,13 @@
-use crate::{
-    bookerly,
-    text::{TextBuffer, WrappedTextLayoutResult},
-};
+use crate::text::{TextBuffer, WrappedTextLayoutResult};
 use xteink_epub::EpubError;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TextStyle {
+    pub(crate) heading: bool,
+    pub(crate) bold: bool,
+    pub(crate) italic: bool,
+    pub(crate) quote: bool,
+}
 
 pub(crate) trait PaginationRenderer {
     fn clear_to_white(&mut self);
@@ -12,6 +17,7 @@ pub(crate) trait PaginationRenderer {
         y: u16,
         text: &str,
         max_y: u16,
+        style: TextStyle,
     ) -> WrappedTextLayoutResult;
     fn measure_wrapped_text_block(
         &mut self,
@@ -19,8 +25,10 @@ pub(crate) trait PaginationRenderer {
         y: u16,
         text: &str,
         max_y: u16,
+        style: TextStyle,
     ) -> WrappedTextLayoutResult;
     fn display_height(&self) -> u16;
+    fn line_height(&self, style: TextStyle) -> u16;
 }
 
 pub(crate) trait PaginationObserver {
@@ -39,6 +47,38 @@ pub(crate) trait PaginationObserver {
     fn on_page_break(&mut self) -> Result<(), EpubError> {
         Ok(())
     }
+
+    fn on_heading_start(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
+
+    fn on_heading_end(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
+
+    fn on_bold_start(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
+
+    fn on_bold_end(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
+
+    fn on_italic_start(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
+
+    fn on_italic_end(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
+
+    fn on_quote_start(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
+
+    fn on_quote_end(&mut self) -> Result<(), EpubError> {
+        Ok(())
+    }
 }
 
 pub(crate) struct NoopPaginationObserver;
@@ -50,6 +90,14 @@ pub(crate) enum PaginationEvent<'a> {
     Text(&'a str),
     LineBreak,
     ParagraphBreak,
+    HeadingStart,
+    HeadingEnd,
+    BoldStart,
+    BoldEnd,
+    ItalicStart,
+    ItalicEnd,
+    QuoteStart,
+    QuoteEnd,
     ExplicitPageBreak,
     EnableExplicitBreaks,
     End,
@@ -86,6 +134,7 @@ pub(crate) struct PaginationState {
     page_has_content: bool,
     pending_action: PendingAction,
     explicit_page_breaks: bool,
+    style: TextStyle,
 }
 
 impl PaginationState {
@@ -96,6 +145,12 @@ impl PaginationState {
             page_has_content: config.start_cursor_y > 0,
             pending_action: PendingAction::None,
             explicit_page_breaks: false,
+            style: TextStyle {
+                heading: false,
+                bold: false,
+                italic: false,
+                quote: false,
+            },
         }
     }
 
@@ -115,6 +170,10 @@ impl PaginationState {
         self.explicit_page_breaks = true;
     }
 
+    pub(crate) fn style(&self) -> TextStyle {
+        self.style
+    }
+
     pub(crate) fn set_pending_action(&mut self, pending_action: PendingAction) {
         self.pending_action = pending_action;
     }
@@ -127,16 +186,16 @@ impl PaginationState {
         self.pending_action = PendingAction::None;
     }
 
-    pub(crate) fn advance_line_break(&mut self) {
-        self.cursor_y = self
-            .cursor_y
-            .saturating_add(bookerly::BOOKERLY.line_height_px());
+    pub(crate) fn set_style(&mut self, style: TextStyle) {
+        self.style = style;
     }
 
-    pub(crate) fn advance_paragraph_break(&mut self) {
-        self.cursor_y = self
-            .cursor_y
-            .saturating_add(bookerly::BOOKERLY.line_height_px() / 2);
+    pub(crate) fn advance_line_break(&mut self, line_height: u16) {
+        self.cursor_y = self.cursor_y.saturating_add(line_height);
+    }
+
+    pub(crate) fn advance_paragraph_break(&mut self, line_height: u16) {
+        self.cursor_y = self.cursor_y.saturating_add(line_height / 2);
     }
 
     pub(crate) fn set_cursor_y(&mut self, cursor_y: u16) {
@@ -179,20 +238,6 @@ impl PaginationState {
             target_complete: false,
             clear_framebuffer: true,
         }
-    }
-
-    pub(crate) fn apply_pending_action(&mut self) {
-        if !self.page_has_content {
-            self.clear_pending_action();
-            return;
-        }
-
-        match self.pending_action {
-            PendingAction::None => {}
-            PendingAction::LineBreak => self.advance_line_break(),
-            PendingAction::ParagraphBreak => self.advance_paragraph_break(),
-        }
-        self.clear_pending_action();
     }
 }
 
@@ -274,6 +319,78 @@ impl<const N: usize> PaginatorState<N> {
                     target_complete = self.apply_pending_action(renderer, observer, config)?;
                 }
             }
+            PaginationEvent::HeadingStart => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.heading = true,
+                    |observer| observer.on_heading_start(),
+                )?;
+            }
+            PaginationEvent::HeadingEnd => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.heading = false,
+                    |observer| observer.on_heading_end(),
+                )?;
+            }
+            PaginationEvent::BoldStart => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.bold = true,
+                    |observer| observer.on_bold_start(),
+                )?;
+            }
+            PaginationEvent::BoldEnd => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.bold = false,
+                    |observer| observer.on_bold_end(),
+                )?;
+            }
+            PaginationEvent::ItalicStart => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.italic = true,
+                    |observer| observer.on_italic_start(),
+                )?;
+            }
+            PaginationEvent::ItalicEnd => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.italic = false,
+                    |observer| observer.on_italic_end(),
+                )?;
+            }
+            PaginationEvent::QuoteStart => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.quote = true,
+                    |observer| observer.on_quote_start(),
+                )?;
+            }
+            PaginationEvent::QuoteEnd => {
+                target_complete = self.transition_style(
+                    renderer,
+                    observer,
+                    config,
+                    |style| style.quote = false,
+                    |observer| observer.on_quote_end(),
+                )?;
+            }
             PaginationEvent::ExplicitPageBreak => {
                 target_complete = self.flush_text(renderer, observer, config)?;
                 if !target_complete {
@@ -345,6 +462,7 @@ impl<const N: usize> PaginatorState<N> {
                         self.state.cursor_y(),
                         current_text,
                         renderer.display_height(),
+                        self.state.style(),
                     )
                 } else {
                     renderer.measure_wrapped_text_block(
@@ -352,6 +470,7 @@ impl<const N: usize> PaginatorState<N> {
                         self.state.cursor_y(),
                         current_text,
                         renderer.display_height(),
+                        self.state.style(),
                     )
                 };
             if result.consumed > 0 {
@@ -396,12 +515,16 @@ impl<const N: usize> PaginatorState<N> {
             PendingAction::None => {}
             PendingAction::LineBreak => {
                 observer.on_line_break()?;
+                self.state
+                    .advance_line_break(renderer.line_height(self.state.style()));
             }
             PendingAction::ParagraphBreak => {
                 observer.on_paragraph_break()?;
+                self.state
+                    .advance_paragraph_break(renderer.line_height(self.state.style()));
             }
         }
-        self.state.apply_pending_action();
+        self.state.clear_pending_action();
 
         if self
             .state
@@ -438,17 +561,39 @@ impl<const N: usize> PaginatorState<N> {
         renderer.clear_to_white();
         Ok(outcome.target_complete)
     }
+
+    fn transition_style<R, O>(
+        &mut self,
+        renderer: &mut R,
+        observer: &mut O,
+        config: PaginationConfig,
+        mut update_style: impl FnMut(&mut TextStyle),
+        notify: impl FnOnce(&mut O) -> Result<(), EpubError>,
+    ) -> Result<bool, EpubError>
+    where
+        R: PaginationRenderer,
+        O: PaginationObserver,
+    {
+        let target_complete = self.flush_text(renderer, observer, config)?;
+        notify(observer)?;
+        let mut style = self.state.style();
+        update_style(&mut style);
+        self.state.set_style(style);
+        Ok(target_complete)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bookerly;
     use crate::text::WrappedTextLayoutResult;
     use std::vec;
 
     #[derive(Default)]
     struct FakeRenderer {
         cleared: usize,
+        drawn_styles: std::vec::Vec<TextStyle>,
     }
 
     impl PaginationRenderer for FakeRenderer {
@@ -462,9 +607,11 @@ mod tests {
             y: u16,
             text: &str,
             _max_y: u16,
+            style: TextStyle,
         ) -> WrappedTextLayoutResult {
+            self.drawn_styles.push(style);
             WrappedTextLayoutResult {
-                next_y: y.saturating_add(bookerly::BOOKERLY.line_height_px()),
+                next_y: y.saturating_add(self.line_height(style)),
                 consumed: text.len(),
             }
         }
@@ -475,15 +622,24 @@ mod tests {
             y: u16,
             text: &str,
             _max_y: u16,
+            style: TextStyle,
         ) -> WrappedTextLayoutResult {
             WrappedTextLayoutResult {
-                next_y: y.saturating_add(bookerly::BOOKERLY.line_height_px()),
+                next_y: y.saturating_add(self.line_height(style)),
                 consumed: text.len(),
             }
         }
 
         fn display_height(&self) -> u16 {
             bookerly::BOOKERLY.line_height_px()
+        }
+
+        fn line_height(&self, style: TextStyle) -> u16 {
+            if style.heading {
+                bookerly::BOOKERLY_HEADING.line_height_px()
+            } else {
+                bookerly::BOOKERLY_BODY.line_height_px()
+            }
         }
     }
 
@@ -510,6 +666,16 @@ mod tests {
 
         fn on_page_break(&mut self) -> Result<(), EpubError> {
             self.events.push("page");
+            Ok(())
+        }
+
+        fn on_heading_start(&mut self) -> Result<(), EpubError> {
+            self.events.push("heading-start");
+            Ok(())
+        }
+
+        fn on_heading_end(&mut self) -> Result<(), EpubError> {
+            self.events.push("heading-end");
             Ok(())
         }
     }
@@ -609,7 +775,8 @@ mod tests {
 
         state.mark_page_has_content();
         state.set_pending_action(PendingAction::LineBreak);
-        state.apply_pending_action();
+        state.advance_line_break(bookerly::BOOKERLY.line_height_px());
+        state.clear_pending_action();
 
         assert_eq!(state.cursor_y(), bookerly::BOOKERLY.line_height_px());
         assert_eq!(state.pending_action(), PendingAction::None);
@@ -619,5 +786,71 @@ mod tests {
         assert!(outcome.clear_framebuffer);
         assert_eq!(state.current_page(), 1);
         assert_eq!(state.cursor_y(), 0);
+    }
+
+    #[test]
+    fn heading_events_switch_drawn_text_to_heading_style() {
+        let mut renderer = FakeRenderer::default();
+        let mut observer = RecordingObserver::default();
+        let mut state = PaginatorState::<64>::new(PaginationConfig {
+            target_page: 0,
+            draw_target_page: true,
+            stop_after_target_page: true,
+            preserve_target_page_framebuffer: false,
+            start_page: 0,
+            start_cursor_y: 0,
+        });
+        let config = PaginationConfig {
+            target_page: 0,
+            draw_target_page: true,
+            stop_after_target_page: true,
+            preserve_target_page_framebuffer: false,
+            start_page: 0,
+            start_cursor_y: 0,
+        };
+
+        state
+            .feed(
+                &mut renderer,
+                &mut observer,
+                config,
+                PaginationEvent::HeadingStart,
+            )
+            .expect("heading start should succeed");
+        state
+            .feed(
+                &mut renderer,
+                &mut observer,
+                config,
+                PaginationEvent::Text("Chapter"),
+            )
+            .expect("heading text should succeed");
+        state
+            .feed(
+                &mut renderer,
+                &mut observer,
+                config,
+                PaginationEvent::HeadingEnd,
+            )
+            .expect("heading end should succeed");
+        state
+            .feed(
+                &mut renderer,
+                &mut observer,
+                config,
+                PaginationEvent::Text("Body"),
+            )
+            .expect("body text should succeed");
+        let _ = state
+            .feed(&mut renderer, &mut observer, config, PaginationEvent::End)
+            .expect("end should succeed");
+
+        assert_eq!(
+            observer.events,
+            vec!["heading-start", "text", "heading-end", "text"]
+        );
+        assert_eq!(renderer.drawn_styles.len(), 2);
+        assert!(renderer.drawn_styles[0].heading);
+        assert!(!renderer.drawn_styles[1].heading);
     }
 }

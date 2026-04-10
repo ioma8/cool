@@ -59,14 +59,36 @@ This is not a small arithmetic bug. It is a data-model problem.
 
 #### `content.txt`
 
-Full linearized cached text for the book, including pagination control markers already used by cached replay.
+Full linearized cached text for the book, including invisible pagination and style control markers consumed by cached replay.
 
 Requirements:
 
 - represents the entire cached book, not only a prefix
 - is the sole source for page rendering after cache build
-- uses the existing cached replay markers already emitted by `xteink-render`
+- uses embedded zero-width cached replay markers for structure and style
 - all byte offsets used by reader state and chapter metadata refer into this file
+
+Marker bytes currently reserved in the stream:
+
+- `U+001C`: layout stream marker
+- `U+001D`: hard page break
+- `U+001E`: hard line break
+- `U+001F`: paragraph break
+- `U+0001`: heading start
+- `U+0002`: heading end
+- `U+0003`: bold start
+- `U+0004`: bold end
+- `U+0005`: italic start
+- `U+0006`: italic end
+- `U+0007`: quote start
+- `U+0008`: quote end
+
+Invariants:
+
+- these markers are part of raw `content.txt` byte offsets
+- they must never render as visible glyphs
+- they must be balanced when emitted as paired style markers
+- unknown markers should be ignored by replay rather than displayed
 
 #### `meta.txt`
 
@@ -107,6 +129,12 @@ Requirements:
 - chapter titles fall back to the first visible text near the chapter start offset when nav metadata is missing
 - stored titles are truncated to 64 characters
 - no page numbers are stored here
+
+Chapter-start layout behavior:
+
+- each new chapter starts on a forced new page in the cached stream
+- injected chapter titles are wrapped in heading start/end markers in `content.txt`
+- exactly two hard line breaks follow the visible chapter title before chapter body text
 
 #### `progress.bin`
 

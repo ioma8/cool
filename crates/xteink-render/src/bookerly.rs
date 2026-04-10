@@ -27,7 +27,7 @@ pub struct PairPositioning {
     pub advance_adjust: i16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Font {
     pub bitmap: &'static [u8],
     pub glyphs: &'static [Glyph],

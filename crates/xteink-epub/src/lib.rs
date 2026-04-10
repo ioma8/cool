@@ -165,6 +165,12 @@ pub enum EpubEvent<'a> {
     ParagraphEnd,
     HeadingStart(u8),
     HeadingEnd,
+    BoldStart,
+    BoldEnd,
+    ItalicStart,
+    ItalicEnd,
+    QuoteStart,
+    QuoteEnd,
     LineBreak,
     Image { src: &'a str, alt: Option<&'a str> },
     UnsupportedTag,
@@ -187,6 +193,9 @@ struct ParserState {
     compressed_read: usize,
     in_paragraph: bool,
     in_heading: u8,
+    bold_depth: u8,
+    italic_depth: u8,
+    quote_depth: u8,
     in_pre: bool,
     chapter_is_nav_doc: bool,
     nav_suppress_outside: bool,
@@ -226,6 +235,9 @@ impl Default for ParserState {
             compressed_read: 0,
             in_paragraph: false,
             in_heading: 0,
+            bold_depth: 0,
+            italic_depth: 0,
+            quote_depth: 0,
             in_pre: false,
             chapter_is_nav_doc: false,
             nav_suppress_outside: false,
@@ -1931,6 +1943,18 @@ fn match_tag_end<'a>(
         }
         return Ok(None);
     }
+    if (tag.name_is("strong") || tag.name_is("b")) && state.bold_depth > 0 {
+        state.bold_depth = state.bold_depth.saturating_sub(1);
+        return Ok(Some(EpubEvent::BoldEnd));
+    }
+    if (tag.name_is("em") || tag.name_is("i")) && state.italic_depth > 0 {
+        state.italic_depth = state.italic_depth.saturating_sub(1);
+        return Ok(Some(EpubEvent::ItalicEnd));
+    }
+    if (tag.name_is("blockquote") || tag.name_is("q")) && state.quote_depth > 0 {
+        state.quote_depth = state.quote_depth.saturating_sub(1);
+        return Ok(Some(EpubEvent::QuoteEnd));
+    }
     Ok(None)
 }
 
@@ -2056,6 +2080,18 @@ fn parse_tag_start<'a>(
             state.in_heading = level;
             return Ok(Some(EpubEvent::HeadingStart(level)));
         }
+    }
+    if (tag.name_is("strong") || tag.name_is("b")) && !tag.is_self_closing {
+        state.bold_depth = state.bold_depth.saturating_add(1);
+        return Ok(Some(EpubEvent::BoldStart));
+    }
+    if (tag.name_is("em") || tag.name_is("i")) && !tag.is_self_closing {
+        state.italic_depth = state.italic_depth.saturating_add(1);
+        return Ok(Some(EpubEvent::ItalicStart));
+    }
+    if (tag.name_is("blockquote") || tag.name_is("q")) && !tag.is_self_closing {
+        state.quote_depth = state.quote_depth.saturating_add(1);
+        return Ok(Some(EpubEvent::QuoteStart));
     }
     if tag.name_is("pre") {
         state.in_pre = true;

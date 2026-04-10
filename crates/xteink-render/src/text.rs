@@ -1,4 +1,4 @@
-use crate::bookerly;
+use crate::{bookerly, paginator::TextStyle};
 
 pub(crate) struct WrappedLine<const N: usize> {
     pub(crate) buf: [u8; N],
@@ -75,21 +75,21 @@ impl<const N: usize> WrappedLine<N> {
         self.width = 0;
     }
 
-    pub(crate) fn push_space(&mut self) {
+    pub(crate) fn push_space(&mut self, style: TextStyle) {
         if self.len < self.buf.len() {
             self.buf[self.len] = b' ';
             self.len += 1;
-            self.width += measure_text_width(" ");
+            self.width += measure_text_width_with_style(" ", style);
         }
     }
 
-    pub(crate) fn push_str(&mut self, text: &str) {
+    pub(crate) fn push_str(&mut self, text: &str, style: TextStyle) {
         let bytes = text.as_bytes();
         let remaining = self.buf.len().saturating_sub(self.len);
         let copy_len = core::cmp::min(remaining, bytes.len());
         self.buf[self.len..self.len + copy_len].copy_from_slice(&bytes[..copy_len]);
         self.len += copy_len;
-        self.width += measure_text_width(text);
+        self.width += measure_text_width_with_style(text, style);
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -97,8 +97,16 @@ impl<const N: usize> WrappedLine<N> {
     }
 }
 
-pub(crate) fn measure_text_width(text: &str) -> i32 {
-    bookerly::BOOKERLY.shape_text(text, |_, _, _| {})
+fn font_for_style(style: TextStyle) -> &'static bookerly::Font {
+    if style.heading {
+        &bookerly::BOOKERLY_HEADING
+    } else {
+        &bookerly::BOOKERLY_BODY
+    }
+}
+
+pub(crate) fn measure_text_width_with_style(text: &str, style: TextStyle) -> i32 {
+    font_for_style(style).shape_text(text, |_, _, _| {})
 }
 
 pub(crate) fn layout_wrapped_text_page<const N: usize>(
@@ -107,10 +115,11 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
     y: u16,
     text: &str,
     max_y: u16,
+    style: TextStyle,
     mut draw_line: impl FnMut(u16, u16, &str),
 ) -> WrappedTextLayoutResult {
     let mut cursor_y = y;
-    let line_height = bookerly::BOOKERLY.line_height_px();
+    let line_height = font_for_style(style).line_height_px();
     let available_width = i32::from(crate::DISPLAY_WIDTH.saturating_sub(x));
     let mut consumed = 0usize;
     let mut word_start: Option<usize> = None;
@@ -144,11 +153,12 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
         if ch == '\n' {
             if let Some(start) = word_start.take() {
                 let word = &text[start..after_word];
-                let word_width = measure_text_width(word);
+                let word_width = measure_text_width_with_style(word, style);
                 let fits = if line.is_empty() {
                     word_width <= available_width
                 } else {
-                    line.width + measure_text_width(" ") + word_width <= available_width
+                    line.width + measure_text_width_with_style(" ", style) + word_width
+                        <= available_width
                 };
                 if !fits && !line.is_empty() {
                     if flush_line(line, &mut cursor_y, &mut consumed, start, &mut draw_line) {
@@ -159,9 +169,9 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
                     }
                 }
                 if !line.is_empty() && pending_space {
-                    line.push_space();
+                    line.push_space(style);
                 }
-                line.push_str(word);
+                line.push_str(word, style);
             }
             pending_space = false;
             word_start = None;
@@ -184,11 +194,12 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
         if ch.is_whitespace() {
             if let Some(start) = word_start.take() {
                 let word = &text[start..after_word];
-                let word_width = measure_text_width(word);
+                let word_width = measure_text_width_with_style(word, style);
                 let fits = if line.is_empty() {
                     word_width <= available_width
                 } else {
-                    line.width + measure_text_width(" ") + word_width <= available_width
+                    line.width + measure_text_width_with_style(" ", style) + word_width
+                        <= available_width
                 };
                 if !fits && !line.is_empty() {
                     if flush_line(line, &mut cursor_y, &mut consumed, start, &mut draw_line) {
@@ -199,9 +210,9 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
                     }
                 }
                 if !line.is_empty() && pending_space {
-                    line.push_space();
+                    line.push_space(style);
                 }
-                line.push_str(word);
+                line.push_str(word, style);
             } else if line.is_empty() {
                 consumed = idx + ch.len_utf8();
             }
@@ -219,11 +230,12 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
         if iter.peek().is_none() {
             let start = word_start.take().unwrap_or(idx);
             let word = &text[start..after_word];
-            let word_width = measure_text_width(word);
+            let word_width = measure_text_width_with_style(word, style);
             let fits = if line.is_empty() {
                 word_width <= available_width
             } else {
-                line.width + measure_text_width(" ") + word_width <= available_width
+                line.width + measure_text_width_with_style(" ", style) + word_width
+                    <= available_width
             };
             if !fits && !line.is_empty() {
                 if flush_line(line, &mut cursor_y, &mut consumed, start, &mut draw_line) {
@@ -234,9 +246,9 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
                 }
             }
             if !line.is_empty() && pending_space {
-                line.push_space();
+                line.push_space(style);
             }
-            line.push_str(word);
+            line.push_str(word, style);
         }
     }
 

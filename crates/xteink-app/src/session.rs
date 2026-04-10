@@ -64,6 +64,8 @@ pub trait AppRenderer {
     fn clear(&mut self, color: u8);
     fn fill_rect(&mut self, x: u16, y: u16, width: u16, height: u16, color: u8);
     fn draw_text(&mut self, x: u16, y: u16, text: &str);
+    fn draw_heading_text(&mut self, x: u16, y: u16, text: &str);
+    fn draw_footer_text(&mut self, x: u16, y: u16, text: &str);
 }
 
 impl AppRenderer for xteink_render::Framebuffer {
@@ -77,6 +79,14 @@ impl AppRenderer for xteink_render::Framebuffer {
 
     fn draw_text(&mut self, x: u16, y: u16, text: &str) {
         xteink_render::Framebuffer::draw_text(self, x, y, text);
+    }
+
+    fn draw_heading_text(&mut self, x: u16, y: u16, text: &str) {
+        xteink_render::Framebuffer::draw_heading_text(self, x, y, text);
+    }
+
+    fn draw_footer_text(&mut self, x: u16, y: u16, text: &str) {
+        xteink_render::Framebuffer::draw_footer_text(self, x, y, text);
     }
 }
 

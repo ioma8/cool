@@ -1,10 +1,12 @@
-use std::{char, env, fs, path::PathBuf};
+use std::{char, collections::BTreeSet, env, fs, path::PathBuf};
 
 use fontdue::{Font, FontSettings};
 use freetype::Library;
 use rustybuzz::{Face, UnicodeBuffer};
 
-const FONT_SIZE: f32 = 32.0;
+const BODY_FONT_SIZE: f32 = 32.0;
+const HEADING_FONT_SIZE: f32 = 38.0;
+const FOOTER_FONT_SIZE: f32 = 26.0;
 const FONT_PATH: &str = "../xteink-display/assets/Bookerly-Regular.ttf";
 const OUTPUT_FILE: &str = "bookerly_generated.rs";
 
@@ -46,6 +48,34 @@ struct PairPositioningMeta {
     advance_adjust: i16,
 }
 
+struct GeneratedFontVariant {
+    symbol: &'static str,
+    bitmaps: Vec<u8>,
+    glyphs: Vec<GlyphMeta>,
+    intervals: Vec<IntervalMeta>,
+    pair_positioning: Vec<PairPositioningMeta>,
+    ascender: i16,
+    descender: i16,
+    line_height: u16,
+    replacement_index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SupportedGlyph {
+    codepoint: u32,
+    layout_advance_units: i32,
+}
+
+#[derive(Clone, Copy)]
+struct PairPositioningUnits {
+    left: u32,
+    right: u32,
+    left_x_advance: i32,
+    right_x_advance: i32,
+    x_offset: i32,
+    y_offset: i32,
+}
+
 fn main() {
     println!("cargo:rerun-if-changed={FONT_PATH}");
 
@@ -61,15 +91,63 @@ fn main() {
             panic!("failed to parse {}: {err}", font_path.display());
         });
     let shape_face = Face::from_slice(&font_bytes, 0).expect("failed to parse shaping face");
+    let parser_face =
+        rustybuzz::ttf_parser::Face::parse(&font_bytes, 0).expect("failed to parse ttf face");
+    let supported_glyphs = collect_supported_glyphs(&shape_face, &parser_face);
+    let pair_positioning_units = collect_pair_positioning_units(&shape_face, &supported_glyphs);
     let library = Library::init().expect("failed to init freetype");
     let face = library
         .new_face(&font_path, 0)
         .unwrap_or_else(|err| panic!("failed to load {} in freetype: {err}", font_path.display()));
-    face.set_pixel_sizes(0, FONT_SIZE as u32)
+    let variants = [
+        build_font_variant(
+            "BOOKERLY_BODY",
+            BODY_FONT_SIZE,
+            &font,
+            &shape_face,
+            &face,
+            &supported_glyphs,
+            &pair_positioning_units,
+        ),
+        build_font_variant(
+            "BOOKERLY_HEADING",
+            HEADING_FONT_SIZE,
+            &font,
+            &shape_face,
+            &face,
+            &supported_glyphs,
+            &pair_positioning_units,
+        ),
+        build_font_variant(
+            "BOOKERLY_FOOTER",
+            FOOTER_FONT_SIZE,
+            &font,
+            &shape_face,
+            &face,
+            &supported_glyphs,
+            &pair_positioning_units,
+        ),
+    ];
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
+    let output_path = out_dir.join(OUTPUT_FILE);
+    fs::write(&output_path, render_generated_file(&variants))
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", output_path.display()));
+}
+
+fn build_font_variant(
+    symbol: &'static str,
+    font_size: f32,
+    font: &Font,
+    shape_face: &Face<'_>,
+    face: &freetype::Face,
+    supported_glyphs: &[SupportedGlyph],
+    pair_positioning_units: &[PairPositioningUnits],
+) -> GeneratedFontVariant {
+    face.set_pixel_sizes(0, font_size as u32)
         .expect("failed to set freetype pixel size");
 
     let line_metrics = font
-        .horizontal_line_metrics(FONT_SIZE)
+        .horizontal_line_metrics(font_size)
         .expect("font does not expose horizontal line metrics");
 
     let ascender = line_metrics.ascent.ceil() as i16;
@@ -84,13 +162,9 @@ fn main() {
     let mut last_codepoint = None::<u32>;
     let mut replacement_index = None::<usize>;
 
-    for codepoint in 0..=0x10FFFF {
-        let Some(ch) = char::from_u32(codepoint) else {
-            continue;
-        };
-        if font.lookup_glyph_index(ch) == 0 {
-            continue;
-        }
+    for supported_glyph in supported_glyphs {
+        let codepoint = supported_glyph.codepoint;
+        let ch = char::from_u32(codepoint).expect("supported codepoint must be valid char");
 
         face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
             .unwrap_or_else(|err| panic!("failed to render {ch:?} in freetype: {err}"));
@@ -109,7 +183,11 @@ fn main() {
             width: bitmap.width() as u8,
             height: bitmap.rows() as u8,
             advance_x: (glyph_slot.advance().x >> 6).max(0) as u16,
-            layout_advance_x: shape_single_advance(&shape_face, ch),
+            layout_advance_x: scale_font_units(
+                supported_glyph.layout_advance_units,
+                font_size,
+                shape_face,
+            ),
             left: glyph_slot.bitmap_left() as i16,
             top: ascender - glyph_slot.bitmap_top() as i16,
             data_offset,
@@ -153,55 +231,90 @@ fn main() {
         }
     }
 
-    for left_glyph in &glyphs {
-        if !supports_pair_positioning(left_glyph.codepoint) {
+    for pair_units in pair_positioning_units {
+        let Some(left_glyph) = glyphs
+            .iter()
+            .find(|glyph| glyph.codepoint == pair_units.left)
+        else {
             continue;
-        }
-        let Some(left_char) = char::from_u32(left_glyph.codepoint) else {
+        };
+        let Some(right_glyph) = glyphs
+            .iter()
+            .find(|glyph| glyph.codepoint == pair_units.right)
+        else {
             continue;
         };
 
-        for right_glyph in &glyphs {
-            if !supports_pair_positioning(right_glyph.codepoint) {
-                continue;
-            }
-            let Some(right_char) = char::from_u32(right_glyph.codepoint) else {
-                continue;
-            };
+        let pen_adjust = scale_font_units_signed(pair_units.left_x_advance, font_size, shape_face)
+            as i16
+            - left_glyph.advance_x as i16;
+        let x_offset = scale_font_units_signed(pair_units.x_offset, font_size, shape_face) as i16;
+        let y_offset = -scale_font_units_signed(pair_units.y_offset, font_size, shape_face) as i16;
+        let advance_adjust =
+            scale_font_units_signed(pair_units.right_x_advance, font_size, shape_face) as i16
+                - right_glyph.advance_x as i16;
 
-            let Some(pair) = shape_pair_positioning(
-                left_glyph.codepoint,
-                right_glyph.codepoint,
-                &shape_face,
-                left_char,
-                right_char,
-                left_glyph,
-                right_glyph,
-            ) else {
-                continue;
-            };
-
-            pair_positioning.push(pair);
+        if pen_adjust == 0 && x_offset == 0 && y_offset == 0 && advance_adjust == 0 {
+            continue;
         }
+
+        pair_positioning.push(PairPositioningMeta {
+            left: pair_units.left,
+            right: pair_units.right,
+            pen_adjust,
+            x_offset,
+            y_offset,
+            advance_adjust,
+        });
     }
 
-    let replacement_index = replacement_index.unwrap_or(0);
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
-    let output_path = out_dir.join(OUTPUT_FILE);
-    fs::write(
-        &output_path,
-        render_generated_file(
-            &bitmaps,
-            &glyphs,
-            &intervals,
-            &pair_positioning,
-            ascender,
-            descender,
-            line_height,
-            replacement_index,
-        ),
-    )
-    .unwrap_or_else(|err| panic!("failed to write {}: {err}", output_path.display()));
+    GeneratedFontVariant {
+        symbol,
+        bitmaps,
+        glyphs,
+        intervals,
+        pair_positioning,
+        ascender,
+        descender,
+        line_height,
+        replacement_index: replacement_index.unwrap_or(0),
+    }
+}
+
+fn collect_supported_glyphs(
+    shape_face: &Face<'_>,
+    face: &rustybuzz::ttf_parser::Face<'_>,
+) -> Vec<SupportedGlyph> {
+    let mut codepoints = BTreeSet::new();
+    let Some(cmap) = face.tables().cmap else {
+        return Vec::new();
+    };
+
+    for subtable in cmap.subtables {
+        if !subtable.is_unicode() {
+            continue;
+        }
+
+        subtable.codepoints(|codepoint| {
+            let Some(ch) = char::from_u32(codepoint) else {
+                return;
+            };
+            if face.glyph_index(ch).is_some() {
+                codepoints.insert(codepoint);
+            }
+        });
+    }
+
+    codepoints
+        .into_iter()
+        .map(|codepoint| SupportedGlyph {
+            codepoint,
+            layout_advance_units: shape_single_advance_units(
+                shape_face,
+                char::from_u32(codepoint).expect("supported codepoint must be valid char"),
+            ),
+        })
+        .collect()
 }
 
 fn pack_bitmap(bitmap: &[u8], width: usize, height: usize) -> Vec<u8> {
@@ -229,74 +342,121 @@ fn quantize_coverage(value: u8) -> u8 {
     }
 }
 
-fn render_generated_file(
-    bitmaps: &[u8],
-    glyphs: &[GlyphMeta],
-    intervals: &[IntervalMeta],
-    pair_positioning: &[PairPositioningMeta],
-    ascender: i16,
-    descender: i16,
-    line_height: u16,
-    replacement_index: usize,
-) -> String {
+fn render_generated_file(variants: &[GeneratedFontVariant]) -> String {
     let mut out = String::new();
-    out.push_str("pub static BOOKERLY_BITMAPS: &[u8] = &[\n");
-    for chunk in bitmaps.chunks(16) {
-        out.push_str("    ");
-        for byte in chunk {
-            out.push_str(&format!("0x{byte:02X}, "));
+    for variant in variants {
+        out.push_str(&format!(
+            "pub static {}_BITMAPS: &[u8] = &[\n",
+            variant.symbol
+        ));
+        for chunk in variant.bitmaps.chunks(16) {
+            out.push_str("    ");
+            for byte in chunk {
+                out.push_str(&format!("0x{byte:02X}, "));
+            }
+            out.push('\n');
         }
-        out.push('\n');
-    }
-    out.push_str("];\n\n");
+        out.push_str("];\n\n");
 
-    out.push_str("pub static BOOKERLY_GLYPHS: &[Glyph] = &[\n");
-    for glyph in glyphs {
         out.push_str(&format!(
-            "    Glyph {{ codepoint: 0x{:X}, width: {}, height: {}, advance_x: {}, layout_advance_x: {}, left: {}, top: {}, data_offset: {}, data_length: {} }},\n",
-            glyph.codepoint,
-            glyph.width,
-            glyph.height,
-            glyph.advance_x,
-            glyph.layout_advance_x,
-            glyph.left,
-            glyph.top,
-            glyph.data_offset,
-            glyph.data_length
+            "pub static {}_GLYPHS: &[Glyph] = &[\n",
+            variant.symbol
+        ));
+        for glyph in &variant.glyphs {
+            out.push_str(&format!(
+                "    Glyph {{ codepoint: 0x{:X}, width: {}, height: {}, advance_x: {}, layout_advance_x: {}, left: {}, top: {}, data_offset: {}, data_length: {} }},\n",
+                glyph.codepoint,
+                glyph.width,
+                glyph.height,
+                glyph.advance_x,
+                glyph.layout_advance_x,
+                glyph.left,
+                glyph.top,
+                glyph.data_offset,
+                glyph.data_length
+            ));
+        }
+        out.push_str("];\n\n");
+
+        out.push_str(&format!(
+            "pub static {}_INTERVALS: &[Interval] = &[\n",
+            variant.symbol
+        ));
+        for interval in &variant.intervals {
+            out.push_str(&format!(
+                "    Interval {{ first: 0x{:X}, last: 0x{:X}, offset: {} }},\n",
+                interval.first, interval.last, interval.offset
+            ));
+        }
+        out.push_str("];\n\n");
+
+        out.push_str(&format!(
+            "pub static {}_PAIR_POSITIONING: &[PairPositioning] = &[\n",
+            variant.symbol
+        ));
+        for pair in &variant.pair_positioning {
+            out.push_str(&format!(
+                "    PairPositioning {{ key: 0x{:016X}, pen_adjust: {}, x_offset: {}, y_offset: {}, advance_adjust: {} }},\n",
+                ((pair.left as u64) << 32) | (pair.right as u64),
+                pair.pen_adjust,
+                pair.x_offset,
+                pair.y_offset,
+                pair.advance_adjust
+            ));
+        }
+        out.push_str("];\n\n");
+
+        out.push_str(&format!(
+            "pub static {}: Font = Font {{ bitmap: {}_BITMAPS, glyphs: {}_GLYPHS, intervals: {}_INTERVALS, pair_positioning: {}_PAIR_POSITIONING, ascender: {}, descender: {}, line_height: {}, replacement_index: {} }};\n\n",
+            variant.symbol,
+            variant.symbol,
+            variant.symbol,
+            variant.symbol,
+            variant.symbol,
+            variant.ascender,
+            variant.descender,
+            variant.line_height,
+            variant.replacement_index
         ));
     }
-    out.push_str("];\n\n");
-
-    out.push_str("pub static BOOKERLY_INTERVALS: &[Interval] = &[\n");
-    for interval in intervals {
-        out.push_str(&format!(
-            "    Interval {{ first: 0x{:X}, last: 0x{:X}, offset: {} }},\n",
-            interval.first, interval.last, interval.offset
-        ));
-    }
-    out.push_str("];\n\n");
-
-    out.push_str("pub static BOOKERLY_PAIR_POSITIONING: &[PairPositioning] = &[\n");
-    for pair in pair_positioning {
-        out.push_str(&format!(
-            "    PairPositioning {{ key: 0x{:016X}, pen_adjust: {}, x_offset: {}, y_offset: {}, advance_adjust: {} }},\n",
-            ((pair.left as u64) << 32) | (pair.right as u64),
-            pair.pen_adjust,
-            pair.x_offset,
-            pair.y_offset,
-            pair.advance_adjust
-        ));
-    }
-    out.push_str("];\n\n");
-
-    out.push_str(&format!(
-        "pub static BOOKERLY: Font = Font {{ bitmap: BOOKERLY_BITMAPS, glyphs: BOOKERLY_GLYPHS, intervals: BOOKERLY_INTERVALS, pair_positioning: BOOKERLY_PAIR_POSITIONING, ascender: {ascender}, descender: {descender}, line_height: {line_height}, replacement_index: {replacement_index} }};\n"
-    ));
+    out.push_str("pub static BOOKERLY: Font = BOOKERLY_BODY;\n");
 
     out
 }
 
-fn shape_single_advance(face: &Face<'_>, ch: char) -> u16 {
+fn collect_pair_positioning_units(
+    shape_face: &Face<'_>,
+    supported_glyphs: &[SupportedGlyph],
+) -> Vec<PairPositioningUnits> {
+    let pair_candidates = supported_glyphs
+        .iter()
+        .copied()
+        .filter(|glyph| supports_pair_positioning(glyph.codepoint))
+        .collect::<Vec<_>>();
+    let mut pairs = Vec::new();
+
+    for left_glyph in &pair_candidates {
+        let left_char = char::from_u32(left_glyph.codepoint).expect("pair codepoint must be char");
+        for right_glyph in &pair_candidates {
+            let right_char =
+                char::from_u32(right_glyph.codepoint).expect("pair codepoint must be char");
+            let Some(pair) = shape_pair_positioning_units(
+                left_glyph.codepoint,
+                right_glyph.codepoint,
+                shape_face,
+                left_char,
+                right_char,
+            ) else {
+                continue;
+            };
+            pairs.push(pair);
+        }
+    }
+
+    pairs
+}
+
+fn shape_single_advance_units(face: &Face<'_>, ch: char) -> i32 {
     let mut text = String::new();
     text.push(ch);
 
@@ -308,19 +468,16 @@ fn shape_single_advance(face: &Face<'_>, ch: char) -> u16 {
         return 0;
     };
 
-    let scale = FONT_SIZE / face.units_per_em() as f32;
-    ((position.x_advance as f32 * scale).round() as i32).max(0) as u16
+    position.x_advance
 }
 
-fn shape_pair_positioning(
+fn shape_pair_positioning_units(
     left_codepoint: u32,
     right_codepoint: u32,
     face: &Face<'_>,
     left_char: char,
     right_char: char,
-    left_glyph: &GlyphMeta,
-    right_glyph: &GlyphMeta,
-) -> Option<PairPositioningMeta> {
+) -> Option<PairPositioningUnits> {
     let mut text = String::new();
     text.push(left_char);
     text.push(right_char);
@@ -334,26 +491,30 @@ fn shape_pair_positioning(
         return None;
     }
 
-    let scale = FONT_SIZE / face.units_per_em() as f32;
-    let pen_adjust =
-        (positions[0].x_advance as f32 * scale).round() as i16 - left_glyph.advance_x as i16;
-    let x_offset = (positions[1].x_offset as f32 * scale).round() as i16;
-    let y_offset = -((positions[1].y_offset as f32 * scale).round() as i16);
-    let advance_adjust =
-        (positions[1].x_advance as f32 * scale).round() as i16 - right_glyph.advance_x as i16;
-
-    if pen_adjust == 0 && x_offset == 0 && y_offset == 0 && advance_adjust == 0 {
+    if positions[0].x_advance == 0
+        && positions[1].x_advance == 0
+        && positions[1].x_offset == 0
+        && positions[1].y_offset == 0
+    {
         return None;
     }
 
-    Some(PairPositioningMeta {
+    Some(PairPositioningUnits {
         left: left_codepoint,
         right: right_codepoint,
-        pen_adjust,
-        x_offset,
-        y_offset,
-        advance_adjust,
+        left_x_advance: positions[0].x_advance,
+        right_x_advance: positions[1].x_advance,
+        x_offset: positions[1].x_offset,
+        y_offset: positions[1].y_offset,
     })
+}
+
+fn scale_font_units(value: i32, font_size: f32, face: &Face<'_>) -> u16 {
+    scale_font_units_signed(value, font_size, face).max(0) as u16
+}
+
+fn scale_font_units_signed(value: i32, font_size: f32, face: &Face<'_>) -> i32 {
+    (value as f32 * (font_size / face.units_per_em() as f32)).round() as i32
 }
 
 fn supports_pair_positioning(codepoint: u32) -> bool {

@@ -9,8 +9,10 @@ use xteink_epub::{
 use xteink_memory::SHARED_RENDER_EPUB_WORKSPACE_LIMIT_BYTES;
 
 use crate::{
+    CACHE_BOLD_END_MARKER, CACHE_BOLD_START_MARKER, CACHE_HEADING_END_MARKER,
+    CACHE_HEADING_START_MARKER, CACHE_ITALIC_END_MARKER, CACHE_ITALIC_START_MARKER,
     CACHE_LAYOUT_STREAM_MARKER, CACHE_LINE_BREAK_MARKER, CACHE_PAGE_BREAK_MARKER,
-    CACHE_PARAGRAPH_BREAK_MARKER, Framebuffer,
+    CACHE_PARAGRAPH_BREAK_MARKER, CACHE_QUOTE_END_MARKER, CACHE_QUOTE_START_MARKER, Framebuffer,
     paginator::{PaginationConfig, PaginationEvent, PaginationObserver, PaginatorState},
 };
 
@@ -130,6 +132,38 @@ where
 
     fn on_page_break(&mut self) -> Result<(), EpubError> {
         self.emit_cache_chunk(CACHE_PAGE_BREAK_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_heading_start(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_HEADING_START_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_heading_end(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_HEADING_END_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_bold_start(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_BOLD_START_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_bold_end(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_BOLD_END_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_italic_start(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_ITALIC_START_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_italic_end(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_ITALIC_END_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_quote_start(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_QUOTE_START_MARKER.encode_utf8(&mut [0; 4]))
+    }
+
+    fn on_quote_end(&mut self) -> Result<(), EpubError> {
+        self.emit_cache_chunk(CACHE_QUOTE_END_MARKER.encode_utf8(&mut [0; 4]))
     }
 }
 
@@ -584,6 +618,16 @@ impl Framebuffer {
                     if let Some(title) = chapter_title_for_index(chapter_title_index)
                         && !title.is_empty()
                     {
+                        let heading_start = paginator.feed(
+                            self,
+                            &mut observer,
+                            config,
+                            PaginationEvent::HeadingStart,
+                        )?;
+                        if heading_start.target_complete {
+                            rendered_prefix_text_bytes
+                                .get_or_insert(observer.emitted_cache_bytes());
+                        }
                         let title_progress = paginator.feed(
                             self,
                             &mut observer,
@@ -605,6 +649,16 @@ impl Framebuffer {
                                 RenderMode::FullBook | RenderMode::FullBookPreserveTargetPage => {}
                             }
                         } else {
+                            let heading_end = paginator.feed(
+                                self,
+                                &mut observer,
+                                config,
+                                PaginationEvent::HeadingEnd,
+                            )?;
+                            if heading_end.target_complete {
+                                rendered_prefix_text_bytes
+                                    .get_or_insert(observer.emitted_cache_bytes());
+                            }
                             for _ in 0..2 {
                                 let spacing_progress = paginator.feed(
                                     self,
@@ -640,7 +694,14 @@ impl Framebuffer {
                         EpubEvent::ParagraphEnd | EpubEvent::HeadingEnd => {
                             Some((probe.push_break(true), probe.is_complete()))
                         }
-                        EpubEvent::ParagraphStart | EpubEvent::HeadingStart(_) => None,
+                        EpubEvent::ParagraphStart
+                        | EpubEvent::HeadingStart(_)
+                        | EpubEvent::BoldStart
+                        | EpubEvent::BoldEnd
+                        | EpubEvent::ItalicStart
+                        | EpubEvent::ItalicEnd
+                        | EpubEvent::QuoteStart
+                        | EpubEvent::QuoteEnd => None,
                         EpubEvent::Image { .. } | EpubEvent::UnsupportedTag => {
                             Some((probe.is_empty(), false))
                         }
@@ -711,12 +772,60 @@ impl Framebuffer {
                         config,
                         PaginationEvent::LineBreak,
                     )?),
-                    EpubEvent::ParagraphStart | EpubEvent::HeadingStart(_) => None,
-                    EpubEvent::ParagraphEnd | EpubEvent::HeadingEnd => Some(paginator.feed(
+                    EpubEvent::ParagraphStart => None,
+                    EpubEvent::HeadingStart(_) => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::HeadingStart,
+                    )?),
+                    EpubEvent::ParagraphEnd => Some(paginator.feed(
                         self,
                         &mut observer,
                         config,
                         PaginationEvent::ParagraphBreak,
+                    )?),
+                    EpubEvent::HeadingEnd => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::HeadingEnd,
+                    )?),
+                    EpubEvent::BoldStart => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::BoldStart,
+                    )?),
+                    EpubEvent::BoldEnd => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::BoldEnd,
+                    )?),
+                    EpubEvent::ItalicStart => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::ItalicStart,
+                    )?),
+                    EpubEvent::ItalicEnd => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::ItalicEnd,
+                    )?),
+                    EpubEvent::QuoteStart => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::QuoteStart,
+                    )?),
+                    EpubEvent::QuoteEnd => Some(paginator.feed(
+                        self,
+                        &mut observer,
+                        config,
+                        PaginationEvent::QuoteEnd,
                     )?),
                     EpubEvent::Image { alt, .. } => alt
                         .map(|alt| {

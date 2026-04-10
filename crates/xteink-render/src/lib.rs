@@ -12,6 +12,7 @@ use bookerly::Glyph;
 pub use epub::{CacheBuildResult, EPUB_RENDER_WORKSPACE_BYTES};
 use paginator::{
     NoopPaginationObserver, PaginationConfig, PaginationEvent, PaginationRenderer, PaginatorState,
+    TextStyle,
 };
 use text::{WrappedLine, layout_wrapped_text_page};
 
@@ -23,6 +24,14 @@ pub(crate) const CACHE_LINE_BREAK_MARKER: char = '\u{001E}';
 pub(crate) const CACHE_PARAGRAPH_BREAK_MARKER: char = '\u{001F}';
 pub(crate) const CACHE_PAGE_BREAK_MARKER: char = '\u{001D}';
 pub(crate) const CACHE_LAYOUT_STREAM_MARKER: char = '\u{001C}';
+pub(crate) const CACHE_HEADING_START_MARKER: char = '\u{0001}';
+pub(crate) const CACHE_HEADING_END_MARKER: char = '\u{0002}';
+pub(crate) const CACHE_BOLD_START_MARKER: char = '\u{0003}';
+pub(crate) const CACHE_BOLD_END_MARKER: char = '\u{0004}';
+pub(crate) const CACHE_ITALIC_START_MARKER: char = '\u{0005}';
+pub(crate) const CACHE_ITALIC_END_MARKER: char = '\u{0006}';
+pub(crate) const CACHE_QUOTE_START_MARKER: char = '\u{0007}';
+pub(crate) const CACHE_QUOTE_END_MARKER: char = '\u{0008}';
 pub const DISPLAY_WIDTH_BYTES: u16 = PHYSICAL_WIDTH / 8;
 pub const BUFFER_SIZE: usize = (DISPLAY_WIDTH_BYTES as usize) * (PHYSICAL_HEIGHT as usize);
 pub const GRAY_LEVELS: u8 = 4;
@@ -38,7 +47,7 @@ pub const DISPLAY_WIDTH: u16 = 480;
 pub const DISPLAY_HEIGHT: u16 = 800;
 
 pub fn reader_footer_height() -> u16 {
-    bookerly::BOOKERLY.line_height_px().saturating_add(8)
+    footer_line_height_px().saturating_add(8)
 }
 
 pub fn reader_content_height() -> u16 {
@@ -46,6 +55,18 @@ pub fn reader_content_height() -> u16 {
 }
 
 pub const READER_FOOTER_HORIZONTAL_PADDING: u16 = 4;
+
+pub fn body_line_height_px() -> u16 {
+    bookerly::BOOKERLY_BODY.line_height_px()
+}
+
+pub fn heading_line_height_px() -> u16 {
+    bookerly::BOOKERLY_HEADING.line_height_px()
+}
+
+pub fn footer_line_height_px() -> u16 {
+    bookerly::BOOKERLY_FOOTER.line_height_px()
+}
 
 pub struct ReaderFooterLayout<'a> {
     pub left_x: u16,
@@ -62,16 +83,21 @@ pub fn layout_reader_footer<'a>(
     right_text: &'a str,
 ) -> ReaderFooterLayout<'a> {
     let left_x = READER_FOOTER_HORIZONTAL_PADDING;
-    let right_width = text_width(right_text);
+    let right_width = footer_text_width(right_text);
     let right_x = DISPLAY_WIDTH
         .saturating_sub(READER_FOOTER_HORIZONTAL_PADDING)
         .saturating_sub(right_width);
 
-    let space_width = text_width(" ");
+    let space_width = footer_text_width(" ");
     let left_limit = right_x.saturating_sub(space_width);
-    let left_text =
-        left_text.and_then(|text| fitted_text_prefix(text, left_limit.saturating_sub(left_x)));
-    let left_width = left_text.map_or(0, text_width);
+    let left_text = left_text.and_then(|text| {
+        fitted_text_prefix_with_font(
+            text,
+            left_limit.saturating_sub(left_x),
+            &bookerly::BOOKERLY_FOOTER,
+        )
+    });
+    let left_width = left_text.map_or(0, footer_text_width);
     let middle_x = if left_text.is_some() {
         left_x
             .saturating_add(left_width)
@@ -81,7 +107,9 @@ pub fn layout_reader_footer<'a>(
     };
     let middle_limit = right_x.saturating_sub(space_width);
     let available_middle_width = middle_limit.saturating_sub(middle_x);
-    let middle_text = middle_text.and_then(|text| fitted_text_prefix(text, available_middle_width));
+    let middle_text = middle_text.and_then(|text| {
+        fitted_text_prefix_with_font(text, available_middle_width, &bookerly::BOOKERLY_FOOTER)
+    });
 
     ReaderFooterLayout {
         left_x,
@@ -94,21 +122,33 @@ pub fn layout_reader_footer<'a>(
 }
 
 pub fn text_width(text: &str) -> u16 {
-    u16::try_from(bookerly::BOOKERLY.shape_text(text, |_, _, _| {})).unwrap_or(u16::MAX)
+    text_width_with_font(text, &bookerly::BOOKERLY_BODY)
 }
 
-fn fitted_text_prefix(text: &str, max_width: u16) -> Option<&str> {
+pub fn footer_text_width(text: &str) -> u16 {
+    text_width_with_font(text, &bookerly::BOOKERLY_FOOTER)
+}
+
+fn text_width_with_font(text: &str, font: &bookerly::Font) -> u16 {
+    u16::try_from(font.shape_text(text, |_, _, _| {})).unwrap_or(u16::MAX)
+}
+
+fn fitted_text_prefix_with_font<'a>(
+    text: &'a str,
+    max_width: u16,
+    font: &bookerly::Font,
+) -> Option<&'a str> {
     if max_width == 0 || text.is_empty() {
         return None;
     }
-    if text_width(text) <= max_width {
+    if text_width_with_font(text, font) <= max_width {
         return Some(text);
     }
 
     let mut end = 0usize;
     for (index, ch) in text.char_indices() {
         let next_end = index + ch.len_utf8();
-        if text_width(&text[..next_end]) > max_width {
+        if text_width_with_font(&text[..next_end], font) > max_width {
             break;
         }
         end = next_end;
@@ -237,22 +277,54 @@ impl Framebuffer {
     }
 
     pub fn draw_text(&mut self, x: u16, y: u16, text: &str) {
+        self.draw_text_with_font(&bookerly::BOOKERLY_BODY, x, y, text, false);
+    }
+
+    pub fn draw_heading_text(&mut self, x: u16, y: u16, text: &str) {
+        self.draw_text_with_font(&bookerly::BOOKERLY_HEADING, x, y, text, true);
+    }
+
+    pub fn draw_footer_text(&mut self, x: u16, y: u16, text: &str) {
+        self.draw_text_with_font(&bookerly::BOOKERLY_FOOTER, x, y, text, false);
+    }
+
+    fn draw_text_with_style(&mut self, x: u16, y: u16, text: &str, style: TextStyle) {
+        let font = if style.heading {
+            &bookerly::BOOKERLY_HEADING
+        } else {
+            &bookerly::BOOKERLY_BODY
+        };
+        let synthetic_bold = style.heading || style.bold;
+        self.draw_text_with_font(font, x, y, text, synthetic_bold);
+    }
+
+    fn draw_text_with_font(
+        &mut self,
+        font: &bookerly::Font,
+        x: u16,
+        y: u16,
+        text: &str,
+        synthetic_bold: bool,
+    ) {
         let base_x = i32::from(x);
         let mut cursor_y = i32::from(y);
-        let line_height = i32::from(bookerly::BOOKERLY.line_height_px());
+        let line_height = i32::from(font.line_height_px());
 
         for line in text.split('\n') {
-            bookerly::BOOKERLY.shape_text(line, |glyph, glyph_x, glyph_y| {
+            font.shape_text(line, |glyph, glyph_x, glyph_y| {
                 let left = base_x + glyph_x + i32::from(glyph.left);
                 let top = cursor_y + glyph_y + i32::from(glyph.top);
-                self.draw_glyph(glyph, left, top);
+                self.draw_glyph(font, glyph, left, top);
+                if synthetic_bold {
+                    self.draw_glyph(font, glyph, left + 1, top);
+                }
             });
             cursor_y += line_height;
         }
     }
 
     pub fn draw_wrapped_text(&mut self, x: u16, y: u16, text: &str, max_y: u16) -> u16 {
-        self.layout_wrapped_text_internal(x, y, text, max_y, true)
+        self.layout_wrapped_text_internal(x, y, text, max_y, TextStyle::default(), true)
     }
 
     fn layout_wrapped_text_internal(
@@ -261,16 +333,24 @@ impl Framebuffer {
         y: u16,
         text: &str,
         max_y: u16,
+        style: TextStyle,
         draw: bool,
     ) -> u16 {
         const LINE_BUF_LEN: usize = 512;
         let mut line = WrappedLine::<LINE_BUF_LEN>::new();
-        let result =
-            layout_wrapped_text_page(&mut line, x, y, text, max_y, |draw_x, draw_y, line_text| {
+        let result = layout_wrapped_text_page(
+            &mut line,
+            x,
+            y,
+            text,
+            max_y,
+            style,
+            |draw_x, draw_y, line_text| {
                 if draw {
-                    self.draw_text(draw_x, draw_y, line_text);
+                    self.draw_text_with_style(draw_x, draw_y, line_text, style);
                 }
-            });
+            },
+        );
         result.next_y
     }
 
@@ -280,15 +360,24 @@ impl Framebuffer {
         y: u16,
         text: &str,
         max_y: u16,
+        style: TextStyle,
         draw: bool,
     ) -> text::WrappedTextLayoutResult {
         const LINE_BUF_LEN: usize = 512;
         let mut line = WrappedLine::<LINE_BUF_LEN>::new();
-        layout_wrapped_text_page(&mut line, x, y, text, max_y, |draw_x, draw_y, line_text| {
-            if draw {
-                self.draw_text(draw_x, draw_y, line_text);
-            }
-        })
+        layout_wrapped_text_page(
+            &mut line,
+            x,
+            y,
+            text,
+            max_y,
+            style,
+            |draw_x, draw_y, line_text| {
+                if draw {
+                    self.draw_text_with_style(draw_x, draw_y, line_text, style);
+                }
+            },
+        )
     }
 
     pub fn render_cached_text_page<R>(
@@ -547,10 +636,10 @@ impl Framebuffer {
         }
     }
 
-    fn draw_glyph(&mut self, glyph: &Glyph, x: i32, y: i32) {
+    fn draw_glyph(&mut self, font: &bookerly::Font, glyph: &Glyph, x: i32, y: i32) {
         for row in 0..glyph.height {
             for col in 0..glyph.width {
-                let coverage = bookerly::BOOKERLY.glyph_coverage(glyph, col, row);
+                let coverage = font.glyph_coverage(glyph, col, row);
                 if coverage == 0 {
                     continue;
                 }
@@ -602,6 +691,51 @@ fn replay_cached_events(
                 &mut observer,
                 config,
                 PaginationEvent::EnableExplicitBreaks,
+            )?,
+            CACHE_HEADING_START_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::HeadingStart,
+            )?,
+            CACHE_HEADING_END_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::HeadingEnd,
+            )?,
+            CACHE_BOLD_START_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::BoldStart,
+            )?,
+            CACHE_BOLD_END_MARKER => {
+                state.feed(framebuffer, &mut observer, config, PaginationEvent::BoldEnd)?
+            }
+            CACHE_ITALIC_START_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::ItalicStart,
+            )?,
+            CACHE_ITALIC_END_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::ItalicEnd,
+            )?,
+            CACHE_QUOTE_START_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::QuoteStart,
+            )?,
+            CACHE_QUOTE_END_MARKER => state.feed(
+                framebuffer,
+                &mut observer,
+                config,
+                PaginationEvent::QuoteEnd,
             )?,
             CACHE_PAGE_BREAK_MARKER => state.feed(
                 framebuffer,
@@ -656,8 +790,9 @@ impl PaginationRenderer for Framebuffer {
         y: u16,
         text: &str,
         max_y: u16,
+        style: TextStyle,
     ) -> text::WrappedTextLayoutResult {
-        self.layout_wrapped_text_page_result(x, y, text, max_y, true)
+        self.layout_wrapped_text_page_result(x, y, text, max_y, style, true)
     }
 
     fn measure_wrapped_text_block(
@@ -666,12 +801,21 @@ impl PaginationRenderer for Framebuffer {
         y: u16,
         text: &str,
         max_y: u16,
+        style: TextStyle,
     ) -> text::WrappedTextLayoutResult {
-        self.layout_wrapped_text_page_result(x, y, text, max_y, false)
+        self.layout_wrapped_text_page_result(x, y, text, max_y, style, false)
     }
 
     fn display_height(&self) -> u16 {
         reader_content_height()
+    }
+
+    fn line_height(&self, style: TextStyle) -> u16 {
+        if style.heading {
+            heading_line_height_px()
+        } else {
+            body_line_height_px()
+        }
     }
 }
 
@@ -686,6 +830,7 @@ mod tests {
     use super::*;
     use crate::text::{WrappedLine, layout_wrapped_text_page};
     use std::borrow::ToOwned;
+    use std::format;
     use std::string::String;
 
     #[test]
@@ -694,7 +839,14 @@ mod tests {
         let text =
             "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu ".repeat(200);
 
-        let first = framebuffer.layout_wrapped_text_page_result(0, 0, &text, DISPLAY_HEIGHT, false);
+        let first = framebuffer.layout_wrapped_text_page_result(
+            0,
+            0,
+            &text,
+            DISPLAY_HEIGHT,
+            TextStyle::default(),
+            false,
+        );
         assert!(first.consumed > 0);
         assert!(first.consumed < text.len());
 
@@ -703,6 +855,7 @@ mod tests {
             0,
             &text[first.consumed..],
             DISPLAY_HEIGHT,
+            TextStyle::default(),
             false,
         );
         assert!(second.consumed > 0);
@@ -714,13 +867,25 @@ mod tests {
         let target_page = 1usize;
 
         let mut direct = Framebuffer::new();
-        let first =
-            direct.layout_wrapped_text_page_result(0, 0, &text, reader_content_height(), false);
+        let first = direct.layout_wrapped_text_page_result(
+            0,
+            0,
+            &text,
+            reader_content_height(),
+            TextStyle::default(),
+            false,
+        );
         assert!(first.consumed > 0);
         let remaining = &text[first.consumed..];
         direct.clear(0xFF);
-        let _ =
-            direct.layout_wrapped_text_page_result(0, 0, remaining, reader_content_height(), true);
+        let _ = direct.layout_wrapped_text_page_result(
+            0,
+            0,
+            remaining,
+            reader_content_height(),
+            TextStyle::default(),
+            true,
+        );
 
         let bytes = text.into_bytes();
         let mut cached = Framebuffer::new();
@@ -756,6 +921,7 @@ mod tests {
             0,
             text,
             bookerly::BOOKERLY.line_height_px(),
+            TextStyle::default(),
             |_, _, line_text| drawn.push(line_text.to_owned()),
         );
 
@@ -781,14 +947,51 @@ mod tests {
 
         let clipped = layout.left_text.expect("left text should still render");
         assert!(clipped.len() < "An Extremely Long Chapter Title That Must Be Clipped".len());
-        let space_width = text_width(" ");
+        let space_width = footer_text_width(" ");
         assert!(
             layout
                 .left_x
-                .saturating_add(text_width(clipped))
+                .saturating_add(footer_text_width(clipped))
                 .saturating_add(space_width)
                 <= layout.right_x,
             "left text must leave room for a separating space before progress"
         );
+    }
+
+    #[test]
+    fn cached_heading_markers_render_heading_run_with_body_following() {
+        let text = format!(
+            "{layout}{heading_start}Chapter{heading_end}{line}{line}Body",
+            layout = CACHE_LAYOUT_STREAM_MARKER,
+            heading_start = CACHE_HEADING_START_MARKER,
+            heading_end = CACHE_HEADING_END_MARKER,
+            line = CACHE_LINE_BREAK_MARKER,
+        );
+        let bytes = text.into_bytes();
+
+        let mut cached = Framebuffer::new();
+        let mut offset = 0usize;
+        let result = cached.render_cached_text_page(
+            &mut |buffer| {
+                if offset >= bytes.len() {
+                    return Ok(0);
+                }
+                let end = (offset + buffer.len()).min(bytes.len());
+                let chunk = &bytes[offset..end];
+                buffer[..chunk.len()].copy_from_slice(chunk);
+                offset = end;
+                Ok(chunk.len())
+            },
+            0,
+        );
+        assert_eq!(result.expect("cached render should succeed"), 0);
+
+        let mut direct = Framebuffer::new();
+        direct.clear(0xFF);
+        direct.draw_heading_text(0, 0, "Chapter");
+        let body_y = heading_line_height_px().saturating_add(body_line_height_px() * 2);
+        direct.draw_text(0, body_y, "Body");
+
+        assert_eq!(cached.bytes(), direct.bytes());
     }
 }
