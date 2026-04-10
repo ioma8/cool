@@ -91,6 +91,195 @@ pub struct EpubRenderResult {
     pub chapter_title: Option<heapless::String<CHAPTER_TITLE_CAPACITY>>,
 }
 
+struct ReaderOperation<'a, SD: SdFilesystem> {
+    fs: &'a SD,
+    content: SD::File<'a>,
+    pages_path: &'a str,
+    chapters: Vec<ChapterMetadata, MAX_ARCHIVE_ENTRIES>,
+    scratch: Framebuffer,
+}
+
+impl<'a, SD: SdFilesystem> ReaderOperation<'a, SD> {
+    fn open(
+        fs: &'a SD,
+        content_path: &'a str,
+        chapters_path: &'a str,
+        pages_path: &'a str,
+    ) -> Result<Self, EpubError> {
+        Ok(Self {
+            fs,
+            content: fs
+                .open_cache_file_read(content_path)
+                .map_err(|_| EpubError::Io)?,
+            pages_path,
+            chapters: read_all_chapter_metadata(fs, chapters_path).unwrap_or_else(|_| Vec::new()),
+            scratch: Framebuffer::new(),
+        })
+    }
+
+    fn footer_context(&self, current_page_start_offset: u64) -> ReaderFooterContext {
+        reader_footer_context_from_chapters(self.chapters.as_slice(), current_page_start_offset)
+    }
+
+    fn chapter_offset(&self, chapter_index: usize) -> Result<u64, EpubError> {
+        self.chapters
+            .get(chapter_index)
+            .map(|chapter| chapter.start_offset)
+            .ok_or(EpubError::InvalidFormat)
+    }
+
+    fn previous_chapter_anchor(&self, chapter_index: usize) -> u64 {
+        self.chapters
+            .get(chapter_index.saturating_sub(1))
+            .map(|chapter| chapter.start_offset)
+            .unwrap_or(0)
+    }
+
+    fn render_page_at_offset<C: FnMut() -> bool>(
+        &mut self,
+        display: &mut Framebuffer,
+        page_start_offset: u64,
+        should_cancel: &mut C,
+    ) -> Result<(u64, u64), EpubError> {
+        Self::render_page_at_offset_from_file(
+            &mut self.content,
+            display,
+            page_start_offset,
+            should_cancel,
+        )
+    }
+
+    fn next_page_offset_for_offset<C: FnMut() -> bool>(
+        &mut self,
+        page_start_offset: u64,
+        should_cancel: &mut C,
+    ) -> Result<u64, EpubError> {
+        let (_, next_page_offset) = Self::render_page_at_offset_from_file(
+            &mut self.content,
+            &mut self.scratch,
+            page_start_offset,
+            should_cancel,
+        )?;
+        Ok(next_page_offset)
+    }
+
+    fn render_page<C: FnMut() -> bool>(
+        &mut self,
+        display: &mut Framebuffer,
+        target_page: usize,
+        should_cancel: &mut C,
+    ) -> Result<(usize, u64, u64), EpubError> {
+        let (mut page, mut offset) = (0usize, 0u64);
+        loop {
+            let (_, next) = if page >= target_page {
+                self.render_page_at_offset(display, offset, should_cancel)?
+            } else {
+                Self::render_page_at_offset_from_file(
+                    &mut self.content,
+                    &mut self.scratch,
+                    offset,
+                    should_cancel,
+                )?
+            };
+            if page >= target_page || next <= offset {
+                return Ok((page, offset, next));
+            }
+            page = page.saturating_add(1);
+            offset = next;
+        }
+    }
+
+    fn count_pages_before_offset<C: FnMut() -> bool>(
+        &mut self,
+        target_offset: u64,
+        should_cancel: &mut C,
+    ) -> Result<usize, EpubError> {
+        if target_offset == 0 {
+            return Ok(0);
+        }
+        let mut page = 0usize;
+        let mut offset = 0u64;
+        loop {
+            let next = self.next_page_offset_for_offset(offset, should_cancel)?;
+            if next <= offset || next >= target_offset {
+                return Ok(page.saturating_add(1));
+            }
+            page = page.saturating_add(1);
+            offset = next;
+        }
+    }
+
+    fn backfill_page_index_from_anchor<C: FnMut() -> bool>(
+        &mut self,
+        anchor_offset: u64,
+        target_offset: u64,
+        should_cancel: &mut C,
+    ) -> Result<(), EpubError> {
+        let mut current = anchor_offset.min(target_offset);
+        append_page_start_offset(self.fs, self.pages_path, current)?;
+        while current < target_offset {
+            let next = self.next_page_offset_for_offset(current, should_cancel)?;
+            if next <= current {
+                break;
+            }
+            current = next;
+            if current <= target_offset {
+                append_page_start_offset(self.fs, self.pages_path, current)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn previous_page_offset_for_offset<C: FnMut() -> bool>(
+        &mut self,
+        target_offset: u64,
+        should_cancel: &mut C,
+    ) -> Result<u64, EpubError> {
+        if target_offset == 0 {
+            return Ok(0);
+        }
+        if let Some(previous) =
+            previous_indexed_page_offset(self.fs, self.pages_path, target_offset)?
+        {
+            return Ok(previous);
+        }
+        let mut previous = 0u64;
+        let mut current = 0u64;
+        loop {
+            append_page_start_offset(self.fs, self.pages_path, current)?;
+            let next = self.next_page_offset_for_offset(current, should_cancel)?;
+            if next <= current || next >= target_offset {
+                return Ok(previous);
+            }
+            previous = current;
+            current = next;
+        }
+    }
+
+    fn render_page_at_offset_from_file<C: FnMut() -> bool>(
+        content: &mut SD::File<'a>,
+        display: &mut Framebuffer,
+        page_start_offset: u64,
+        should_cancel: &mut C,
+    ) -> Result<(u64, u64), EpubError> {
+        content
+            .seek_from_start(u32::try_from(page_start_offset).map_err(|_| EpubError::OutOfSpace)?)
+            .map_err(|_| EpubError::Io)?;
+        let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
+            content.read(buffer).map_err(|_| EpubError::Io)
+        };
+        let rendered = display.render_cached_text_page_from_offset_with_progress(
+            &mut read_text,
+            0,
+            &mut *should_cancel,
+        )?;
+        let next_page_offset = page_start_offset.saturating_add(
+            u64::try_from(rendered.next_page_start_byte).map_err(|_| EpubError::OutOfSpace)?,
+        );
+        Ok((page_start_offset, next_page_offset))
+    }
+}
+
 pub fn render_epub_from_entry<SD>(
     fs: &SD,
     display: &mut Framebuffer,
@@ -288,37 +477,24 @@ where
     .map_err(|_| EpubError::OutOfSpace)?;
     let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
     let meta = ensure_cache_ready(fs, source_path.as_str(), source_size, &cache_paths)?;
-    let chapters = read_all_chapter_metadata(fs, cache_paths.chapters.as_str())?;
-    let chapter = chapters
-        .get(chapter_index)
-        .ok_or(EpubError::InvalidFormat)?;
-    let page_start_offset = chapter.start_offset;
-    let mut never_cancel = || false;
-    let anchor_offset = chapters
-        .get(chapter_index.saturating_sub(1))
-        .map(|chapter| chapter.start_offset)
-        .unwrap_or(0);
-    backfill_page_index_from_anchor(
+    let mut operation = ReaderOperation::open(
         fs,
         cache_paths.content.as_str(),
+        cache_paths.chapters.as_str(),
         cache_paths.pages.as_str(),
+    )?;
+    let page_start_offset = operation.chapter_offset(chapter_index)?;
+    let mut never_cancel = || false;
+    let anchor_offset = operation.previous_chapter_anchor(chapter_index);
+    operation.backfill_page_index_from_anchor(
         anchor_offset,
         page_start_offset,
         &mut never_cancel,
     )?;
-    let rendered_page = count_pages_before_offset(
-        fs,
-        cache_paths.content.as_str(),
-        page_start_offset,
-        &mut never_cancel,
-    )?;
-    let (_, next_page_offset) = render_cached_page_at_offset(
-        fs,
-        display,
-        cache_paths.content.as_str(),
-        page_start_offset,
-        &mut never_cancel,
-    )?;
+    let rendered_page =
+        operation.count_pages_before_offset(page_start_offset, &mut never_cancel)?;
+    let (_, next_page_offset) =
+        operation.render_page_at_offset(display, page_start_offset, &mut never_cancel)?;
     let progress_percent =
         compute_progress_percent(page_start_offset, next_page_offset, meta.content_length);
     append_page_start_offset(fs, cache_paths.pages.as_str(), page_start_offset)?;
@@ -330,8 +506,7 @@ where
             next_page_start_offset: next_page_offset,
         },
     )?;
-    let footer_context =
-        read_reader_footer_context(fs, cache_paths.chapters.as_str(), page_start_offset)?;
+    let footer_context = operation.footer_context(page_start_offset);
     Ok(EpubRenderResult {
         rendered_page,
         refresh: EpubRefreshMode::Fast,
@@ -425,6 +600,12 @@ where
 
     let meta = meta.ok_or(EpubError::Io)?;
     let saved = read_cached_progress(fs, cache_paths.progress.as_str());
+    let mut operation = ReaderOperation::open(
+        fs,
+        cache_paths.content.as_str(),
+        cache_paths.chapters.as_str(),
+        cache_paths.pages.as_str(),
+    )?;
 
     let saved_offset = saved
         .map(|progress| progress.current_page_start_offset)
@@ -435,35 +616,20 @@ where
     let use_saved_offset = !fast_refresh && requested_offset == saved_offset;
 
     let (rendered_page, page_start_offset, next_page_offset) = if use_saved_offset {
-        let rendered_page = count_pages_before_offset(
-            fs,
-            cache_paths.content.as_str(),
-            saved_offset,
-            &mut should_cancel,
-        )?;
-        let (_, next_page_offset) = render_cached_page_at_offset(
-            fs,
-            display,
-            cache_paths.content.as_str(),
-            saved_offset,
-            &mut should_cancel,
-        )?;
+        let rendered_page =
+            operation.count_pages_before_offset(saved_offset, &mut should_cancel)?;
+        let (_, next_page_offset) =
+            operation.render_page_at_offset(display, saved_offset, &mut should_cancel)?;
         (rendered_page, saved_offset, next_page_offset)
     } else {
-        let (rendered_page, page_start_offset, next_page_offset) = render_cached_page(
-            fs,
-            display,
-            cache_paths.content.as_str(),
-            page_index,
-            &mut should_cancel,
-        )?;
+        let (rendered_page, page_start_offset, next_page_offset) =
+            operation.render_page(display, page_index, &mut should_cancel)?;
         (rendered_page, page_start_offset, next_page_offset)
     };
 
     let progress_percent =
         compute_progress_percent(page_start_offset, next_page_offset, meta.content_length);
-    let footer_context =
-        read_reader_footer_context(fs, cache_paths.chapters.as_str(), page_start_offset)?;
+    let footer_context = operation.footer_context(page_start_offset);
     append_page_start_offset(fs, cache_paths.pages.as_str(), page_start_offset)?;
 
     write_cached_progress(
@@ -511,6 +677,12 @@ where
     .map_err(|_| EpubError::OutOfSpace)?;
     let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
     let meta = ensure_cache_ready(fs, source_path.as_str(), source_size, &cache_paths)?;
+    let mut operation = ReaderOperation::open(
+        fs,
+        cache_paths.content.as_str(),
+        cache_paths.chapters.as_str(),
+        cache_paths.pages.as_str(),
+    )?;
     let Some(saved) = read_cached_progress(fs, cache_paths.progress.as_str()) else {
         return render_epub_page_from_entry_with_source_and_cancel(
             fs,
@@ -534,13 +706,8 @@ where
     )? {
         previous_offset
     } else {
-        previous_page_offset_for_offset(
-            fs,
-            cache_paths.content.as_str(),
-            cache_paths.pages.as_str(),
-            saved.current_page_start_offset,
-            &mut should_cancel,
-        )?
+        operation
+            .previous_page_offset_for_offset(saved.current_page_start_offset, &mut should_cancel)?
     };
     if page_start_offset > meta.content_length {
         return render_epub_page_from_entry_with_source_and_cancel(
@@ -556,17 +723,11 @@ where
         );
     }
 
-    let (_, next_page_offset) = render_cached_page_at_offset(
-        fs,
-        display,
-        cache_paths.content.as_str(),
-        page_start_offset,
-        &mut should_cancel,
-    )?;
+    let (_, next_page_offset) =
+        operation.render_page_at_offset(display, page_start_offset, &mut should_cancel)?;
     let progress_percent =
         compute_progress_percent(page_start_offset, next_page_offset, meta.content_length);
-    let footer_context =
-        read_reader_footer_context(fs, cache_paths.chapters.as_str(), page_start_offset)?;
+    let footer_context = operation.footer_context(page_start_offset);
     append_page_start_offset(fs, cache_paths.pages.as_str(), page_start_offset)?;
 
     write_cached_progress(
@@ -593,59 +754,46 @@ struct ReaderFooterContext {
     chapter_title: Option<heapless::String<CHAPTER_TITLE_CAPACITY>>,
 }
 
-fn read_reader_footer_context<SD: SdFilesystem>(
-    fs: &SD,
-    chapters_path: &str,
+fn chapter_index_for_offset(
+    chapters: &[ChapterMetadata],
     current_page_start_offset: u64,
-) -> Result<ReaderFooterContext, EpubError> {
-    let mut file = match fs.open_cache_file_read(chapters_path) {
-        Ok(file) => file,
-        Err(_) => {
-            return Ok(ReaderFooterContext {
-                chapter_number: None,
-                chapter_title: None,
-            });
-        }
-    };
-
-    let mut magic = [0u8; 4];
-    if !read_exact_or_eof(&mut file, &mut magic)? || &magic != CHAPTERS_MAGIC {
-        return Ok(ReaderFooterContext {
-            chapter_number: None,
-            chapter_title: None,
-        });
+) -> Option<usize> {
+    if chapters.is_empty() {
+        return None;
     }
 
-    let mut first_chapter = None;
-    let mut active_chapter = None;
-    let mut index = 0usize;
-
-    loop {
-        let Some(chapter) = read_chapter_metadata_record(&mut file)? else {
-            break;
-        };
-        index = index.saturating_add(1);
-        if first_chapter.is_none() {
-            first_chapter = Some((index, chapter.clone()));
-        }
-        if chapter.start_offset <= current_page_start_offset {
-            active_chapter = Some((index, chapter));
+    let mut left = 0usize;
+    let mut right = chapters.len();
+    while left < right {
+        let mid = left + (right - left) / 2;
+        if chapters[mid].start_offset <= current_page_start_offset {
+            left = mid.saturating_add(1);
         } else {
-            break;
+            right = mid;
         }
     }
 
-    let selected = active_chapter.or(first_chapter);
-    Ok(ReaderFooterContext {
-        chapter_number: selected.as_ref().map(|(number, _)| *number),
+    Some(left.saturating_sub(1).min(chapters.len().saturating_sub(1)))
+}
+
+fn reader_footer_context_from_chapters(
+    chapters: &[ChapterMetadata],
+    current_page_start_offset: u64,
+) -> ReaderFooterContext {
+    let selected = chapter_index_for_offset(chapters, current_page_start_offset)
+        .or_else(|| (!chapters.is_empty()).then_some(0))
+        .and_then(|index| chapters.get(index).map(|chapter| (index, chapter)));
+
+    ReaderFooterContext {
+        chapter_number: selected.as_ref().map(|(index, _)| index.saturating_add(1)),
         chapter_title: selected.and_then(|(_, chapter)| {
             if chapter.title.is_empty() {
                 None
             } else {
-                Some(chapter.title)
+                Some(chapter.title.clone())
             }
         }),
-    })
+    }
 }
 
 fn read_chapter_metadata_record<F: SdFsFile>(
@@ -710,144 +858,6 @@ fn compute_progress_percent(current_offset: u64, next_page_offset: u64, content_
 
     let raw = ((current_offset.saturating_mul(100)) / content_length).clamp(0, 99);
     u8::try_from(raw).unwrap_or(99)
-}
-
-fn render_cached_page<SD, C>(
-    fs: &SD,
-    display: &mut Framebuffer,
-    content_path: &str,
-    target_page: usize,
-    should_cancel: &mut C,
-) -> Result<(usize, u64, u64), EpubError>
-where
-    SD: SdFilesystem,
-    C: FnMut() -> bool,
-{
-    let (mut page, mut offset) = (0usize, 0u64);
-    let mut scratch = Framebuffer::new();
-
-    loop {
-        let (_, next) = if page >= target_page {
-            render_cached_page_at_offset(fs, display, content_path, offset, should_cancel)?
-        } else {
-            render_cached_page_at_offset(fs, &mut scratch, content_path, offset, should_cancel)?
-        };
-        if page >= target_page || next <= offset {
-            return Ok((page, offset, next));
-        }
-
-        page = page.saturating_add(1);
-        offset = next;
-    }
-}
-
-fn count_pages_before_offset<SD, C>(
-    fs: &SD,
-    content_path: &str,
-    target_offset: u64,
-    should_cancel: &mut C,
-) -> Result<usize, EpubError>
-where
-    SD: SdFilesystem,
-    C: FnMut() -> bool,
-{
-    if target_offset == 0 {
-        return Ok(0);
-    }
-
-    let mut page = 0usize;
-    let mut offset = 0u64;
-    loop {
-        let next = next_page_offset_for_offset(fs, content_path, offset, should_cancel)?;
-        if next <= offset || next >= target_offset {
-            return Ok(page.saturating_add(1));
-        }
-        page = page.saturating_add(1);
-        offset = next;
-    }
-}
-
-fn next_page_offset_for_offset<SD, C>(
-    fs: &SD,
-    content_path: &str,
-    page_start_offset: u64,
-    should_cancel: &mut C,
-) -> Result<u64, EpubError>
-where
-    SD: SdFilesystem,
-    C: FnMut() -> bool,
-{
-    let mut scratch = Framebuffer::new();
-    let (_, next_page_offset) = render_cached_page_at_offset(
-        fs,
-        &mut scratch,
-        content_path,
-        page_start_offset,
-        should_cancel,
-    )?;
-    Ok(next_page_offset)
-}
-
-fn previous_page_offset_for_offset<SD, C>(
-    fs: &SD,
-    content_path: &str,
-    pages_path: &str,
-    target_offset: u64,
-    should_cancel: &mut C,
-) -> Result<u64, EpubError>
-where
-    SD: SdFilesystem,
-    C: FnMut() -> bool,
-{
-    if target_offset == 0 {
-        return Ok(0);
-    }
-
-    if let Some(previous) = previous_indexed_page_offset(fs, pages_path, target_offset)? {
-        return Ok(previous);
-    }
-
-    let mut previous = 0u64;
-    let mut current = 0u64;
-    loop {
-        append_page_start_offset(fs, pages_path, current)?;
-        let next = next_page_offset_for_offset(fs, content_path, current, should_cancel)?;
-        if next <= current || next >= target_offset {
-            return Ok(previous);
-        }
-        previous = current;
-        current = next;
-    }
-}
-
-fn render_cached_page_at_offset<SD, C>(
-    fs: &SD,
-    display: &mut Framebuffer,
-    content_path: &str,
-    page_start_offset: u64,
-    should_cancel: &mut C,
-) -> Result<(u64, u64), EpubError>
-where
-    SD: SdFilesystem,
-    C: FnMut() -> bool,
-{
-    let mut file = fs
-        .open_cache_file_read(content_path)
-        .map_err(|_| EpubError::Io)?;
-    file.seek_from_start(u32::try_from(page_start_offset).map_err(|_| EpubError::OutOfSpace)?)
-        .map_err(|_| EpubError::Io)?;
-    let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
-        file.read(buffer).map_err(|_| EpubError::Io)
-    };
-    let rendered = display.render_cached_text_page_from_offset_with_progress(
-        &mut read_text,
-        0,
-        &mut *should_cancel,
-    )?;
-    let next_page_offset = page_start_offset.saturating_add(
-        u64::try_from(rendered.next_page_start_byte).map_err(|_| EpubError::OutOfSpace)?,
-    );
-    Ok((page_start_offset, next_page_offset))
 }
 
 struct BuildResult {
@@ -1014,28 +1024,61 @@ fn read_cache_meta<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<CacheMeta, E
         .ok_or(EpubError::InvalidFormat)
 }
 
-fn page_index_entry_count<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<usize, EpubError> {
-    let file = match fs.open_cache_file_read(path) {
-        Ok(file) => file,
-        Err(_) => return Ok(0),
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chapter(offset: u64, title: &str) -> ChapterMetadata {
+        let mut stored = heapless::String::new();
+        let _ = stored.push_str(title);
+        ChapterMetadata {
+            start_offset: offset,
+            title: stored,
+        }
+    }
+
+    #[test]
+    fn chapter_index_for_offset_uses_last_start_not_after_target() {
+        let chapters = [
+            chapter(10, "Intro"),
+            chapter(100, "One"),
+            chapter(250, "Two"),
+        ];
+
+        assert_eq!(chapter_index_for_offset(&chapters, 0), Some(0));
+        assert_eq!(chapter_index_for_offset(&chapters, 10), Some(0));
+        assert_eq!(chapter_index_for_offset(&chapters, 99), Some(0));
+        assert_eq!(chapter_index_for_offset(&chapters, 100), Some(1));
+        assert_eq!(chapter_index_for_offset(&chapters, 249), Some(1));
+        assert_eq!(chapter_index_for_offset(&chapters, 250), Some(2));
+        assert_eq!(chapter_index_for_offset(&chapters, 999), Some(2));
+    }
+
+    #[test]
+    fn previous_page_offset_from_index_returns_preceding_offset() {
+        let offsets = [0, 120, 245, 360];
+
+        assert_eq!(previous_page_offset_in_index(&offsets, 0), Some(0));
+        assert_eq!(previous_page_offset_in_index(&offsets, 120), Some(0));
+        assert_eq!(previous_page_offset_in_index(&offsets, 245), Some(120));
+        assert_eq!(previous_page_offset_in_index(&offsets, 360), Some(245));
+        assert_eq!(previous_page_offset_in_index(&offsets, 121), None);
+    }
+}
+
+fn page_index_entry_count_from_file<F: SdFsFile>(file: &F) -> Result<usize, EpubError> {
     if file.len() % 8 != 0 {
         return Err(EpubError::InvalidFormat);
     }
     Ok(file.len() / 8)
 }
 
-fn read_page_start_offset_at<SD: SdFilesystem>(
-    fs: &SD,
-    path: &str,
+fn read_page_start_offset_at<F: SdFsFile>(
+    file: &mut F,
     index: usize,
 ) -> Result<Option<u64>, EpubError> {
-    let mut file = match fs.open_cache_file_read(path) {
-        Ok(file) => file,
-        Err(_) => return Ok(None),
-    };
-    if file.len() % 8 != 0 {
-        return Err(EpubError::InvalidFormat);
+    if page_index_entry_count_from_file(file)? == 0 {
+        return Ok(None);
     }
     let start = index.saturating_mul(8);
     if start >= file.len() {
@@ -1044,7 +1087,7 @@ fn read_page_start_offset_at<SD: SdFilesystem>(
     file.seek_from_start(u32::try_from(start).map_err(|_| EpubError::OutOfSpace)?)
         .map_err(|_| EpubError::Io)?;
     let mut raw = [0u8; 8];
-    if !read_exact_or_eof(&mut file, &mut raw)? {
+    if !read_exact_or_eof(file, &mut raw)? {
         return Ok(None);
     }
     Ok(Some(u64::from_le_bytes(raw)))
@@ -1055,7 +1098,11 @@ fn page_index_for_offset<SD: SdFilesystem>(
     path: &str,
     target_offset: u64,
 ) -> Result<Option<usize>, EpubError> {
-    let count = page_index_entry_count(fs, path)?;
+    let mut file = match fs.open_cache_file_read(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let count = page_index_entry_count_from_file(&file)?;
     if count == 0 {
         return Ok(None);
     }
@@ -1063,7 +1110,7 @@ fn page_index_for_offset<SD: SdFilesystem>(
     let mut right = count;
     while left < right {
         let mid = left + (right - left) / 2;
-        let Some(offset) = read_page_start_offset_at(fs, path, mid)? else {
+        let Some(offset) = read_page_start_offset_at(&mut file, mid)? else {
             break;
         };
         match offset.cmp(&target_offset) {
@@ -1075,6 +1122,16 @@ fn page_index_for_offset<SD: SdFilesystem>(
     Ok(None)
 }
 
+#[cfg(test)]
+fn previous_page_offset_in_index(offsets: &[u64], target_offset: u64) -> Option<u64> {
+    let index = offsets.iter().position(|offset| *offset == target_offset)?;
+    if index == 0 {
+        Some(0)
+    } else {
+        offsets.get(index.saturating_sub(1)).copied()
+    }
+}
+
 fn previous_indexed_page_offset<SD: SdFilesystem>(
     fs: &SD,
     path: &str,
@@ -1083,37 +1140,14 @@ fn previous_indexed_page_offset<SD: SdFilesystem>(
     let Some(index) = page_index_for_offset(fs, path, target_offset)? else {
         return Ok(None);
     };
+    let mut file = match fs.open_cache_file_read(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
     if index == 0 {
         return Ok(Some(0));
     }
-    read_page_start_offset_at(fs, path, index.saturating_sub(1))
-}
-
-fn backfill_page_index_from_anchor<SD, C>(
-    fs: &SD,
-    content_path: &str,
-    pages_path: &str,
-    anchor_offset: u64,
-    target_offset: u64,
-    should_cancel: &mut C,
-) -> Result<(), EpubError>
-where
-    SD: SdFilesystem,
-    C: FnMut() -> bool,
-{
-    let mut current = anchor_offset.min(target_offset);
-    append_page_start_offset(fs, pages_path, current)?;
-    while current < target_offset {
-        let next = next_page_offset_for_offset(fs, content_path, current, should_cancel)?;
-        if next <= current {
-            break;
-        }
-        current = next;
-        if current <= target_offset {
-            append_page_start_offset(fs, pages_path, current)?;
-        }
-    }
-    Ok(())
+    read_page_start_offset_at(&mut file, index.saturating_sub(1))
 }
 
 fn append_page_start_offset<SD: SdFilesystem>(
@@ -1145,21 +1179,11 @@ fn read_last_page_start_offset<SD: SdFilesystem>(
         Ok(file) => file,
         Err(_) => return Ok(None),
     };
-    let len = file.len();
-    if len == 0 {
+    let count = page_index_entry_count_from_file(&file)?;
+    if count == 0 {
         return Ok(None);
     }
-    if len % 8 != 0 {
-        return Err(EpubError::InvalidFormat);
-    }
-    let start = len.saturating_sub(8);
-    file.seek_from_start(u32::try_from(start).map_err(|_| EpubError::OutOfSpace)?)
-        .map_err(|_| EpubError::Io)?;
-    let mut raw = [0u8; 8];
-    if !read_exact_or_eof(&mut file, &mut raw)? {
-        return Ok(None);
-    }
-    Ok(Some(u64::from_le_bytes(raw)))
+    read_page_start_offset_at(&mut file, count.saturating_sub(1))
 }
 
 fn read_cached_progress<SD: SdFilesystem>(fs: &SD, path: &str) -> Option<ProgressState> {

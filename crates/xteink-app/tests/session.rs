@@ -371,7 +371,7 @@ fn opening_an_epub_from_loaded_directory_transitions_to_reader_page_zero() {
     session.bootstrap().expect("bootstrap should work");
 
     session
-        .handle_button(Button::Back)
+        .handle_button(Button::Confirm)
         .expect("open should work");
 
     assert_eq!(
@@ -389,7 +389,7 @@ fn opening_an_epub_draws_reader_progress_footer() {
     session.bootstrap().expect("bootstrap should work");
 
     session
-        .handle_button(Button::Back)
+        .handle_button(Button::Confirm)
         .expect("open should work");
 
     let non_white = session
@@ -416,7 +416,7 @@ fn opening_directory_updates_current_path_and_loads_child_entries() {
     session.bootstrap().expect("bootstrap should work");
 
     session
-        .handle_button(Button::Back)
+        .handle_button(Button::Confirm)
         .expect("directory open should work");
 
     assert_eq!(session.current_path(), "/Books");
@@ -428,7 +428,7 @@ fn confirm_in_reader_opens_toc_entries() {
     let mut session = Session::new(FakeStorage, Framebuffer::new(), 8);
     session.bootstrap().expect("bootstrap should work");
     session
-        .handle_button(Button::Back)
+        .handle_button(Button::Confirm)
         .expect("open should work");
 
     session
@@ -445,7 +445,7 @@ fn confirm_in_toc_jumps_to_selected_chapter_and_returns_to_reader() {
     let mut session = Session::new(FakeStorage, Framebuffer::new(), 8);
     session.bootstrap().expect("bootstrap should work");
     session
-        .handle_button(Button::Back)
+        .handle_button(Button::Confirm)
         .expect("open should work");
     session
         .handle_button(Button::Confirm)
@@ -471,7 +471,7 @@ fn down_in_reader_uses_next_page_storage_path() {
     let mut session = Session::new(storage, Framebuffer::new(), 8);
     session.bootstrap().expect("bootstrap should work");
     session
-        .handle_button(Button::Back)
+        .handle_button(Button::Confirm)
         .expect("open should work");
 
     session
@@ -489,7 +489,7 @@ fn opening_an_epub_draws_footer_with_footer_variant() {
     session.bootstrap().expect("bootstrap should work");
 
     session
-        .handle_button(Button::Back)
+        .handle_button(Button::Confirm)
         .expect("open should work");
 
     assert!(session.renderer().bytes().iter().any(|byte| *byte != 0xFF));
