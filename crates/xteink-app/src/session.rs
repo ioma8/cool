@@ -110,6 +110,20 @@ pub trait AppStorage<R: AppRenderer> {
         entry: &ListedEntry,
         target_page: usize,
     ) -> Result<EpubRenderResult, Self::Error>;
+    fn render_epub_next_page_from_entry(
+        &self,
+        renderer: &mut R,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error>;
+    fn render_epub_previous_page_from_entry(
+        &self,
+        renderer: &mut R,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error>;
     fn list_epub_chapter_page(
         &self,
         current_path: &str,
@@ -167,6 +181,7 @@ where
     }
 
     pub fn handle_button(&mut self, button: Button) -> Result<Option<BrowserRefresh>, S::Error> {
+        let previous_reader_page = self.controller.reader_page();
         let selected_entry = self
             .controller
             .browser()
@@ -228,12 +243,28 @@ where
                 ..
             } => {
                 let listed = self.ui.ui_entry_to_listed(&entry);
-                let rendered = self.storage.render_epub_page_from_entry(
-                    &mut self.renderer,
-                    self.current_path.as_str(),
-                    &listed,
-                    target_page,
-                )?;
+                let rendered = if fast && target_page == previous_reader_page.saturating_add(1) {
+                    self.storage.render_epub_next_page_from_entry(
+                        &mut self.renderer,
+                        self.current_path.as_str(),
+                        &listed,
+                        target_page,
+                    )?
+                } else if fast && target_page.saturating_add(1) == previous_reader_page {
+                    self.storage.render_epub_previous_page_from_entry(
+                        &mut self.renderer,
+                        self.current_path.as_str(),
+                        &listed,
+                        target_page,
+                    )?
+                } else {
+                    self.storage.render_epub_page_from_entry(
+                        &mut self.renderer,
+                        self.current_path.as_str(),
+                        &listed,
+                        target_page,
+                    )?
+                };
                 self.ui.render_reader_footer(
                     &mut self.renderer,
                     rendered.chapter_number,

@@ -507,3 +507,43 @@ fn host_storage_chapter_cache_starts_new_chapter_page_with_title_and_spacing() {
         &slice[..slice.len().min(96)]
     );
 }
+
+#[test]
+fn host_storage_does_not_duplicate_chapter_title_when_body_repeats_it() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+
+    let mut framebuffer = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut framebuffer, "/", &entry)
+        .expect("render should succeed");
+
+    let chapters = read_cached_chapters(
+        &tmp.path()
+            .join(cache_paths.chapters.trim_start_matches('/')),
+    );
+    let chapter = chapters
+        .iter()
+        .find(|chapter| chapter.title == "2. Avoid a Narrow Frame")
+        .expect("expected duplicate-prone chapter metadata");
+    let content = fs::read_to_string(tmp.path().join(cache_paths.content.trim_start_matches('/')))
+        .expect("read cached content");
+    let start = usize::try_from(chapter.offset).expect("chapter offset usize");
+    let slice = &content[start..(start + 160).min(content.len())];
+
+    assert_eq!(
+        slice.matches("Avoid a Narrow Frame").count(),
+        1,
+        "expected chapter title only once near chapter start, got {:?}",
+        slice
+    );
+}

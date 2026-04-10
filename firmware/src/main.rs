@@ -29,7 +29,8 @@ use xteink_controller::BrowserRefresh;
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display};
 use xteink_fs::{
     FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, list_epub_chapter_page,
-    render_epub_chapter_from_entry, render_epub_from_entry, render_epub_page_from_entry,
+    render_epub_chapter_from_entry, render_epub_from_entry, render_epub_next_page_from_entry,
+    render_epub_page_from_entry, render_epub_previous_page_from_entry,
 };
 use xteink_memory::{
     DEVICE_PERSISTENT_BUDGET_BYTES, DEVICE_STACK_RESERVE_BYTES, DEVICE_TOTAL_RAM_BYTES,
@@ -239,6 +240,50 @@ where
             &clone_listed_entry(entry),
             target_page,
             true,
+        )?;
+        Ok(AppEpubRenderResult {
+            rendered_page: rendered.rendered_page,
+            progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
+        })
+    }
+
+    fn render_epub_next_page_from_entry(
+        &self,
+        renderer: &mut Framebuffer,
+        current_path: &str,
+        entry: &AppListedEntry,
+        target_page: usize,
+    ) -> Result<AppEpubRenderResult, Self::Error> {
+        let rendered = render_epub_next_page_from_entry(
+            self.sd,
+            renderer,
+            current_path,
+            &clone_listed_entry(entry),
+            target_page,
+        )?;
+        Ok(AppEpubRenderResult {
+            rendered_page: rendered.rendered_page,
+            progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
+        })
+    }
+
+    fn render_epub_previous_page_from_entry(
+        &self,
+        renderer: &mut Framebuffer,
+        current_path: &str,
+        entry: &AppListedEntry,
+        target_page: usize,
+    ) -> Result<AppEpubRenderResult, Self::Error> {
+        let rendered = render_epub_previous_page_from_entry(
+            self.sd,
+            renderer,
+            current_path,
+            &clone_listed_entry(entry),
+            target_page,
         )?;
         Ok(AppEpubRenderResult {
             rendered_page: rendered.rendered_page,

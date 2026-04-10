@@ -13,7 +13,8 @@ use xteink_fs::{
     DirectoryPage as FsDirectoryPage, DirectoryPageInfo as FsDirectoryPageInfo, FsError,
     ListedEntry as FsListedEntry, SdFilesystem, SdFsFile, list_epub_chapter_page,
     listed_entry_from_parts, load_directory_page, render_epub_chapter_from_entry,
-    render_epub_from_entry, render_epub_page_from_entry,
+    render_epub_from_entry, render_epub_next_page_from_entry, render_epub_page_from_entry,
+    render_epub_previous_page_from_entry,
 };
 use xteink_render::Framebuffer;
 
@@ -456,6 +457,49 @@ impl AppStorage<Framebuffer> for HostStorage {
             &fs_entry,
             target_page,
             true,
+        )?;
+        Ok(EpubRenderResult {
+            rendered_page: rendered.rendered_page,
+            progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
+        })
+    }
+
+    fn render_epub_next_page_from_entry(
+        &self,
+        renderer: &mut Framebuffer,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        let fs_entry =
+            listed_entry_from_parts(entry.label.as_str(), entry.fs_name.as_str(), false)?;
+        let rendered =
+            render_epub_next_page_from_entry(self, renderer, current_path, &fs_entry, target_page)?;
+        Ok(EpubRenderResult {
+            rendered_page: rendered.rendered_page,
+            progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
+        })
+    }
+
+    fn render_epub_previous_page_from_entry(
+        &self,
+        renderer: &mut Framebuffer,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        let fs_entry =
+            listed_entry_from_parts(entry.label.as_str(), entry.fs_name.as_str(), false)?;
+        let rendered = render_epub_previous_page_from_entry(
+            self,
+            renderer,
+            current_path,
+            &fs_entry,
+            target_page,
         )?;
         Ok(EpubRenderResult {
             rendered_page: rendered.rendered_page,

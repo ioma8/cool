@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use xteink_app::{
     AppStorage, DirectoryPage, DirectoryPageInfo, EpubRenderResult, ListedEntry, Session,
 };
@@ -53,6 +54,26 @@ impl AppStorage<Framebuffer> for FakeStorage {
             chapter_number: None,
             chapter_title: None,
         })
+    }
+
+    fn render_epub_next_page_from_entry(
+        &self,
+        framebuffer: &mut xteink_render::Framebuffer,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        self.render_epub_page_from_entry(framebuffer, current_path, entry, target_page)
+    }
+
+    fn render_epub_previous_page_from_entry(
+        &self,
+        framebuffer: &mut xteink_render::Framebuffer,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        self.render_epub_page_from_entry(framebuffer, current_path, entry, target_page)
     }
 
     fn list_epub_chapter_page(
@@ -160,6 +181,26 @@ impl AppStorage<Framebuffer> for MultiStorage {
         })
     }
 
+    fn render_epub_next_page_from_entry(
+        &self,
+        framebuffer: &mut xteink_render::Framebuffer,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        self.render_epub_page_from_entry(framebuffer, current_path, entry, target_page)
+    }
+
+    fn render_epub_previous_page_from_entry(
+        &self,
+        framebuffer: &mut xteink_render::Framebuffer,
+        current_path: &str,
+        entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        self.render_epub_page_from_entry(framebuffer, current_path, entry, target_page)
+    }
+
     fn list_epub_chapter_page(
         &self,
         _current_path: &str,
@@ -198,6 +239,127 @@ impl AppStorage<Framebuffer> for MultiStorage {
             rendered_page: chapter_index.saturating_mul(10),
             progress_percent: 33,
             chapter_number: Some(chapter_index.saturating_add(1)),
+            chapter_title: None,
+        })
+    }
+}
+
+#[derive(Default)]
+struct PagingStorage {
+    full_page_calls: RefCell<Vec<usize>>,
+    next_calls: RefCell<Vec<usize>>,
+    previous_calls: RefCell<Vec<usize>>,
+}
+
+impl AppStorage<Framebuffer> for PagingStorage {
+    type Error = ();
+
+    fn list_directory_page(
+        &self,
+        _path: &str,
+        _page_start: usize,
+        _page_size: usize,
+    ) -> Result<DirectoryPage, Self::Error> {
+        Ok(DirectoryPage {
+            entries: heapless::Vec::from_slice(&[ListedEntry::epub("book.epub")]).expect("entry"),
+            info: DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        })
+    }
+
+    fn render_epub_from_entry(
+        &self,
+        _framebuffer: &mut Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        Ok(EpubRenderResult {
+            rendered_page: 0,
+            progress_percent: 0,
+            chapter_number: None,
+            chapter_title: None,
+        })
+    }
+
+    fn render_epub_page_from_entry(
+        &self,
+        _framebuffer: &mut Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        self.full_page_calls.borrow_mut().push(target_page);
+        Ok(EpubRenderResult {
+            rendered_page: target_page,
+            progress_percent: 0,
+            chapter_number: None,
+            chapter_title: None,
+        })
+    }
+
+    fn render_epub_next_page_from_entry(
+        &self,
+        _framebuffer: &mut Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        self.next_calls.borrow_mut().push(target_page);
+        Ok(EpubRenderResult {
+            rendered_page: target_page,
+            progress_percent: 0,
+            chapter_number: None,
+            chapter_title: None,
+        })
+    }
+
+    fn render_epub_previous_page_from_entry(
+        &self,
+        _framebuffer: &mut Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        target_page: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        self.previous_calls.borrow_mut().push(target_page);
+        Ok(EpubRenderResult {
+            rendered_page: target_page,
+            progress_percent: 0,
+            chapter_number: None,
+            chapter_title: None,
+        })
+    }
+
+    fn list_epub_chapter_page(
+        &self,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        _page_start: usize,
+        _page_size: usize,
+    ) -> Result<DirectoryPage, Self::Error> {
+        Ok(DirectoryPage {
+            entries: heapless::Vec::new(),
+            info: DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        })
+    }
+
+    fn render_epub_chapter_from_entry(
+        &self,
+        _framebuffer: &mut Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        chapter_index: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        Ok(EpubRenderResult {
+            rendered_page: chapter_index,
+            progress_percent: 0,
+            chapter_number: None,
             chapter_title: None,
         })
     }
@@ -301,4 +463,22 @@ fn confirm_in_toc_jumps_to_selected_chapter_and_returns_to_reader() {
         xteink_controller::ScreenMode::Reading
     );
     assert_eq!(session.reader_page(), 10);
+}
+
+#[test]
+fn down_in_reader_uses_next_page_storage_path() {
+    let storage = PagingStorage::default();
+    let mut session = Session::new(storage, Framebuffer::new(), 8);
+    session.bootstrap().expect("bootstrap should work");
+    session
+        .handle_button(Button::Back)
+        .expect("open should work");
+
+    session
+        .handle_button(Button::Down)
+        .expect("next page should render");
+
+    assert_eq!(session.reader_page(), 1);
+    assert_eq!(session.storage().next_calls.borrow().as_slice(), &[1]);
+    assert!(session.storage().full_page_calls.borrow().is_empty());
 }
