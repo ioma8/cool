@@ -1,4 +1,10 @@
-use std::{char, collections::BTreeSet, env, fs, path::PathBuf};
+use std::{
+    char,
+    collections::{BTreeSet, hash_map::DefaultHasher},
+    env, fs,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+};
 
 use fontdue::{Font, FontSettings};
 use freetype::Library;
@@ -7,8 +13,11 @@ use rustybuzz::{Face, UnicodeBuffer};
 const BODY_FONT_SIZE: f32 = 30.0;
 const HEADING_FONT_SIZE: f32 = 38.0;
 const FOOTER_FONT_SIZE: f32 = 24.0;
-const FONT_PATH: &str = "../xteink-display/assets/Bookerly-Regular.ttf";
+const REGULAR_FONT_PATH: &str = "../xteink-display/assets/Bookerly-Regular.ttf";
+const ITALIC_FONT_PATH: &str = "../xteink-display/assets/Bookerly Italic.ttf";
 const OUTPUT_FILE: &str = "bookerly_generated.rs";
+const STAMP_FILE: &str = "bookerly_generated.stamp";
+const GENERATOR_VERSION: u32 = 1;
 
 fn shaping_features() -> [rustybuzz::Feature; 3] {
     [
@@ -76,77 +85,131 @@ struct PairPositioningUnits {
     y_offset: i32,
 }
 
+struct FontSource {
+    font: Font,
+    shape_face: Face<'static>,
+    supported_glyphs: Vec<SupportedGlyph>,
+    pair_positioning_units: Vec<PairPositioningUnits>,
+    library: Library,
+    font_path: PathBuf,
+}
+
 fn main() {
-    println!("cargo:rerun-if-changed={FONT_PATH}");
+    println!("cargo:rerun-if-changed={REGULAR_FONT_PATH}");
+    println!("cargo:rerun-if-changed={ITALIC_FONT_PATH}");
 
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"));
-    let font_path = manifest_dir.join(FONT_PATH);
-    let font_bytes = fs::read(&font_path).unwrap_or_else(|err| {
-        panic!("failed to read {}: {err}", font_path.display());
+    let italic = manifest_dir.join(ITALIC_FONT_PATH);
+    let regular_path = manifest_dir.join(REGULAR_FONT_PATH);
+    let regular_bytes = fs::read(&regular_path).unwrap_or_else(|err| {
+        panic!("failed to read {}: {err}", regular_path.display());
     });
+    let italic_bytes = italic.exists().then(|| {
+        fs::read(&italic).unwrap_or_else(|err| panic!("failed to read {}: {err}", italic.display()))
+    });
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
+    let output_path = out_dir.join(OUTPUT_FILE);
+    let stamp_path = out_dir.join(STAMP_FILE);
+    let stamp = build_stamp(&regular_bytes, italic_bytes.as_deref());
+    if stamp_matches(&stamp_path, &stamp) && output_path.exists() {
+        return;
+    }
 
+    let regular = load_font_source(&regular_path, regular_bytes);
+    let italic = italic_bytes.map(|bytes| load_font_source(&italic, bytes));
+    let mut variants = vec![
+        build_font_variant("BOOKERLY_BODY", BODY_FONT_SIZE, &regular),
+        build_font_variant("BOOKERLY_HEADING", HEADING_FONT_SIZE, &regular),
+        build_font_variant("BOOKERLY_FOOTER", FOOTER_FONT_SIZE, &regular),
+    ];
+    if let Some(italic) = italic.as_ref() {
+        variants.push(build_font_variant(
+            "BOOKERLY_BODY_ITALIC",
+            BODY_FONT_SIZE,
+            italic,
+        ));
+        variants.push(build_font_variant(
+            "BOOKERLY_HEADING_ITALIC",
+            HEADING_FONT_SIZE,
+            italic,
+        ));
+        variants.push(build_font_variant(
+            "BOOKERLY_FOOTER_ITALIC",
+            FOOTER_FONT_SIZE,
+            italic,
+        ));
+    }
+    fs::write(
+        &output_path,
+        render_generated_file(&variants, italic.is_some()),
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", output_path.display()));
+    fs::write(&stamp_path, stamp)
+        .unwrap_or_else(|err| panic!("failed to write {}: {err}", stamp_path.display()));
+}
+
+fn load_font_source(font_path: &PathBuf, font_bytes: Vec<u8>) -> FontSource {
     let font =
         Font::from_bytes(font_bytes.clone(), FontSettings::default()).unwrap_or_else(|err| {
             panic!("failed to parse {}: {err}", font_path.display());
         });
-    let shape_face = Face::from_slice(&font_bytes, 0).expect("failed to parse shaping face");
+    let owned_bytes = Box::leak(font_bytes.into_boxed_slice());
+    let shape_face = Face::from_slice(owned_bytes, 0).expect("failed to parse shaping face");
     let parser_face =
-        rustybuzz::ttf_parser::Face::parse(&font_bytes, 0).expect("failed to parse ttf face");
+        rustybuzz::ttf_parser::Face::parse(owned_bytes, 0).expect("failed to parse ttf face");
     let supported_glyphs = collect_supported_glyphs(&shape_face, &parser_face);
     let pair_positioning_units = collect_pair_positioning_units(&shape_face, &supported_glyphs);
     let library = Library::init().expect("failed to init freetype");
-    let face = library
-        .new_face(&font_path, 0)
-        .unwrap_or_else(|err| panic!("failed to load {} in freetype: {err}", font_path.display()));
-    let variants = [
-        build_font_variant(
-            "BOOKERLY_BODY",
-            BODY_FONT_SIZE,
-            &font,
-            &shape_face,
-            &face,
-            &supported_glyphs,
-            &pair_positioning_units,
-        ),
-        build_font_variant(
-            "BOOKERLY_HEADING",
-            HEADING_FONT_SIZE,
-            &font,
-            &shape_face,
-            &face,
-            &supported_glyphs,
-            &pair_positioning_units,
-        ),
-        build_font_variant(
-            "BOOKERLY_FOOTER",
-            FOOTER_FONT_SIZE,
-            &font,
-            &shape_face,
-            &face,
-            &supported_glyphs,
-            &pair_positioning_units,
-        ),
-    ];
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
-    let output_path = out_dir.join(OUTPUT_FILE);
-    fs::write(&output_path, render_generated_file(&variants))
-        .unwrap_or_else(|err| panic!("failed to write {}: {err}", output_path.display()));
+    FontSource {
+        font,
+        shape_face,
+        supported_glyphs,
+        pair_positioning_units,
+        library,
+        font_path: font_path.to_path_buf(),
+    }
+}
+
+fn build_stamp(regular_bytes: &[u8], italic_bytes: Option<&[u8]>) -> String {
+    let mut hasher = DefaultHasher::new();
+    GENERATOR_VERSION.hash(&mut hasher);
+    BODY_FONT_SIZE.to_bits().hash(&mut hasher);
+    HEADING_FONT_SIZE.to_bits().hash(&mut hasher);
+    FOOTER_FONT_SIZE.to_bits().hash(&mut hasher);
+    regular_bytes.hash(&mut hasher);
+    italic_bytes.is_some().hash(&mut hasher);
+    if let Some(italic_bytes) = italic_bytes {
+        italic_bytes.hash(&mut hasher);
+    }
+    format!("{:016x}\n", hasher.finish())
+}
+
+fn stamp_matches(path: &PathBuf, expected: &str) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .is_some_and(|existing| existing == expected)
 }
 
 fn build_font_variant(
     symbol: &'static str,
     font_size: f32,
-    font: &Font,
-    shape_face: &Face<'_>,
-    face: &freetype::Face,
-    supported_glyphs: &[SupportedGlyph],
-    pair_positioning_units: &[PairPositioningUnits],
+    source: &FontSource,
 ) -> GeneratedFontVariant {
+    let face = source
+        .library
+        .new_face(&source.font_path, 0)
+        .unwrap_or_else(|err| {
+            panic!(
+                "failed to load {} in freetype: {err}",
+                source.font_path.display()
+            )
+        });
     face.set_pixel_sizes(0, font_size as u32)
         .expect("failed to set freetype pixel size");
 
-    let line_metrics = font
+    let line_metrics = source
+        .font
         .horizontal_line_metrics(font_size)
         .expect("font does not expose horizontal line metrics");
 
@@ -162,7 +225,7 @@ fn build_font_variant(
     let mut last_codepoint = None::<u32>;
     let mut replacement_index = None::<usize>;
 
-    for supported_glyph in supported_glyphs {
+    for supported_glyph in &source.supported_glyphs {
         let codepoint = supported_glyph.codepoint;
         let ch = char::from_u32(codepoint).expect("supported codepoint must be valid char");
 
@@ -186,7 +249,7 @@ fn build_font_variant(
             layout_advance_x: scale_font_units(
                 supported_glyph.layout_advance_units,
                 font_size,
-                shape_face,
+                &source.shape_face,
             ),
             left: glyph_slot.bitmap_left() as i16,
             top: ascender - glyph_slot.bitmap_top() as i16,
@@ -231,7 +294,7 @@ fn build_font_variant(
         }
     }
 
-    for pair_units in pair_positioning_units {
+    for pair_units in &source.pair_positioning_units {
         let Some(left_glyph) = glyphs
             .iter()
             .find(|glyph| glyph.codepoint == pair_units.left)
@@ -245,13 +308,17 @@ fn build_font_variant(
             continue;
         };
 
-        let pen_adjust = scale_font_units_signed(pair_units.left_x_advance, font_size, shape_face)
-            as i16
-            - left_glyph.advance_x as i16;
-        let x_offset = scale_font_units_signed(pair_units.x_offset, font_size, shape_face) as i16;
-        let y_offset = -scale_font_units_signed(pair_units.y_offset, font_size, shape_face) as i16;
+        let pen_adjust =
+            scale_font_units_signed(pair_units.left_x_advance, font_size, &source.shape_face)
+                as i16
+                - left_glyph.advance_x as i16;
+        let x_offset =
+            scale_font_units_signed(pair_units.x_offset, font_size, &source.shape_face) as i16;
+        let y_offset =
+            -scale_font_units_signed(pair_units.y_offset, font_size, &source.shape_face) as i16;
         let advance_adjust =
-            scale_font_units_signed(pair_units.right_x_advance, font_size, shape_face) as i16
+            scale_font_units_signed(pair_units.right_x_advance, font_size, &source.shape_face)
+                as i16
                 - right_glyph.advance_x as i16;
 
         if pen_adjust == 0 && x_offset == 0 && y_offset == 0 && advance_adjust == 0 {
@@ -342,7 +409,7 @@ fn quantize_coverage(value: u8) -> u8 {
     }
 }
 
-fn render_generated_file(variants: &[GeneratedFontVariant]) -> String {
+fn render_generated_file(variants: &[GeneratedFontVariant], has_real_italic: bool) -> String {
     let mut out = String::new();
     for variant in variants {
         out.push_str(&format!(
@@ -419,6 +486,15 @@ fn render_generated_file(variants: &[GeneratedFontVariant]) -> String {
             variant.replacement_index
         ));
     }
+    if !has_real_italic {
+        out.push_str("pub static BOOKERLY_BODY_ITALIC: Font = BOOKERLY_BODY;\n");
+        out.push_str("pub static BOOKERLY_HEADING_ITALIC: Font = BOOKERLY_HEADING;\n");
+        out.push_str("pub static BOOKERLY_FOOTER_ITALIC: Font = BOOKERLY_FOOTER;\n");
+    }
+    out.push_str(&format!(
+        "pub const BOOKERLY_HAS_REAL_ITALIC: bool = {};\n",
+        if has_real_italic { "true" } else { "false" }
+    ));
     out.push_str("pub static BOOKERLY: Font = BOOKERLY_BODY;\n");
 
     out

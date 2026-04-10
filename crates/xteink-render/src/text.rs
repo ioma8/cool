@@ -98,8 +98,12 @@ impl<const N: usize> WrappedLine<N> {
 }
 
 fn font_for_style(style: TextStyle) -> &'static bookerly::Font {
-    if style.heading {
+    if style.heading && (style.italic || style.quote) {
+        &bookerly::BOOKERLY_HEADING_ITALIC
+    } else if style.heading {
         &bookerly::BOOKERLY_HEADING
+    } else if style.italic || style.quote {
+        &bookerly::BOOKERLY_BODY_ITALIC
     } else {
         &bookerly::BOOKERLY_BODY
     }
@@ -107,7 +111,7 @@ fn font_for_style(style: TextStyle) -> &'static bookerly::Font {
 
 pub(crate) fn measure_text_width_with_style(text: &str, style: TextStyle) -> i32 {
     let width = font_for_style(style).shape_text(text, |_, _, _| {});
-    if style.italic || style.quote {
+    if (style.italic || style.quote) && !bookerly::BOOKERLY_HAS_REAL_ITALIC {
         width + (i32::from(font_for_style(style).line_height_px()) / 4)
     } else {
         width

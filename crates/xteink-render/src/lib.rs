@@ -290,13 +290,17 @@ impl Framebuffer {
     }
 
     fn draw_text_with_style(&mut self, x: u16, y: u16, text: &str, style: TextStyle) {
-        let font = if style.heading {
+        let font = if style.heading && (style.italic || style.quote) {
+            &bookerly::BOOKERLY_HEADING_ITALIC
+        } else if style.heading {
             &bookerly::BOOKERLY_HEADING
+        } else if style.italic || style.quote {
+            &bookerly::BOOKERLY_BODY_ITALIC
         } else {
             &bookerly::BOOKERLY_BODY
         };
         let synthetic_bold = style.heading || style.bold;
-        let synthetic_italic = style.italic || style.quote;
+        let synthetic_italic = (style.italic || style.quote) && !bookerly::BOOKERLY_HAS_REAL_ITALIC;
         self.draw_text_with_font(font, x, y, text, synthetic_bold, synthetic_italic);
     }
 
@@ -1038,6 +1042,11 @@ mod tests {
         );
 
         assert_ne!(italic.bytes(), body.bytes());
+    }
+
+    #[test]
+    fn real_italic_font_is_available_when_italic_asset_is_present() {
+        assert!(bookerly::BOOKERLY_HAS_REAL_ITALIC);
     }
 
     #[test]
