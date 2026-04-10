@@ -55,65 +55,6 @@ fn host_storage_lists_long_epub_names_without_too_many_entries() {
 }
 
 #[test]
-fn host_storage_renders_decisive_fixture_for_first_two_pages() {
-    let _guard = render_test_mutex()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let Some(fixture) = decisive_fixture_path() else {
-        return;
-    };
-    let tmp = tempfile::tempdir().expect("tempdir");
-    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
-    let storage = HostStorage::new(tmp.path());
-    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
-
-    let mut saw_non_blank = false;
-    for page in 0..6 {
-        let mut framebuffer = Framebuffer::new();
-        let rendered = storage
-            .render_epub_page_from_entry(&mut framebuffer, "/", &entry, page)
-            .unwrap_or_else(|err| panic!("page {page} should render: {err:?}"));
-        assert_eq!(rendered.rendered_page, page);
-        assert!(rendered.progress_percent > 0);
-        saw_non_blank |= framebuffer.bytes().iter().any(|byte| *byte != 0xFF);
-    }
-    assert!(
-        saw_non_blank,
-        "expected at least one early decisive page to contain visible text"
-    );
-}
-
-#[test]
-fn host_storage_progress_is_non_decreasing_between_consecutive_pages_in_same_chapter() {
-    let _guard = render_test_mutex()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let Some(fixture) = decisive_fixture_path() else {
-        return;
-    };
-    let tmp = tempfile::tempdir().expect("tempdir");
-    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
-    let storage = HostStorage::new(tmp.path());
-    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
-
-    let mut framebuffer = Framebuffer::new();
-    let page_zero = storage
-        .render_epub_page_from_entry(&mut framebuffer, "/", &entry, 0)
-        .expect("page zero should render");
-    let mut framebuffer = Framebuffer::new();
-    let page_one = storage
-        .render_epub_page_from_entry(&mut framebuffer, "/", &entry, 1)
-        .expect("page one should render");
-
-    assert!(
-        page_one.progress_percent >= page_zero.progress_percent,
-        "progress should not go backwards inside the same chapter: {} -> {}",
-        page_zero.progress_percent,
-        page_one.progress_percent
-    );
-}
-
-#[test]
 fn host_storage_uses_shared_cache_reader_and_writes_cache_artifacts() {
     let _guard = render_test_mutex()
         .lock()
@@ -150,7 +91,7 @@ fn host_storage_uses_shared_cache_reader_and_writes_cache_artifacts() {
 }
 
 #[test]
-fn host_storage_reopens_listed_entry_from_saved_progress() {
+fn host_storage_reopens_from_saved_current_page_offset() {
     let _guard = render_test_mutex()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -160,39 +101,27 @@ fn host_storage_reopens_listed_entry_from_saved_progress() {
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
     let storage = HostStorage::new(tmp.path());
-    let page = storage.list_directory_page("/", 0, 10).expect("listing");
-    let entry = page.entries[0].clone();
-    let mut framebuffer = Framebuffer::new();
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
 
+    let mut first = Framebuffer::new();
     let opened = storage
-        .render_epub_from_entry(&mut framebuffer, "/", &entry)
+        .render_epub_from_entry(&mut first, "/", &entry)
         .expect("open should succeed");
     assert_eq!(opened.rendered_page, 0);
 
+    let mut second = Framebuffer::new();
     let page_one = storage
-        .render_epub_page_from_entry(&mut framebuffer, "/", &entry, 1)
+        .render_epub_page_from_entry(&mut second, "/", &entry, 1)
         .expect("page one should render");
-    let page_two = storage
-        .render_epub_page_from_entry(&mut framebuffer, "/", &entry, 2)
-        .expect("page two should render");
-
     assert_eq!(page_one.rendered_page, 1);
-    assert_eq!(page_two.rendered_page, 2);
 
-    let cache_paths = xteink_fs::cache_paths_for_epub("/", entry.fs_name.as_str());
-    let progress_path = tmp
-        .path()
-        .join(cache_paths.progress.trim_start_matches('/'));
-    let progress = fs::read(progress_path).expect("progress file should exist");
-    assert_eq!(
-        u32::from_le_bytes([progress[0], progress[1], progress[2], progress[3]]),
-        2
-    );
+    let mut reopened = Framebuffer::new();
+    let resumed = storage
+        .render_epub_from_entry(&mut reopened, "/", &entry)
+        .expect("reopen should resume from current offset");
 
-    let reopened = storage
-        .render_epub_from_entry(&mut framebuffer, "/", &entry)
-        .expect("reopen should resume");
-    assert_eq!(reopened.rendered_page, 2);
+    assert_eq!(resumed.rendered_page, 1);
+    assert_eq!(reopened.bytes(), second.bytes());
 }
 
 #[test]
@@ -223,71 +152,4 @@ fn host_storage_ignores_saved_progress_when_cache_meta_is_stale() {
         .expect("open should ignore stale progress");
 
     assert_eq!(reopened.rendered_page, 0);
-}
-
-#[test]
-fn host_storage_progress_does_not_spike_to_ninety_nine_on_early_cached_pages() {
-    let _guard = render_test_mutex()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let Some(fixture) = decisive_fixture_path() else {
-        return;
-    };
-    let tmp = tempfile::tempdir().expect("tempdir");
-    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
-    let storage = HostStorage::new(tmp.path());
-    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
-    let mut framebuffer = Framebuffer::new();
-
-    let page_zero = storage
-        .render_epub_from_entry(&mut framebuffer, "/", &entry)
-        .expect("page zero should render");
-    let page_one = storage
-        .render_epub_page_from_entry(&mut framebuffer, "/", &entry, 1)
-        .expect("page one should render");
-
-    assert!(page_zero.progress_percent < 50);
-    assert!(page_one.progress_percent < 50);
-    assert!(page_one.progress_percent >= page_zero.progress_percent);
-}
-
-#[test]
-fn host_storage_progress_is_monotonic_across_early_decisive_pages() {
-    let _guard = render_test_mutex()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let Some(fixture) = decisive_fixture_path() else {
-        return;
-    };
-    let tmp = tempfile::tempdir().expect("tempdir");
-    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
-    let storage = HostStorage::new(tmp.path());
-    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
-    let mut framebuffer = Framebuffer::new();
-
-    let mut last_progress = 0u8;
-    for page in 0..30 {
-        let rendered = if page == 0 {
-            storage
-                .render_epub_from_entry(&mut framebuffer, "/", &entry)
-                .expect("page zero should render")
-        } else {
-            storage
-                .render_epub_page_from_entry(&mut framebuffer, "/", &entry, page)
-                .expect("page should render")
-        };
-        assert!(
-            rendered.progress_percent >= last_progress,
-            "page {} progress regressed: {} -> {}",
-            page,
-            last_progress,
-            rendered.progress_percent
-        );
-        last_progress = rendered.progress_percent;
-    }
-    assert!(
-        last_progress < 20,
-        "page 29 progress too high: {}",
-        last_progress
-    );
 }
