@@ -43,6 +43,33 @@ fn read_cached_chapters(path: &std::path::Path) -> Vec<CachedChapter> {
     chapters
 }
 
+fn read_page_offsets(path: &std::path::Path) -> Vec<u64> {
+    let raw = fs::read(path).expect("read page index");
+    assert_eq!(raw.len() % 8, 0, "expected flat u64 page offsets");
+    raw.chunks_exact(8)
+        .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("u64 offset")))
+        .collect()
+}
+
+fn read_progress_offsets(path: &std::path::Path) -> (u64, u64) {
+    let raw = fs::read(path).expect("read progress");
+    assert!(
+        raw.len() >= 16,
+        "expected current/next page offsets in progress"
+    );
+    (
+        u64::from_le_bytes(raw[0..8].try_into().expect("current offset")),
+        u64::from_le_bytes(raw[8..16].try_into().expect("next offset")),
+    )
+}
+
+fn write_progress_offsets(path: &std::path::Path, current: u64, next: u64) {
+    let mut raw = [0u8; 16];
+    raw[0..8].copy_from_slice(&current.to_le_bytes());
+    raw[8..16].copy_from_slice(&next.to_le_bytes());
+    fs::write(path, raw).expect("write progress");
+}
+
 fn decisive_fixture_path() -> Option<std::path::PathBuf> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -551,5 +578,366 @@ fn host_storage_does_not_duplicate_chapter_title_when_body_repeats_it() {
         1,
         "expected chapter title only once near chapter start, got {:?}",
         slice
+    );
+}
+
+#[test]
+fn host_storage_previous_page_after_chapter_jump_matches_direct_render() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+
+    let mut chapter = Framebuffer::new();
+    let jumped = storage
+        .render_epub_chapter_from_entry(&mut chapter, "/", &entry, 4)
+        .expect("chapter jump should render");
+    assert!(jumped.rendered_page > 0, "expected non-zero target page");
+
+    let target_page = jumped.rendered_page.saturating_sub(1);
+    let mut backward = Framebuffer::new();
+    let previous = storage
+        .render_epub_previous_page_from_entry(&mut backward, "/", &entry, target_page)
+        .expect("previous page should render");
+
+    let mut direct = Framebuffer::new();
+    let expected = storage
+        .render_epub_page_from_entry(&mut direct, "/", &entry, target_page)
+        .expect("direct previous page should render");
+
+    assert_eq!(previous.rendered_page, expected.rendered_page);
+    assert_eq!(backward.bytes(), direct.bytes());
+}
+
+#[test]
+fn host_storage_repeated_previous_pages_match_direct_renders_across_chapter_boundary() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+
+    let mut chapter = Framebuffer::new();
+    let jumped = storage
+        .render_epub_chapter_from_entry(&mut chapter, "/", &entry, 4)
+        .expect("chapter jump should render");
+    assert!(
+        jumped.rendered_page >= 3,
+        "expected enough pages before chapter"
+    );
+
+    let mut current_page = jumped.rendered_page;
+    for _ in 0..3 {
+        let target_page = current_page.saturating_sub(1);
+        let mut backward = Framebuffer::new();
+        let previous = storage
+            .render_epub_previous_page_from_entry(&mut backward, "/", &entry, target_page)
+            .expect("previous page should render");
+
+        let mut direct = Framebuffer::new();
+        let expected = storage
+            .render_epub_page_from_entry(&mut direct, "/", &entry, target_page)
+            .expect("direct page should render");
+
+        assert_eq!(previous.rendered_page, expected.rendered_page);
+        assert_eq!(
+            backward.bytes(),
+            direct.bytes(),
+            "expected exact framebuffer match when stepping back to page {target_page}"
+        );
+        current_page = previous.rendered_page;
+    }
+}
+
+#[test]
+fn host_storage_previous_pages_match_direct_renders_for_many_chapter_jumps() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+
+    let chapters = read_cached_chapters(
+        &tmp.path()
+            .join(cache_paths.chapters.trim_start_matches('/')),
+    );
+    assert!(
+        chapters.len() > 4,
+        "expected enough chapters for backtracking"
+    );
+
+    for chapter_index in 2..chapters.len().min(8) {
+        let mut chapter = Framebuffer::new();
+        let jumped = storage
+            .render_epub_chapter_from_entry(&mut chapter, "/", &entry, chapter_index)
+            .expect("chapter jump should render");
+
+        let mut current_page = jumped.rendered_page;
+        for _ in 0..4 {
+            if current_page == 0 {
+                break;
+            }
+            let target_page = current_page - 1;
+            let mut backward = Framebuffer::new();
+            let previous = storage
+                .render_epub_previous_page_from_entry(&mut backward, "/", &entry, target_page)
+                .expect("previous page should render");
+
+            let mut direct = Framebuffer::new();
+            let expected = storage
+                .render_epub_page_from_entry(&mut direct, "/", &entry, target_page)
+                .expect("direct page should render");
+
+            assert_eq!(
+                backward.bytes(),
+                direct.bytes(),
+                "chapter jump {chapter_index} back to page {target_page} diverged"
+            );
+            current_page = previous.rendered_page;
+            assert_eq!(current_page, expected.rendered_page);
+        }
+    }
+}
+
+#[test]
+fn host_storage_writes_pages_index_for_visited_pages() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+    let pages = tmp
+        .path()
+        .join(cache_paths.directory.trim_start_matches('/'))
+        .join("pages.idx");
+
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+
+    let mut second = Framebuffer::new();
+    storage
+        .render_epub_next_page_from_entry(&mut second, "/", &entry, 1)
+        .expect("second page should render");
+
+    let mut third = Framebuffer::new();
+    storage
+        .render_epub_next_page_from_entry(&mut third, "/", &entry, 2)
+        .expect("third page should render");
+
+    let offsets = read_page_offsets(&pages);
+    assert!(
+        offsets.len() >= 3,
+        "expected visited pages to be indexed, got {offsets:?}"
+    );
+    assert_eq!(offsets[0], 0);
+    assert!(offsets.windows(2).all(|window| window[0] < window[1]));
+}
+
+#[test]
+fn host_storage_reopen_can_continue_back_using_persisted_pages_index() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+
+    let storage = HostStorage::new(tmp.path());
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+    for target_page in 1..=3 {
+        let mut page = Framebuffer::new();
+        storage
+            .render_epub_next_page_from_entry(&mut page, "/", &entry, target_page)
+            .expect("next page should render");
+    }
+
+    let reopened_storage = HostStorage::new(tmp.path());
+    let mut backward = Framebuffer::new();
+    let previous = reopened_storage
+        .render_epub_previous_page_from_entry(&mut backward, "/", &entry, 2)
+        .expect("previous page should render after reopen");
+
+    let mut direct = Framebuffer::new();
+    let expected = reopened_storage
+        .render_epub_page_from_entry(&mut direct, "/", &entry, 2)
+        .expect("direct page should render");
+
+    assert_eq!(previous.rendered_page, 2);
+    assert_eq!(previous.rendered_page, expected.rendered_page);
+    assert_eq!(backward.bytes(), direct.bytes());
+}
+
+#[test]
+fn host_storage_chapter_jump_backfills_previous_page_starts_into_pages_index() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+    let pages = tmp
+        .path()
+        .join(cache_paths.directory.trim_start_matches('/'))
+        .join("pages.idx");
+    let progress = tmp
+        .path()
+        .join(cache_paths.progress.trim_start_matches('/'));
+
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+
+    let mut chapter = Framebuffer::new();
+    let jumped = storage
+        .render_epub_chapter_from_entry(&mut chapter, "/", &entry, 5)
+        .expect("chapter jump should render");
+    assert!(jumped.rendered_page > 0, "expected non-zero chapter page");
+
+    let mut previous_page = Framebuffer::new();
+    storage
+        .render_epub_page_from_entry(
+            &mut previous_page,
+            "/",
+            &entry,
+            jumped.rendered_page.saturating_sub(1),
+        )
+        .expect("direct previous page should render");
+    let (expected_previous_offset, _) = read_progress_offsets(&progress);
+
+    let offsets = read_page_offsets(&pages);
+    assert!(
+        offsets.contains(&expected_previous_offset),
+        "expected proactive backfill to populate previous page start {expected_previous_offset}, got {offsets:?}"
+    );
+}
+
+#[test]
+fn host_storage_previous_page_uses_pages_index_when_progress_hint_is_wrong() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+    let progress = tmp
+        .path()
+        .join(cache_paths.progress.trim_start_matches('/'));
+
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+    for target_page in 1..=4 {
+        let mut page = Framebuffer::new();
+        storage
+            .render_epub_next_page_from_entry(&mut page, "/", &entry, target_page)
+            .expect("next page should render");
+    }
+
+    let (current_offset, next_offset) = read_progress_offsets(&progress);
+    write_progress_offsets(&progress, current_offset, next_offset);
+
+    let mut backward = Framebuffer::new();
+    let previous = storage
+        .render_epub_previous_page_from_entry(&mut backward, "/", &entry, 3)
+        .expect("previous page should render from index");
+
+    let mut direct = Framebuffer::new();
+    let expected = storage
+        .render_epub_page_from_entry(&mut direct, "/", &entry, 3)
+        .expect("direct page should render");
+
+    assert_eq!(previous.rendered_page, expected.rendered_page);
+    assert_eq!(backward.bytes(), direct.bytes());
+}
+
+#[test]
+fn host_storage_rebuilds_cache_when_pages_index_is_malformed() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+    let pages = tmp.path().join(cache_paths.pages.trim_start_matches('/'));
+
+    let mut first = Framebuffer::new();
+    storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("initial render should build cache");
+    fs::write(&pages, [1u8, 2, 3]).expect("corrupt pages index");
+
+    let mut reopened = Framebuffer::new();
+    let rendered = storage
+        .render_epub_from_entry(&mut reopened, "/", &entry)
+        .expect("reopen should rebuild invalid cache");
+
+    assert_eq!(rendered.rendered_page, 0);
+    assert_eq!(
+        fs::metadata(&pages).expect("pages metadata").len() % 8,
+        0,
+        "expected rebuilt pages.idx with flat u64 entries"
     );
 }

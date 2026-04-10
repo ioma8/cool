@@ -44,7 +44,6 @@ fn cache_meta_roundtrip() {
 #[test]
 fn progress_roundtrip() {
     let progress = ProgressState {
-        previous_page_start_offset: 12_345,
         current_page_start_offset: 123_456,
         next_page_start_offset: 234_567,
     };
