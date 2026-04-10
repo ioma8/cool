@@ -8,7 +8,9 @@ use embedded_hal::{
     spi::SpiDevice,
 };
 
-pub use xteink_render::{BUFFER_SIZE, DISPLAY_HEIGHT, DISPLAY_WIDTH, DISPLAY_WIDTH_BYTES, Framebuffer};
+pub use xteink_render::{
+    BUFFER_SIZE, DISPLAY_HEIGHT, DISPLAY_WIDTH, DISPLAY_WIDTH_BYTES, Framebuffer,
+};
 use xteink_render::{SHADE_BLACK, SHADE_DARK, SHADE_LIGHT};
 
 const PHYSICAL_WIDTH: u16 = 800;
@@ -348,12 +350,7 @@ where
     }
 }
 
-fn fill_binary_chunk(
-    framebuffer: &Framebuffer,
-    threshold: u8,
-    byte_offset: usize,
-    out: &mut [u8],
-) {
+fn fill_binary_chunk(framebuffer: &Framebuffer, threshold: u8, byte_offset: usize, out: &mut [u8]) {
     for (index, byte) in out.iter_mut().enumerate() {
         let absolute = byte_offset + index;
         let py = absolute / usize::from(DISPLAY_WIDTH_BYTES);

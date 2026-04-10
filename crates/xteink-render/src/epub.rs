@@ -68,7 +68,9 @@ enum RenderMode {
 
 fn mode_draws_page(mode: RenderMode, current_page: usize, target_page: usize) -> bool {
     match mode {
-        RenderMode::TargetPageOnly | RenderMode::FullBook | RenderMode::ThroughChapterBoundaryAfterTarget => true,
+        RenderMode::TargetPageOnly
+        | RenderMode::FullBook
+        | RenderMode::ThroughChapterBoundaryAfterTarget => true,
         RenderMode::FullBookPreserveTargetPage => current_page <= target_page,
         RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => false,
     }

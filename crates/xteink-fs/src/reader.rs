@@ -4,8 +4,8 @@ use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, reader_content_h
 use crate::{
     ListedEntry, SdFilesystem, SdFsFile,
     cache::{
-        CACHE_VERSION, CacheMeta, CachePaths, ProgressState, cache_paths_for_epub, encode_offset,
-        decode_progress, encode_progress, parse_meta, serialize_meta,
+        CACHE_VERSION, CacheMeta, CachePaths, ProgressState, cache_paths_for_epub, decode_progress,
+        encode_offset, encode_progress, parse_meta, serialize_meta,
     },
     log::logln,
     path::join_child_path,
@@ -364,7 +364,8 @@ where
         return Ok(0);
     }
     let mut scratch = Framebuffer::new();
-    let (_, offset, _) = render_cached_page(fs, &mut scratch, content_path, target_page, should_cancel)?;
+    let (_, offset, _) =
+        render_cached_page(fs, &mut scratch, content_path, target_page, should_cancel)?;
     Ok(offset)
 }
 
@@ -460,12 +461,17 @@ where
         .map_err(|_| EpubError::Io)?;
     file.seek_from_start(u32::try_from(page_start_offset).map_err(|_| EpubError::OutOfSpace)?)
         .map_err(|_| EpubError::Io)?;
-    let mut read_text =
-        |buffer: &mut [u8]| -> Result<usize, EpubError> { file.read(buffer).map_err(|_| EpubError::Io) };
-    let rendered =
-        display.render_cached_text_page_from_offset_with_progress(&mut read_text, 0, &mut *should_cancel)?;
-    let next_page_offset = page_start_offset
-        .saturating_add(u64::try_from(rendered.next_page_start_byte).map_err(|_| EpubError::OutOfSpace)?);
+    let mut read_text = |buffer: &mut [u8]| -> Result<usize, EpubError> {
+        file.read(buffer).map_err(|_| EpubError::Io)
+    };
+    let rendered = display.render_cached_text_page_from_offset_with_progress(
+        &mut read_text,
+        0,
+        &mut *should_cancel,
+    )?;
+    let next_page_offset = page_start_offset.saturating_add(
+        u64::try_from(rendered.next_page_start_byte).map_err(|_| EpubError::OutOfSpace)?,
+    );
     Ok((page_start_offset, next_page_offset))
 }
 

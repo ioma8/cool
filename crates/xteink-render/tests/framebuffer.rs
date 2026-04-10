@@ -1,6 +1,6 @@
 use xteink_render::{
-    DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, GRAY_LEVELS, SHADE_BLACK, SHADE_WHITE,
-    SHADE_BUFFER_SIZE,
+    DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, GRAY_LEVELS, SHADE_BLACK, SHADE_BUFFER_SIZE,
+    SHADE_WHITE,
 };
 
 #[test]
@@ -9,14 +9,14 @@ fn framebuffer_starts_white_and_reports_shades() {
 
     assert_eq!(framebuffer.shade_storage().len(), SHADE_BUFFER_SIZE);
     assert!(
-        framebuffer
-            .shade_storage()
-            .iter()
-            .all(|byte| *byte == 0),
+        framebuffer.shade_storage().iter().all(|byte| *byte == 0),
         "packed 2-bit white pixels should initialize to zero"
     );
     assert_eq!(framebuffer.shade_at(0, 0), SHADE_WHITE);
-    assert_eq!(framebuffer.shade_at(DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1), SHADE_WHITE);
+    assert_eq!(
+        framebuffer.shade_at(DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1),
+        SHADE_WHITE
+    );
 }
 
 #[test]
@@ -31,7 +31,10 @@ fn framebuffer_sets_and_reads_individual_shades() {
     assert_eq!(framebuffer.shade_at(0, 0), 1);
     assert_eq!(framebuffer.shade_at(1, 0), 2);
     assert_eq!(framebuffer.shade_at(2, 0), SHADE_BLACK);
-    assert_eq!(framebuffer.shade_at(DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1), 1);
+    assert_eq!(
+        framebuffer.shade_at(DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1),
+        1
+    );
 }
 
 #[test]

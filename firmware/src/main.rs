@@ -493,11 +493,7 @@ async fn main(spawner: Spawner) -> ! {
             "SD init failed",
             &mut pending_display_refresh,
         );
-        service_display_refresh(
-            &mut display,
-            &framebuffer,
-            &mut pending_display_refresh,
-        );
+        service_display_refresh(&mut display, &framebuffer, &mut pending_display_refresh);
         loop {
             yield_now().await;
         }
@@ -654,11 +650,7 @@ async fn ui_task<SD, SPI, DC, RST, BUSY, DELAY>(
                     "Session error",
                     &mut pending_display_refresh,
                 );
-                service_display_refresh(
-                    display,
-                    session.renderer(),
-                    &mut pending_display_refresh,
-                );
+                service_display_refresh(display, session.renderer(), &mut pending_display_refresh);
             }
         }
     }

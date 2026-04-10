@@ -138,8 +138,7 @@ impl Framebuffer {
 
                 let px = y;
                 let py = (DISPLAY_WIDTH - 1) - x;
-                let idx =
-                    (py as usize) * (DISPLAY_WIDTH_BYTES as usize) + (px as usize / 8);
+                let idx = (py as usize) * (DISPLAY_WIDTH_BYTES as usize) + (px as usize / 8);
                 let bit = 7 - (px % 8);
                 out[idx] &= !(1 << bit);
             }

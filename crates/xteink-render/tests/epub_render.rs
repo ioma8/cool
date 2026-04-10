@@ -383,7 +383,10 @@ fn full_cache_build_matches_full_book_parse_for_large_fixture() {
 
     let result = result.expect("cache prefix build should succeed");
     assert_eq!(result.rendered_page, 0);
-    assert!(result.complete, "cache build should linearize the full book");
+    assert!(
+        result.complete,
+        "cache build should linearize the full book"
+    );
     assert_eq!(cached_text, full_parse);
 }
 
