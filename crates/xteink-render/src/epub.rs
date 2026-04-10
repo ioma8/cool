@@ -61,15 +61,15 @@ pub struct CacheBuildResult {
 enum RenderMode {
     TargetPageOnly,
     FullBook,
+    FullBookPreserveTargetPage,
     ThroughChapterBoundaryAfterTarget,
     LayoutOnlyThroughChapterBoundaryAfterTarget,
 }
 
-fn mode_draws_page(mode: RenderMode, _current_page: usize, _target_page: usize) -> bool {
+fn mode_draws_page(mode: RenderMode, current_page: usize, target_page: usize) -> bool {
     match mode {
-        RenderMode::TargetPageOnly
-        | RenderMode::FullBook
-        | RenderMode::ThroughChapterBoundaryAfterTarget => true,
+        RenderMode::TargetPageOnly | RenderMode::FullBook | RenderMode::ThroughChapterBoundaryAfterTarget => true,
+        RenderMode::FullBookPreserveTargetPage => current_page <= target_page,
         RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => false,
     }
 }
@@ -77,9 +77,21 @@ fn mode_draws_page(mode: RenderMode, _current_page: usize, _target_page: usize) 
 fn mode_preserves_target_framebuffer(mode: RenderMode) -> bool {
     matches!(
         mode,
-        RenderMode::ThroughChapterBoundaryAfterTarget
+        RenderMode::FullBookPreserveTargetPage
+            | RenderMode::ThroughChapterBoundaryAfterTarget
             | RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget
     )
+}
+
+fn mode_preserves_target_page_only(mode: RenderMode) -> bool {
+    matches!(mode, RenderMode::FullBookPreserveTargetPage)
+}
+
+fn should_draw_current_page(mode: RenderMode, current_page: usize, target_page: usize) -> bool {
+    if mode_preserves_target_page_only(mode) && current_page > target_page {
+        return false;
+    }
+    mode_draws_page(mode, current_page, target_page)
 }
 
 #[derive(Clone, Copy)]
@@ -269,7 +281,7 @@ impl Framebuffer {
             source,
             target_page,
             &mut on_text_chunk,
-            RenderMode::FullBook,
+            RenderMode::FullBookPreserveTargetPage,
             None,
             &mut should_cancel,
         )
@@ -331,7 +343,7 @@ impl Framebuffer {
             let mut epub = Epub::open(source)?;
             let mut paginator = PaginatorState::<TEXT_LEN>::new(PaginationConfig {
                 target_page,
-                draw_target_page: mode_draws_page(
+                draw_target_page: should_draw_current_page(
                     mode,
                     resume.map_or(0, |checkpoint| checkpoint.page),
                     target_page,
@@ -392,7 +404,11 @@ impl Framebuffer {
                 let cursor_before_event = paginator.cursor_y();
                 let config = PaginationConfig {
                     target_page,
-                    draw_target_page: mode_draws_page(mode, paginator.current_page(), target_page),
+                    draw_target_page: should_draw_current_page(
+                        mode,
+                        paginator.current_page(),
+                        target_page,
+                    ),
                     stop_after_target_page: matches!(mode, RenderMode::TargetPageOnly),
                     preserve_target_page_framebuffer: mode_preserves_target_framebuffer(mode),
                     start_page: 0,
@@ -447,7 +463,7 @@ impl Framebuffer {
                         RenderMode::LayoutOnlyThroughChapterBoundaryAfterTarget => {
                             stop_after_spine_index.get_or_insert(epub.next_spine_index());
                         }
-                        RenderMode::FullBook => {}
+                        RenderMode::FullBook | RenderMode::FullBookPreserveTargetPage => {}
                     }
                 }
                 if matches!(
@@ -464,7 +480,11 @@ impl Framebuffer {
 
             let finish_config = PaginationConfig {
                 target_page,
-                draw_target_page: mode_draws_page(mode, paginator.current_page(), target_page),
+                draw_target_page: should_draw_current_page(
+                    mode,
+                    paginator.current_page(),
+                    target_page,
+                ),
                 stop_after_target_page: matches!(mode, RenderMode::TargetPageOnly),
                 preserve_target_page_framebuffer: mode_preserves_target_framebuffer(mode),
                 start_page: 0,
