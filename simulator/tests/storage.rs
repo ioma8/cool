@@ -359,3 +359,70 @@ fn host_storage_ignores_saved_progress_when_cache_meta_is_stale() {
 
     assert_eq!(reopened.rendered_page, 0);
 }
+
+#[test]
+fn host_storage_lists_toc_entries_from_real_fixture() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let mut framebuffer = Framebuffer::new();
+
+    storage
+        .render_epub_from_entry(&mut framebuffer, "/", &entry)
+        .expect("initial render should build cache");
+
+    let page = storage
+        .list_epub_chapter_page("/", &entry, 0, 8)
+        .expect("chapter page should load");
+
+    assert!(page.entries.len() > 2);
+    assert_eq!(page.info.page_start, 0);
+    assert!(
+        page.entries
+            .iter()
+            .any(|chapter| chapter.label.as_str() == "Introduction")
+    );
+}
+
+#[test]
+fn host_storage_renders_requested_toc_chapter_jump() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let mut framebuffer = Framebuffer::new();
+
+    storage
+        .render_epub_from_entry(&mut framebuffer, "/", &entry)
+        .expect("initial render should build cache");
+
+    let mut chapter_framebuffer = Framebuffer::new();
+    let rendered = storage
+        .render_epub_chapter_from_entry(&mut chapter_framebuffer, "/", &entry, 1)
+        .expect("chapter jump should render");
+
+    assert_eq!(rendered.chapter_number, Some(2));
+    assert!(
+        rendered
+            .chapter_title
+            .as_deref()
+            .is_some_and(|title| !title.is_empty())
+    );
+    assert!(
+        chapter_framebuffer.bytes().iter().any(|byte| *byte != 0xFF),
+        "chapter jump should render visible content"
+    );
+}

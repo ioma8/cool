@@ -26,6 +26,7 @@ pub use hal::{RawGpioOutput, SD_CS_PIN, SD_POWER_PIN};
 pub use low_level::init_sd;
 pub use path::{PATH_CAPACITY, PathError, join_child_path, normalize_path};
 pub use reader::{
-    EpubRefreshMode, EpubRenderResult, render_epub_from_entry, render_epub_from_entry_with_cancel,
-    render_epub_page_from_entry, render_epub_page_from_entry_with_cancel,
+    EpubRefreshMode, EpubRenderResult, list_epub_chapter_page, render_epub_chapter_from_entry,
+    render_epub_from_entry, render_epub_from_entry_with_cancel, render_epub_page_from_entry,
+    render_epub_page_from_entry_with_cancel,
 };

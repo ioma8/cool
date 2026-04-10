@@ -110,6 +110,20 @@ pub trait AppStorage<R: AppRenderer> {
         entry: &ListedEntry,
         target_page: usize,
     ) -> Result<EpubRenderResult, Self::Error>;
+    fn list_epub_chapter_page(
+        &self,
+        current_path: &str,
+        entry: &ListedEntry,
+        page_start: usize,
+        page_size: usize,
+    ) -> Result<DirectoryPage, Self::Error>;
+    fn render_epub_chapter_from_entry(
+        &self,
+        renderer: &mut R,
+        current_path: &str,
+        entry: &ListedEntry,
+        chapter_index: usize,
+    ) -> Result<EpubRenderResult, Self::Error>;
 }
 
 pub struct Session<S, R> {
@@ -202,6 +216,9 @@ where
                     rendered.progress_percent,
                 );
                 self.controller.apply_epub_opened(rendered.rendered_page);
+                self.controller.apply_reader_chapter_changed(
+                    rendered.chapter_number.unwrap_or(1).saturating_sub(1),
+                );
                 Ok(Some(BrowserRefresh::Fast))
             }
             ControllerCommand::RenderReaderPage {
@@ -225,11 +242,57 @@ where
                 );
                 self.controller
                     .apply_reader_page_rendered(rendered.rendered_page);
+                self.controller.apply_reader_chapter_changed(
+                    rendered.chapter_number.unwrap_or(1).saturating_sub(1),
+                );
                 Ok(Some(if fast {
                     BrowserRefresh::Fast
                 } else {
                     BrowserRefresh::Full
                 }))
+            }
+            ControllerCommand::LoadToc {
+                entry,
+                page_start,
+                selected,
+                refresh,
+                ..
+            } => self
+                .load_toc_page(&entry, page_start, selected, refresh)
+                .map(Some),
+            ControllerCommand::RenderToc { refresh } => {
+                self.ui.render_toc(
+                    &mut self.renderer,
+                    self.page.entries.as_slice(),
+                    self.controller
+                        .toc_browser()
+                        .selected_index(self.page.entries.len()),
+                );
+                Ok(Some(refresh))
+            }
+            ControllerCommand::JumpToChapter {
+                entry,
+                chapter_index,
+                ..
+            } => {
+                let listed = self.ui.ui_entry_to_listed(&entry);
+                let rendered = self.storage.render_epub_chapter_from_entry(
+                    &mut self.renderer,
+                    self.current_path.as_str(),
+                    &listed,
+                    chapter_index,
+                )?;
+                self.ui.render_reader_footer(
+                    &mut self.renderer,
+                    rendered.chapter_number,
+                    rendered.chapter_title.as_deref(),
+                    rendered.progress_percent,
+                );
+                self.controller.apply_epub_opened(rendered.rendered_page);
+                self.controller.apply_reader_chapter_changed(
+                    rendered.chapter_number.unwrap_or(1).saturating_sub(1),
+                );
+                Ok(Some(BrowserRefresh::Fast))
             }
         }
     }
@@ -288,6 +351,35 @@ where
             self.page.entries.as_slice(),
             self.controller
                 .browser()
+                .selected_index(self.page.entries.len()),
+        );
+        Ok(refresh)
+    }
+
+    fn load_toc_page(
+        &mut self,
+        entry: &xteink_controller::UiEntry,
+        page_start: usize,
+        selected: usize,
+        refresh: BrowserRefresh,
+    ) -> Result<BrowserRefresh, S::Error> {
+        let listed = self.ui.ui_entry_to_listed(entry);
+        self.page = self.storage.list_epub_chapter_page(
+            self.current_path.as_str(),
+            &listed,
+            page_start,
+            self.page_size,
+        )?;
+        self.controller.apply_toc_loaded(
+            self.page.info.page_start,
+            self.page.entries.len(),
+            selected,
+        );
+        self.ui.render_toc(
+            &mut self.renderer,
+            self.page.entries.as_slice(),
+            self.controller
+                .toc_browser()
                 .selected_index(self.page.entries.len()),
         );
         Ok(refresh)

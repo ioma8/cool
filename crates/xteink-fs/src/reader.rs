@@ -7,7 +7,7 @@ use xteink_epub::{
 use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, reader_content_height};
 
 use crate::{
-    ListedEntry, SdFilesystem, SdFsFile,
+    FsError, ListedEntry, SdFilesystem, SdFsFile,
     cache::{
         CACHE_VERSION, CHAPTER_TITLE_CAPACITY, CHAPTERS_MAGIC, CacheMeta, CachePaths,
         ChapterMetadata, ProgressState, cache_paths_for_epub, decode_progress, encode_progress,
@@ -168,6 +168,129 @@ where
         fast_refresh,
         || false,
     )
+}
+
+pub fn list_epub_chapter_page<SD>(
+    fs: &SD,
+    current_path: &str,
+    entry: &ListedEntry,
+    page_start: usize,
+    page_size: usize,
+) -> Result<crate::DirectoryPage, FsError>
+where
+    SD: SdFilesystem,
+{
+    let source_path = join_child_path(current_path, entry.fs_name.as_str())
+        .map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+    let source_size = u32::try_from(
+        fs.open_epub_source(source_path.as_str())
+            .map_err(|_| FsError::OpenFailed(heapless::String::new()))?
+            .len(),
+    )
+    .map_err(|_| FsError::TooManyEntries)?;
+    let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
+    ensure_cache_ready(fs, source_path.as_str(), source_size, &cache_paths)
+        .map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+    let chapters = read_all_chapter_metadata(fs, cache_paths.chapters.as_str())
+        .map_err(|_| FsError::OpenFailed(heapless::String::new()))?;
+    let mut entries = heapless::Vec::new();
+    let end = chapters.len().min(page_start.saturating_add(page_size));
+    for (index, chapter) in chapters
+        .iter()
+        .enumerate()
+        .skip(page_start)
+        .take(end.saturating_sub(page_start))
+    {
+        let label = if chapter.title.is_empty() {
+            let mut fallback = heapless::String::<CHAPTER_TITLE_CAPACITY>::new();
+            let _ = core::fmt::write(&mut fallback, format_args!("Chapter {}", index + 1));
+            fallback
+        } else {
+            chapter.title.clone()
+        };
+        entries
+            .push(ListedEntry {
+                label: to_list_label(label.as_str())?,
+                fs_name: to_list_label(label.as_str())?,
+                kind: xteink_browser::EntryKind::Other,
+            })
+            .map_err(|_| FsError::TooManyEntries)?;
+    }
+    Ok(crate::DirectoryPage {
+        entries,
+        info: crate::DirectoryPageInfo {
+            page_start,
+            has_prev: page_start > 0,
+            has_next: end < chapters.len(),
+        },
+    })
+}
+
+pub fn render_epub_chapter_from_entry<SD>(
+    fs: &SD,
+    display: &mut Framebuffer,
+    current_path: &str,
+    entry: &ListedEntry,
+    chapter_index: usize,
+) -> Result<EpubRenderResult, EpubError>
+where
+    SD: SdFilesystem,
+{
+    let source_path =
+        join_child_path(current_path, entry.fs_name.as_str()).map_err(|_| EpubError::Io)?;
+    let source_size = u32::try_from(
+        fs.open_epub_source(source_path.as_str())
+            .map_err(|_| EpubError::Io)?
+            .len(),
+    )
+    .map_err(|_| EpubError::OutOfSpace)?;
+    let cache_paths = cache_paths_for_epub(current_path, entry.fs_name.as_str());
+    let meta = ensure_cache_ready(fs, source_path.as_str(), source_size, &cache_paths)?;
+    let chapters = read_all_chapter_metadata(fs, cache_paths.chapters.as_str())?;
+    let chapter = chapters
+        .get(chapter_index)
+        .ok_or(EpubError::InvalidFormat)?;
+    let page_start_offset = chapter.start_offset;
+    let mut never_cancel = || false;
+    let rendered_page = count_pages_before_offset(
+        fs,
+        cache_paths.content.as_str(),
+        page_start_offset,
+        &mut never_cancel,
+    )?;
+    let (_, next_page_offset) = render_cached_page_at_offset(
+        fs,
+        display,
+        cache_paths.content.as_str(),
+        page_start_offset,
+        &mut never_cancel,
+    )?;
+    let previous_page_offset = page_start_offset_for_page(
+        fs,
+        cache_paths.content.as_str(),
+        rendered_page.saturating_sub(1),
+        &mut never_cancel,
+    )?;
+    let progress_percent =
+        compute_progress_percent(page_start_offset, next_page_offset, meta.content_length);
+    write_cached_progress(
+        fs,
+        cache_paths.progress.as_str(),
+        ProgressState {
+            previous_page_start_offset: previous_page_offset,
+            current_page_start_offset: page_start_offset,
+            next_page_start_offset: next_page_offset,
+        },
+    )?;
+    let footer_context =
+        read_reader_footer_context(fs, cache_paths.chapters.as_str(), page_start_offset)?;
+    Ok(EpubRenderResult {
+        rendered_page,
+        refresh: EpubRefreshMode::Fast,
+        progress_percent,
+        chapter_number: footer_context.chapter_number,
+        chapter_title: footer_context.chapter_title,
+    })
 }
 
 pub fn render_epub_page_from_entry_with_cancel<SD, C>(
@@ -679,6 +802,47 @@ fn read_cache_meta_if_valid<SD: SdFilesystem>(
     Ok(meta)
 }
 
+fn ensure_cache_ready<SD: SdFilesystem>(
+    fs: &SD,
+    source_path: &str,
+    source_size: u32,
+    cache_paths: &CachePaths,
+) -> Result<CacheMeta, EpubError> {
+    if let Ok(meta) = read_cache_meta_if_valid(fs, cache_paths, source_size) {
+        return Ok(meta);
+    }
+
+    let source = fs
+        .open_epub_source(source_path)
+        .map_err(|_| EpubError::Io)?;
+    let mut scratch = Framebuffer::new();
+    let mut never_cancel = || false;
+    let build = build_content_cache(
+        fs,
+        &mut scratch,
+        source,
+        source_size,
+        cache_paths,
+        0,
+        &mut never_cancel,
+    )?;
+    let meta = CacheMeta {
+        version: CACHE_VERSION,
+        source_size,
+        content_length: u64::try_from(build.content_length).map_err(|_| EpubError::OutOfSpace)?,
+        build_complete: build.complete,
+        next_chapter_index: build.next_chapter_index,
+        layout_sig_version: LAYOUT_SIG_VERSION,
+        layout_sig_width: DISPLAY_WIDTH,
+        layout_sig_height: DISPLAY_HEIGHT,
+        layout_sig_content_height: reader_content_height(),
+        layout_sig_font: LAYOUT_SIG_FONT,
+        layout_sig_paginator: LAYOUT_SIG_PAGINATOR,
+    };
+    write_meta(fs, cache_paths.meta.as_str(), &meta)?;
+    Ok(meta)
+}
+
 fn read_cache_meta<SD: SdFilesystem>(fs: &SD, path: &str) -> Result<CacheMeta, EpubError> {
     let mut file = fs.open_cache_file_read(path).map_err(|_| EpubError::Io)?;
     let mut raw = [0u8; 384];
@@ -723,6 +887,30 @@ fn write_cached_progress<SD: SdFilesystem>(
 fn write_meta<SD: SdFilesystem>(fs: &SD, path: &str, meta: &CacheMeta) -> Result<(), EpubError> {
     let serialized = serialize_meta(meta);
     write_bytes(fs, path, serialized.as_bytes())
+}
+
+fn read_all_chapter_metadata<SD: SdFilesystem>(
+    fs: &SD,
+    chapters_path: &str,
+) -> Result<Vec<ChapterMetadata, MAX_ARCHIVE_ENTRIES>, EpubError> {
+    let mut file = fs
+        .open_cache_file_read(chapters_path)
+        .map_err(|_| EpubError::Io)?;
+    let mut magic = [0u8; 4];
+    if !read_exact_or_eof(&mut file, &mut magic)? || &magic != CHAPTERS_MAGIC {
+        return Err(EpubError::InvalidFormat);
+    }
+    let mut chapters = Vec::new();
+    while let Some(chapter) = read_chapter_metadata_record(&mut file)? {
+        chapters.push(chapter).map_err(|_| EpubError::OutOfSpace)?;
+    }
+    Ok(chapters)
+}
+
+fn to_list_label(text: &str) -> Result<heapless::String<96>, FsError> {
+    let mut out = heapless::String::<96>::new();
+    out.push_str(text).map_err(|_| FsError::TooManyEntries)?;
+    Ok(out)
 }
 
 fn collect_navigation_titles_for_cache<S: EpubSource>(

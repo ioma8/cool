@@ -54,6 +54,42 @@ impl AppStorage<Framebuffer> for FakeStorage {
             chapter_title: None,
         })
     }
+
+    fn list_epub_chapter_page(
+        &self,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        _page_start: usize,
+        _page_size: usize,
+    ) -> Result<DirectoryPage, Self::Error> {
+        Ok(DirectoryPage {
+            entries: heapless::Vec::from_slice(&[
+                ListedEntry::epub("Cover"),
+                ListedEntry::epub("Introduction"),
+            ])
+            .expect("chapters"),
+            info: DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        })
+    }
+
+    fn render_epub_chapter_from_entry(
+        &self,
+        _framebuffer: &mut xteink_render::Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        chapter_index: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        Ok(EpubRenderResult {
+            rendered_page: chapter_index.saturating_mul(10),
+            progress_percent: 25,
+            chapter_number: Some(chapter_index.saturating_add(1)),
+            chapter_title: None,
+        })
+    }
 }
 
 struct MultiStorage;
@@ -123,6 +159,48 @@ impl AppStorage<Framebuffer> for MultiStorage {
             chapter_title: None,
         })
     }
+
+    fn list_epub_chapter_page(
+        &self,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        _page_start: usize,
+        page_size: usize,
+    ) -> Result<DirectoryPage, Self::Error> {
+        let entries = [
+            ListedEntry::epub("Cover"),
+            ListedEntry::epub("Introduction"),
+            ListedEntry::epub("First chapter"),
+        ];
+        let mut listed = heapless::Vec::new();
+        for entry in entries.into_iter().take(page_size) {
+            let _ = listed.push(entry);
+        }
+        Ok(DirectoryPage {
+            entries: listed,
+            info: DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        })
+    }
+
+    fn render_epub_chapter_from_entry(
+        &self,
+        framebuffer: &mut xteink_render::Framebuffer,
+        _current_path: &str,
+        _entry: &ListedEntry,
+        chapter_index: usize,
+    ) -> Result<EpubRenderResult, Self::Error> {
+        framebuffer.draw_text(4, 24, "chapter jump");
+        Ok(EpubRenderResult {
+            rendered_page: chapter_index.saturating_mul(10),
+            progress_percent: 33,
+            chapter_number: Some(chapter_index.saturating_add(1)),
+            chapter_title: None,
+        })
+    }
 }
 
 #[test]
@@ -181,4 +259,46 @@ fn opening_directory_updates_current_path_and_loads_child_entries() {
 
     assert_eq!(session.current_path(), "/Books");
     assert_eq!(session.current_entries()[0].label.as_str(), "inside.epub");
+}
+
+#[test]
+fn confirm_in_reader_opens_toc_entries() {
+    let mut session = Session::new(FakeStorage, Framebuffer::new(), 8);
+    session.bootstrap().expect("bootstrap should work");
+    session
+        .handle_button(Button::Back)
+        .expect("open should work");
+
+    session
+        .handle_button(Button::Confirm)
+        .expect("toc should open");
+
+    assert_eq!(session.screen_mode(), xteink_controller::ScreenMode::Toc);
+    assert_eq!(session.current_entries()[0].label.as_str(), "Cover");
+    assert_eq!(session.current_entries()[1].label.as_str(), "Introduction");
+}
+
+#[test]
+fn confirm_in_toc_jumps_to_selected_chapter_and_returns_to_reader() {
+    let mut session = Session::new(FakeStorage, Framebuffer::new(), 8);
+    session.bootstrap().expect("bootstrap should work");
+    session
+        .handle_button(Button::Back)
+        .expect("open should work");
+    session
+        .handle_button(Button::Confirm)
+        .expect("toc should open");
+
+    session
+        .handle_button(Button::Right)
+        .expect("toc selection should move");
+    session
+        .handle_button(Button::Confirm)
+        .expect("toc confirm should jump");
+
+    assert_eq!(
+        session.screen_mode(),
+        xteink_controller::ScreenMode::Reading
+    );
+    assert_eq!(session.reader_page(), 10);
 }

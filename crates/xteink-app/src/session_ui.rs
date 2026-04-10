@@ -19,32 +19,22 @@ impl SessionUi {
         entries: &[ListedEntry],
         selected_index: Option<usize>,
     ) {
-        renderer.clear(0xFF);
-        renderer.draw_text(4, 4, current_path);
+        self.render_menu(renderer, current_path, entries, selected_index, true);
+    }
 
-        let line_height = bookerly::BOOKERLY.line_height_px();
-        let mut cursor_y = 4 + line_height * 2;
-        for (index, entry) in entries.iter().enumerate() {
-            if cursor_y.saturating_add(line_height) > xteink_render::DISPLAY_HEIGHT {
-                break;
-            }
-
-            let mut line = String::<96>::new();
-            let _ = line.push(if selected_index == Some(index) {
-                '>'
-            } else {
-                ' '
-            });
-            let _ = line.push(' ');
-            let _ = line.push_str(match entry.kind {
-                EntryKind::Directory => "[D] ",
-                EntryKind::Epub => "[E] ",
-                EntryKind::Other => "[ ] ",
-            });
-            let _ = line.push_str(entry.label.as_str());
-            renderer.draw_text(4, cursor_y, line.as_str());
-            cursor_y = cursor_y.saturating_add(line_height);
-        }
+    pub fn render_toc<R: AppRenderer>(
+        &self,
+        renderer: &mut R,
+        entries: &[ListedEntry],
+        selected_index: Option<usize>,
+    ) {
+        self.render_menu(
+            renderer,
+            "Table of contents",
+            entries,
+            selected_index,
+            false,
+        );
     }
 
     pub fn render_reader_footer<R: AppRenderer>(
@@ -96,6 +86,44 @@ impl SessionUi {
         UiEntry {
             name,
             kind: entry.kind,
+        }
+    }
+
+    fn render_menu<R: AppRenderer>(
+        &self,
+        renderer: &mut R,
+        title: &str,
+        entries: &[ListedEntry],
+        selected_index: Option<usize>,
+        show_kind: bool,
+    ) {
+        renderer.clear(0xFF);
+        renderer.draw_text(4, 4, title);
+
+        let line_height = bookerly::BOOKERLY.line_height_px();
+        let mut cursor_y = 4 + line_height * 2;
+        for (index, entry) in entries.iter().enumerate() {
+            if cursor_y.saturating_add(line_height) > xteink_render::DISPLAY_HEIGHT {
+                break;
+            }
+
+            let mut line = String::<96>::new();
+            let _ = line.push(if selected_index == Some(index) {
+                '>'
+            } else {
+                ' '
+            });
+            let _ = line.push(' ');
+            if show_kind {
+                let _ = line.push_str(match entry.kind {
+                    EntryKind::Directory => "[D] ",
+                    EntryKind::Epub => "[E] ",
+                    EntryKind::Other => "[ ] ",
+                });
+            }
+            let _ = line.push_str(entry.label.as_str());
+            renderer.draw_text(4, cursor_y, line.as_str());
+            cursor_y = cursor_y.saturating_add(line_height);
         }
     }
 }
@@ -229,6 +257,31 @@ mod tests {
                 .texts
                 .iter()
                 .any(|(_, _, text)| text.as_str() == "Introduction")
+        );
+    }
+
+    #[test]
+    fn render_toc_draws_header_and_selected_chapter_title() {
+        let ui = SessionUi::new();
+        let mut renderer = RecordingRenderer::default();
+        let entries = [
+            ListedEntry::epub("Cover"),
+            ListedEntry::epub("Introduction"),
+        ];
+
+        ui.render_toc(&mut renderer, &entries, Some(1));
+
+        assert!(
+            renderer
+                .texts
+                .iter()
+                .any(|(_, _, text)| text.as_str() == "Table of contents")
+        );
+        assert!(
+            renderer
+                .texts
+                .iter()
+                .any(|(_, _, text)| text.as_str() == "> Introduction")
         );
     }
 }

@@ -27,6 +27,7 @@ pub struct DirectoryPageInfo {
 pub enum ScreenMode {
     Browse,
     Reading,
+    Toc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,21 @@ pub enum ControllerCommand {
         target_page: usize,
         fast: bool,
     },
+    LoadToc {
+        path: String<PATH_CAPACITY>,
+        entry: UiEntry,
+        page_start: usize,
+        selected: usize,
+        refresh: BrowserRefresh,
+    },
+    RenderToc {
+        refresh: BrowserRefresh,
+    },
+    JumpToChapter {
+        path: String<PATH_CAPACITY>,
+        entry: UiEntry,
+        chapter_index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +83,8 @@ pub struct AppController {
     screen_mode: ScreenMode,
     reader_entry: Option<UiEntry>,
     reader_page: usize,
+    reader_chapter_index: usize,
+    toc_browser: PagedBrowser,
 }
 
 impl AppController {
@@ -80,6 +98,8 @@ impl AppController {
             screen_mode: ScreenMode::Browse,
             reader_entry: None,
             reader_page: 0,
+            reader_chapter_index: 0,
+            toc_browser: PagedBrowser::new(page_size),
         }
     }
 
@@ -95,6 +115,10 @@ impl AppController {
         &self.browser
     }
 
+    pub fn toc_browser(&self) -> &PagedBrowser {
+        &self.toc_browser
+    }
+
     pub fn reader_page(&self) -> usize {
         self.reader_page
     }
@@ -102,6 +126,14 @@ impl AppController {
     pub fn apply_epub_opened(&mut self, rendered_page: usize) {
         self.screen_mode = ScreenMode::Reading;
         self.reader_page = rendered_page;
+    }
+
+    pub fn apply_reader_chapter_changed(&mut self, chapter_index: usize) {
+        self.reader_chapter_index = chapter_index;
+    }
+
+    pub fn apply_toc_loaded(&mut self, page_start: usize, page_len: usize, selected: usize) {
+        self.toc_browser.set_page(page_start, page_len, selected);
     }
 
     pub fn apply_directory_loaded(&mut self, page_start: usize, page_len: usize, selected: usize) {
@@ -219,6 +251,52 @@ impl AppController {
                     refresh: BrowserRefresh::Fast,
                 }
             }
+            (ScreenMode::Reading, RawButton::Confirm) => {
+                let Some(entry) = self.reader_entry.clone() else {
+                    return ControllerCommand::None;
+                };
+                self.screen_mode = ScreenMode::Toc;
+                ControllerCommand::LoadToc {
+                    path: self.current_path.clone(),
+                    entry,
+                    page_start: (self.reader_chapter_index / self.page_size) * self.page_size,
+                    selected: self.reader_chapter_index % self.page_size,
+                    refresh: BrowserRefresh::Fast,
+                }
+            }
+            (ScreenMode::Toc, RawButton::Left | RawButton::Up) => {
+                self.handle_toc_navigation(BrowserInput::Left, page_len, page_info)
+            }
+            (ScreenMode::Toc, RawButton::Right | RawButton::Down) => {
+                self.handle_toc_navigation(BrowserInput::Right, page_len, page_info)
+            }
+            (ScreenMode::Toc, RawButton::Back) => {
+                self.screen_mode = ScreenMode::Reading;
+                ControllerCommand::RenderReaderPage {
+                    path: self.current_path.clone(),
+                    entry: self.reader_entry.clone().unwrap_or_else(|| UiEntry {
+                        name: String::new(),
+                        kind: EntryKind::Epub,
+                    }),
+                    target_page: self.reader_page,
+                    fast: true,
+                }
+            }
+            (ScreenMode::Toc, RawButton::Confirm) => {
+                let Some(entry) = self.reader_entry.clone() else {
+                    return ControllerCommand::None;
+                };
+                let Some(selected) = self.toc_browser.selected_index(page_len) else {
+                    return ControllerCommand::None;
+                };
+                self.screen_mode = ScreenMode::Reading;
+                self.reader_chapter_index = page_info.page_start.saturating_add(selected);
+                ControllerCommand::JumpToChapter {
+                    path: self.current_path.clone(),
+                    entry,
+                    chapter_index: self.reader_chapter_index,
+                }
+            }
             _ => ControllerCommand::None,
         }
     }
@@ -249,6 +327,48 @@ impl AppController {
                 refresh: BrowserRefresh::Fast,
             },
             PagedAction::OpenSelected(_) => ControllerCommand::None,
+        }
+    }
+
+    fn handle_toc_navigation(
+        &mut self,
+        input: BrowserInput,
+        page_len: usize,
+        page_info: DirectoryPageInfo,
+    ) -> ControllerCommand {
+        match self
+            .toc_browser
+            .handle(input, page_len, page_info.has_prev, page_info.has_next)
+        {
+            PagedAction::None => ControllerCommand::None,
+            PagedAction::Redraw => ControllerCommand::RenderToc {
+                refresh: BrowserRefresh::Fast,
+            },
+            PagedAction::LoadPage {
+                page_start,
+                selected,
+            } => ControllerCommand::LoadToc {
+                path: self.current_path.clone(),
+                entry: self.reader_entry.clone().unwrap_or_else(|| UiEntry {
+                    name: String::new(),
+                    kind: EntryKind::Epub,
+                }),
+                page_start,
+                selected,
+                refresh: BrowserRefresh::Fast,
+            },
+            PagedAction::OpenSelected(index) => {
+                let Some(entry) = self.reader_entry.clone() else {
+                    return ControllerCommand::None;
+                };
+                self.screen_mode = ScreenMode::Reading;
+                self.reader_chapter_index = index;
+                ControllerCommand::JumpToChapter {
+                    path: self.current_path.clone(),
+                    entry,
+                    chapter_index: index,
+                }
+            }
         }
     }
 }
@@ -551,5 +671,116 @@ mod tests {
                 refresh: BrowserRefresh::Fast,
             }
         );
+    }
+
+    #[test]
+    fn reading_confirm_opens_toc_at_current_chapter() {
+        let mut controller = AppController::new(3);
+        let entries = [epub_entry("novel.epub")];
+        let _ = controller.handle_button(
+            RawButton::Back,
+            &entries,
+            DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        );
+        controller.apply_epub_opened(5);
+        controller.apply_reader_chapter_changed(4);
+
+        let command = controller.handle_button(
+            RawButton::Confirm,
+            &[],
+            DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        );
+
+        assert_eq!(
+            command,
+            ControllerCommand::LoadToc {
+                path: String::try_from("/").unwrap(),
+                entry: epub_entry("novel.epub"),
+                page_start: 3,
+                selected: 1,
+                refresh: BrowserRefresh::Fast,
+            }
+        );
+        assert_eq!(controller.screen_mode(), ScreenMode::Toc);
+    }
+
+    #[test]
+    fn toc_confirm_jumps_to_selected_chapter_and_returns_to_reader() {
+        let mut controller = AppController::new(3);
+        let entries = [epub_entry("novel.epub")];
+        let _ = controller.handle_button(
+            RawButton::Back,
+            &entries,
+            DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        );
+        controller.apply_epub_opened(0);
+        controller.apply_reader_chapter_changed(0);
+        let _ = controller.handle_button(
+            RawButton::Confirm,
+            &[],
+            DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        );
+        controller.apply_toc_loaded(0, 3, 0);
+
+        let command = controller.handle_button(
+            RawButton::Right,
+            &[
+                epub_entry("Cover"),
+                epub_entry("Introduction"),
+                epub_entry("One"),
+            ],
+            DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        );
+
+        assert_eq!(
+            command,
+            ControllerCommand::RenderToc {
+                refresh: BrowserRefresh::Fast,
+            }
+        );
+
+        let command = controller.handle_button(
+            RawButton::Confirm,
+            &[
+                epub_entry("Cover"),
+                epub_entry("Introduction"),
+                epub_entry("One"),
+            ],
+            DirectoryPageInfo {
+                page_start: 0,
+                has_prev: false,
+                has_next: false,
+            },
+        );
+
+        assert_eq!(
+            command,
+            ControllerCommand::JumpToChapter {
+                path: String::try_from("/").unwrap(),
+                entry: epub_entry("novel.epub"),
+                chapter_index: 1,
+            }
+        );
+        assert_eq!(controller.screen_mode(), ScreenMode::Reading);
     }
 }

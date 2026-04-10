@@ -28,8 +28,8 @@ use xteink_buttons::{
 use xteink_controller::BrowserRefresh;
 use xteink_display::{DISPLAY_HEIGHT, SSD1677Display};
 use xteink_fs::{
-    FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, render_epub_from_entry,
-    render_epub_page_from_entry,
+    FsError, ListedEntry, MAX_ENTRIES, SdFilesystem, init_sd, list_epub_chapter_page,
+    render_epub_chapter_from_entry, render_epub_from_entry, render_epub_page_from_entry,
 };
 use xteink_memory::{
     DEVICE_PERSISTENT_BUDGET_BYTES, DEVICE_STACK_RESERVE_BYTES, DEVICE_TOTAL_RAM_BYTES,
@@ -239,6 +239,56 @@ where
             &clone_listed_entry(entry),
             target_page,
             true,
+        )?;
+        Ok(AppEpubRenderResult {
+            rendered_page: rendered.rendered_page,
+            progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
+        })
+    }
+
+    fn list_epub_chapter_page(
+        &self,
+        current_path: &str,
+        entry: &AppListedEntry,
+        page_start: usize,
+        page_size: usize,
+    ) -> Result<xteink_app::DirectoryPage, Self::Error> {
+        let page = list_epub_chapter_page(
+            self.sd,
+            current_path,
+            &clone_listed_entry(entry),
+            page_start,
+            page_size,
+        )?;
+        let mut app_entries = heapless::Vec::new();
+        for entry in page.entries.iter() {
+            let _ = app_entries.push(clone_listed_entry(entry));
+        }
+        Ok(xteink_app::DirectoryPage {
+            entries: app_entries,
+            info: xteink_app::DirectoryPageInfo {
+                page_start: page.info.page_start,
+                has_prev: page.info.has_prev,
+                has_next: page.info.has_next,
+            },
+        })
+    }
+
+    fn render_epub_chapter_from_entry(
+        &self,
+        renderer: &mut Framebuffer,
+        current_path: &str,
+        entry: &AppListedEntry,
+        chapter_index: usize,
+    ) -> Result<AppEpubRenderResult, Self::Error> {
+        let rendered = render_epub_chapter_from_entry(
+            self.sd,
+            renderer,
+            current_path,
+            &clone_listed_entry(entry),
+            chapter_index,
         )?;
         Ok(AppEpubRenderResult {
             rendered_page: rendered.rendered_page,
