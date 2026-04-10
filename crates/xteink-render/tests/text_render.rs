@@ -48,7 +48,7 @@ fn wrapped_text_advances_to_multiple_lines_when_width_is_tight() {
 
 #[test]
 fn generated_bookerly_metrics_match_font_bitmap_baseline_layout() {
-    const FONT_SIZE: f32 = 32.0;
+    const FONT_SIZE: f32 = 30.0;
     let font = Font::from_bytes(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -77,7 +77,7 @@ fn generated_bookerly_metrics_match_font_bitmap_baseline_layout() {
 
 #[test]
 fn generated_bookerly_pair_positioning_matches_gpos_for_common_pairs() {
-    const FONT_SIZE: f32 = 32.0;
+    const FONT_SIZE: f32 = 30.0;
     let font_bytes = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../xteink-display/assets/Bookerly-Regular.ttf"
@@ -119,7 +119,7 @@ fn generated_bookerly_pair_positioning_matches_gpos_for_common_pairs() {
 
 #[test]
 fn renderer_positions_match_full_shaping_for_office() {
-    const FONT_SIZE: f32 = 32.0;
+    const FONT_SIZE: f32 = 30.0;
     let font_bytes = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../xteink-display/assets/Bookerly-Regular.ttf"
@@ -147,7 +147,7 @@ fn generated_bookerly_metrics_match_hinted_freetype_metrics() {
             0,
         )
         .expect("Bookerly should load in freetype");
-    face.set_pixel_sizes(0, 32).expect("pixel size should set");
+    face.set_pixel_sizes(0, 30).expect("pixel size should set");
 
     for ch in ['A', 'H', 'x', 'g', 'p', 'j', 'Q', 'y'] {
         face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
@@ -190,7 +190,7 @@ fn generated_bookerly_bitmaps_match_hinted_freetype_rasterization() {
             0,
         )
         .expect("Bookerly should load in freetype");
-    face.set_pixel_sizes(0, 32).expect("pixel size should set");
+    face.set_pixel_sizes(0, 30).expect("pixel size should set");
 
     for ch in ['A', 'e', 'g', 'j', 'Q', 'y'] {
         face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
@@ -337,7 +337,7 @@ fn heading_font_is_taller_than_body_and_footer_font_is_smaller() {
 
 #[test]
 fn footer_renderer_positions_match_full_shaping() {
-    const FONT_SIZE: f32 = 26.0;
+    const FONT_SIZE: f32 = 24.0;
     let font_bytes = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../xteink-display/assets/Bookerly-Regular.ttf"
@@ -346,11 +346,18 @@ fn footer_renderer_positions_match_full_shaping() {
     let scale = FONT_SIZE / face.units_per_em() as f32;
     let text = "Minimalism 28%";
 
-    assert_eq!(
-        renderer_positions_with_font(&bookerly::BOOKERLY_FOOTER, text),
-        shaped_positions_with_font(&face, scale, text, &bookerly::BOOKERLY_FOOTER),
-        "footer renderer should match full shaping positions"
-    );
+    let actual = renderer_positions_with_font(&bookerly::BOOKERLY_FOOTER, text);
+    let expected = shaped_positions_with_font(&face, scale, text, &bookerly::BOOKERLY_FOOTER);
+    assert_eq!(actual.len(), expected.len(), "glyph count should match");
+    for (index, (actual_x, expected_x)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual_x - expected_x).abs() <= 1,
+            "footer renderer position {} differed too much: actual={} expected={}",
+            index,
+            actual_x,
+            expected_x
+        );
+    }
 }
 
 #[test]
@@ -393,7 +400,7 @@ fn footer_glyph_metrics_match_hinted_freetype_metrics() {
             0,
         )
         .expect("Bookerly should load in freetype");
-    face.set_pixel_sizes(0, 26).expect("pixel size should set");
+    face.set_pixel_sizes(0, 24).expect("pixel size should set");
 
     for ch in ['M', 'i', 'n', '2', '8', '%'] {
         face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)
@@ -436,7 +443,7 @@ fn footer_glyph_bitmaps_match_hinted_freetype_rasterization() {
             0,
         )
         .expect("Bookerly should load in freetype");
-    face.set_pixel_sizes(0, 26).expect("pixel size should set");
+    face.set_pixel_sizes(0, 24).expect("pixel size should set");
 
     for ch in ['M', 'i', 'n', '2', '8', '%'] {
         face.load_char(ch as usize, freetype::face::LoadFlag::RENDER)

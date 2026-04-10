@@ -45,6 +45,7 @@ pub const SHADE_BLACK: u8 = GRAY_LEVELS - 1;
 
 pub const DISPLAY_WIDTH: u16 = 480;
 pub const DISPLAY_HEIGHT: u16 = 800;
+pub(crate) const QUOTE_INDENT_PX: u16 = 24;
 
 pub fn reader_footer_height() -> u16 {
     footer_line_height_px().saturating_add(8)
@@ -277,15 +278,15 @@ impl Framebuffer {
     }
 
     pub fn draw_text(&mut self, x: u16, y: u16, text: &str) {
-        self.draw_text_with_font(&bookerly::BOOKERLY_BODY, x, y, text, false);
+        self.draw_text_with_font(&bookerly::BOOKERLY_BODY, x, y, text, false, false);
     }
 
     pub fn draw_heading_text(&mut self, x: u16, y: u16, text: &str) {
-        self.draw_text_with_font(&bookerly::BOOKERLY_HEADING, x, y, text, true);
+        self.draw_text_with_font(&bookerly::BOOKERLY_HEADING, x, y, text, true, false);
     }
 
     pub fn draw_footer_text(&mut self, x: u16, y: u16, text: &str) {
-        self.draw_text_with_font(&bookerly::BOOKERLY_FOOTER, x, y, text, false);
+        self.draw_text_with_font(&bookerly::BOOKERLY_FOOTER, x, y, text, false, false);
     }
 
     fn draw_text_with_style(&mut self, x: u16, y: u16, text: &str, style: TextStyle) {
@@ -295,7 +296,8 @@ impl Framebuffer {
             &bookerly::BOOKERLY_BODY
         };
         let synthetic_bold = style.heading || style.bold;
-        self.draw_text_with_font(font, x, y, text, synthetic_bold);
+        let synthetic_italic = style.italic || style.quote;
+        self.draw_text_with_font(font, x, y, text, synthetic_bold, synthetic_italic);
     }
 
     fn draw_text_with_font(
@@ -305,6 +307,7 @@ impl Framebuffer {
         y: u16,
         text: &str,
         synthetic_bold: bool,
+        synthetic_italic: bool,
     ) {
         let base_x = i32::from(x);
         let mut cursor_y = i32::from(y);
@@ -314,9 +317,9 @@ impl Framebuffer {
             font.shape_text(line, |glyph, glyph_x, glyph_y| {
                 let left = base_x + glyph_x + i32::from(glyph.left);
                 let top = cursor_y + glyph_y + i32::from(glyph.top);
-                self.draw_glyph(font, glyph, left, top);
+                self.draw_glyph(font, glyph, left, top, synthetic_italic);
                 if synthetic_bold {
-                    self.draw_glyph(font, glyph, left + 1, top);
+                    self.draw_glyph(font, glyph, left + 1, top, synthetic_italic);
                 }
             });
             cursor_y += line_height;
@@ -636,7 +639,14 @@ impl Framebuffer {
         }
     }
 
-    fn draw_glyph(&mut self, font: &bookerly::Font, glyph: &Glyph, x: i32, y: i32) {
+    fn draw_glyph(
+        &mut self,
+        font: &bookerly::Font,
+        glyph: &Glyph,
+        x: i32,
+        y: i32,
+        synthetic_italic: bool,
+    ) {
         for row in 0..glyph.height {
             for col in 0..glyph.width {
                 let coverage = font.glyph_coverage(glyph, col, row);
@@ -644,7 +654,12 @@ impl Framebuffer {
                     continue;
                 }
 
-                let px = x + i32::from(col);
+                let italic_shift = if synthetic_italic {
+                    (i32::from(glyph.height.saturating_sub(row).saturating_sub(1))) / 4
+                } else {
+                    0
+                };
+                let px = x + italic_shift + i32::from(col);
                 let py = y + i32::from(row);
                 if px < 0
                     || py < 0
@@ -993,5 +1008,77 @@ mod tests {
         direct.draw_text(0, body_y, "Body");
 
         assert_eq!(cached.bytes(), direct.bytes());
+    }
+
+    #[test]
+    fn italic_style_renders_differently_from_body_text() {
+        let mut body = Framebuffer::new();
+        let _ = body.layout_wrapped_text_page_result(
+            0,
+            0,
+            "Italic",
+            DISPLAY_HEIGHT,
+            TextStyle::default(),
+            true,
+        );
+
+        let mut italic = Framebuffer::new();
+        let _ = italic.layout_wrapped_text_page_result(
+            0,
+            0,
+            "Italic",
+            DISPLAY_HEIGHT,
+            TextStyle {
+                heading: false,
+                bold: false,
+                italic: true,
+                quote: false,
+            },
+            true,
+        );
+
+        assert_ne!(italic.bytes(), body.bytes());
+    }
+
+    #[test]
+    fn cached_quote_markers_indent_visible_text() {
+        let text = format!(
+            "{layout}{quote_start}Quote{quote_end}",
+            layout = CACHE_LAYOUT_STREAM_MARKER,
+            quote_start = CACHE_QUOTE_START_MARKER,
+            quote_end = CACHE_QUOTE_END_MARKER,
+        );
+        let bytes = text.into_bytes();
+        let mut cached = Framebuffer::new();
+        let mut offset = 0usize;
+        let result = cached.render_cached_text_page(
+            &mut |buffer| {
+                if offset >= bytes.len() {
+                    return Ok(0);
+                }
+                let end = (offset + buffer.len()).min(bytes.len());
+                let chunk = &bytes[offset..end];
+                buffer[..chunk.len()].copy_from_slice(chunk);
+                offset = end;
+                Ok(chunk.len())
+            },
+            0,
+        );
+        assert_eq!(result.expect("cached render should succeed"), 0);
+
+        let mut min_ink_x = DISPLAY_WIDTH;
+        for y in 0..DISPLAY_HEIGHT {
+            for x in 0..DISPLAY_WIDTH {
+                if cached.shade_at(x, y) != SHADE_WHITE {
+                    min_ink_x = min_ink_x.min(x);
+                }
+            }
+        }
+
+        assert!(
+            min_ink_x >= QUOTE_INDENT_PX,
+            "expected quote text to start at or after indent, got {}",
+            min_ink_x
+        );
     }
 }

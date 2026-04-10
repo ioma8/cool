@@ -4,9 +4,9 @@ use fontdue::{Font, FontSettings};
 use freetype::Library;
 use rustybuzz::{Face, UnicodeBuffer};
 
-const BODY_FONT_SIZE: f32 = 32.0;
+const BODY_FONT_SIZE: f32 = 30.0;
 const HEADING_FONT_SIZE: f32 = 38.0;
-const FOOTER_FONT_SIZE: f32 = 26.0;
+const FOOTER_FONT_SIZE: f32 = 24.0;
 const FONT_PATH: &str = "../xteink-display/assets/Bookerly-Regular.ttf";
 const OUTPUT_FILE: &str = "bookerly_generated.rs";
 

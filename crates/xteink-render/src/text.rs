@@ -1,4 +1,4 @@
-use crate::{bookerly, paginator::TextStyle};
+use crate::{QUOTE_INDENT_PX, bookerly, paginator::TextStyle};
 
 pub(crate) struct WrappedLine<const N: usize> {
     pub(crate) buf: [u8; N],
@@ -106,7 +106,16 @@ fn font_for_style(style: TextStyle) -> &'static bookerly::Font {
 }
 
 pub(crate) fn measure_text_width_with_style(text: &str, style: TextStyle) -> i32 {
-    font_for_style(style).shape_text(text, |_, _, _| {})
+    let width = font_for_style(style).shape_text(text, |_, _, _| {});
+    if style.italic || style.quote {
+        width + (i32::from(font_for_style(style).line_height_px()) / 4)
+    } else {
+        width
+    }
+}
+
+fn indent_for_style(style: TextStyle) -> u16 {
+    if style.quote { QUOTE_INDENT_PX } else { 0 }
 }
 
 pub(crate) fn layout_wrapped_text_page<const N: usize>(
@@ -120,7 +129,8 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
 ) -> WrappedTextLayoutResult {
     let mut cursor_y = y;
     let line_height = font_for_style(style).line_height_px();
-    let available_width = i32::from(crate::DISPLAY_WIDTH.saturating_sub(x));
+    let line_x = x.saturating_add(indent_for_style(style));
+    let available_width = i32::from(crate::DISPLAY_WIDTH.saturating_sub(line_x));
     let mut consumed = 0usize;
     let mut word_start: Option<usize> = None;
     let mut after_word = 0usize;
@@ -141,7 +151,7 @@ pub(crate) fn layout_wrapped_text_page<const N: usize>(
         if cursor_y.saturating_add(line_height) > max_y {
             return true;
         }
-        draw_line(x, *cursor_y, line.as_str());
+        draw_line(line_x, *cursor_y, line.as_str());
         *cursor_y = cursor_y.saturating_add(line_height);
         *consumed = flush_up_to;
         line.clear();
