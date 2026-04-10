@@ -125,6 +125,34 @@ fn host_storage_reopens_from_saved_current_page_offset() {
 }
 
 #[test]
+fn host_storage_progress_uses_current_page_start_offset() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+
+    let mut first = Framebuffer::new();
+    let page_zero = storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("page zero should render");
+
+    let mut second = Framebuffer::new();
+    let page_one = storage
+        .render_epub_page_from_entry(&mut second, "/", &entry, 1)
+        .expect("page one should render");
+
+    assert_eq!(page_zero.progress_percent, 0);
+    assert!(page_one.progress_percent >= page_zero.progress_percent);
+    assert!(page_one.progress_percent < 100);
+}
+
+#[test]
 fn host_storage_ignores_saved_progress_when_cache_meta_is_stale() {
     let _guard = render_test_mutex()
         .lock()

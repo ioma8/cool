@@ -310,7 +310,7 @@ where
         };
 
     let progress_percent =
-        compute_progress_percent(page_start_offset, meta.content_length, meta.build_complete);
+        compute_progress_percent(page_start_offset, next_page_offset, meta.content_length);
 
     write_cached_progress(
         fs,
@@ -333,17 +333,21 @@ where
     })
 }
 
-fn compute_progress_percent(current_offset: u64, content_length: u64, build_complete: bool) -> u8 {
+fn compute_progress_percent(current_offset: u64, next_page_offset: u64, content_length: u64) -> u8 {
     if content_length == 0 {
         return 0;
     }
-    let raw = ((current_offset.saturating_mul(100)) / content_length).clamp(0, 100);
-    let pct = u8::try_from(raw).unwrap_or(100);
-    if build_complete {
-        pct.max(1)
-    } else {
-        pct.min(99)
+
+    if current_offset == 0 {
+        return 0;
     }
+
+    if next_page_offset >= content_length {
+        return 100;
+    }
+
+    let raw = ((current_offset.saturating_mul(100)) / content_length).clamp(0, 99);
+    u8::try_from(raw).unwrap_or(99)
 }
 
 fn page_start_offset_for_page<SD, C>(
