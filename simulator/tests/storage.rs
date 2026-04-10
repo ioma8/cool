@@ -153,6 +153,39 @@ fn host_storage_progress_uses_current_page_start_offset() {
 }
 
 #[test]
+fn host_storage_renders_early_pages_from_full_cache_without_blanks() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+
+    for page in 0..3 {
+        let mut framebuffer = Framebuffer::new();
+        let rendered = if page == 0 {
+            storage
+                .render_epub_from_entry(&mut framebuffer, "/", &entry)
+                .expect("page zero should render")
+        } else {
+            storage
+                .render_epub_page_from_entry(&mut framebuffer, "/", &entry, page)
+                .expect("page should render")
+        };
+
+        assert_eq!(rendered.rendered_page, page);
+        assert!(
+            framebuffer.bytes().iter().any(|byte| *byte != 0xFF),
+            "page {page} should contain visible content"
+        );
+    }
+}
+
+#[test]
 fn host_storage_ignores_saved_progress_when_cache_meta_is_stale() {
     let _guard = render_test_mutex()
         .lock()
