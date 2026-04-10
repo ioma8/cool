@@ -269,7 +269,7 @@ impl Framebuffer {
             source,
             target_page,
             &mut on_text_chunk,
-            RenderMode::ThroughChapterBoundaryAfterTarget,
+            RenderMode::FullBook,
             None,
             &mut should_cancel,
         )

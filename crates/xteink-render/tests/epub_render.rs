@@ -346,21 +346,36 @@ fn large_fixture_cold_parse_to_cache_without_out_of_space() {
 }
 
 #[test]
-fn cache_prefix_build_stops_before_full_book_for_large_fixture() {
+fn full_cache_build_matches_full_book_parse_for_large_fixture() {
     let _guard = lock_render_mutex();
     let Some(fixture_root) = fixture_dir() else {
         return;
     };
     let fixture = fixture_root.join("Happiness Trap Pocketbook, The - Russ Harris.epub");
     let bytes = std::fs::read(&fixture).expect("fixture should be readable");
-    let mut framebuffer = Framebuffer::new();
-    let mut emitted_text_bytes = 0usize;
+    let mut direct = Framebuffer::new();
+    let mut full_parse = Vec::<u8>::new();
+    let direct_result = direct.render_epub_page_with_text_sink_and_cancel(
+        VecSource {
+            bytes: bytes.clone(),
+        },
+        0,
+        |chunk| {
+            full_parse.extend_from_slice(chunk.as_bytes());
+            Ok(())
+        },
+        true,
+        || false,
+    );
+    assert_eq!(direct_result.expect("full parse should succeed"), 0);
 
+    let mut framebuffer = Framebuffer::new();
+    let mut cached_text = Vec::<u8>::new();
     let result = framebuffer.build_epub_cache_prefix_with_text_sink_and_cancel(
         VecSource { bytes },
         0,
         |chunk| {
-            emitted_text_bytes = emitted_text_bytes.saturating_add(chunk.len());
+            cached_text.extend_from_slice(chunk.as_bytes());
             Ok(())
         },
         || false,
@@ -368,8 +383,8 @@ fn cache_prefix_build_stops_before_full_book_for_large_fixture() {
 
     let result = result.expect("cache prefix build should succeed");
     assert_eq!(result.rendered_page, 0);
-    assert!(result.cached_pages >= 1);
-    assert!(emitted_text_bytes > 0);
+    assert!(result.complete, "cache build should linearize the full book");
+    assert_eq!(cached_text, full_parse);
 }
 
 #[test]
