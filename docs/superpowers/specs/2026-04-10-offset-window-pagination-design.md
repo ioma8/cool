@@ -14,7 +14,7 @@ The authoritative cached book data becomes:
 
 - `content.txt`: full linearized cached text for the book
 - `meta.txt`: cache validity and `content_length`
-- `chapters.idx`: chapter start byte offsets into `content.txt`
+- `chapters.idx`: chapter metadata records keyed by start byte offsets into `content.txt`
 - `progress.bin`: previous/current/next page offsets
 
 `pages.idx` is removed entirely.
@@ -86,19 +86,26 @@ Requirements:
 
 #### `chapters.idx`
 
-Stores chapter start byte offsets into `content.txt`.
+Stores chapter metadata for each chapter in `content.txt`.
 
 Format:
 
 - flat binary file
-- each record is one little-endian `u64`
-- record `n` is the start byte offset of chapter `n` in `content.txt`
+- 4-byte ASCII magic header `CHP1`
+- each record contains:
+  - little-endian `u64` chapter start offset
+  - little-endian `u16` title byte length
+  - UTF-8 title bytes
+- record `n` corresponds to chapter `n` in reading order
 
 Requirements:
 
 - entries are chapter-start offsets in cached text
 - offsets are strictly increasing
 - first entry is `0`
+- chapter titles prefer EPUB nav/TOC labels
+- chapter titles fall back to the first visible text near the chapter start offset when nav metadata is missing
+- stored titles are truncated to 64 characters
 - no page numbers are stored here
 
 #### `progress.bin`

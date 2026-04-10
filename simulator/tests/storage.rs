@@ -1,14 +1,40 @@
 use std::fs;
 use std::sync::{Mutex, OnceLock};
 
-fn read_u64_records(path: &std::path::Path) -> Vec<u64> {
-    let raw = fs::read(path).expect("read offset records");
-    raw.chunks_exact(8)
-        .map(|chunk| {
-            let bytes: [u8; 8] = chunk.try_into().expect("record width");
-            u64::from_le_bytes(bytes)
-        })
-        .collect()
+#[derive(Debug)]
+struct CachedChapter {
+    offset: u64,
+    title: String,
+}
+
+fn read_cached_chapters(path: &std::path::Path) -> Vec<CachedChapter> {
+    let raw = fs::read(path).expect("read chapter records");
+    assert!(
+        raw.starts_with(b"CHP1"),
+        "unexpected chapter metadata header"
+    );
+
+    let mut cursor = 4usize;
+    let mut chapters = Vec::new();
+    while cursor < raw.len() {
+        let offset = u64::from_le_bytes(
+            raw[cursor..cursor + 8]
+                .try_into()
+                .expect("chapter offset record"),
+        );
+        cursor += 8;
+        let title_len = usize::from(u16::from_le_bytes(
+            raw[cursor..cursor + 2]
+                .try_into()
+                .expect("chapter title length"),
+        ));
+        cursor += 2;
+        let title = String::from_utf8(raw[cursor..cursor + title_len].to_vec())
+            .expect("chapter title utf8");
+        cursor += title_len;
+        chapters.push(CachedChapter { offset, title });
+    }
+    chapters
 }
 
 fn decisive_fixture_path() -> Option<std::path::PathBuf> {
@@ -129,28 +155,39 @@ fn host_storage_writes_multiple_real_chapter_offsets() {
     let content_len = fs::metadata(tmp.path().join(cache_paths.content.trim_start_matches('/')))
         .expect("content metadata")
         .len();
-    let chapter_offsets = read_u64_records(
+    let chapters = read_cached_chapters(
         &tmp.path()
             .join(cache_paths.chapters.trim_start_matches('/')),
     );
 
     assert!(
-        chapter_offsets.len() > 2,
-        "expected multiple chapter offsets, got {chapter_offsets:?}"
+        chapters.len() > 2,
+        "expected multiple chapter records, got {chapters:?}"
     );
-    assert_eq!(chapter_offsets.first().copied(), Some(0));
+    assert_eq!(chapters.first().map(|chapter| chapter.offset), Some(0));
     assert!(
-        chapter_offsets
+        chapters
             .windows(2)
-            .all(|window| window[0] < window[1]),
-        "expected strictly increasing chapter offsets, got {chapter_offsets:?}"
+            .all(|window| window[0].offset < window[1].offset),
+        "expected strictly increasing chapter offsets, got {chapters:?}"
     );
     assert!(
-        chapter_offsets
+        chapters
             .last()
-            .copied()
-            .is_some_and(|offset| offset < content_len),
-        "expected last chapter offset before EOF, got {chapter_offsets:?} with content_len={content_len}"
+            .is_some_and(|chapter| chapter.offset < content_len),
+        "expected last chapter offset before EOF, got {chapters:?} with content_len={content_len}"
+    );
+    assert!(
+        chapters
+            .iter()
+            .any(|chapter| chapter.title == "Introduction"),
+        "expected nav title in chapter metadata, got {chapters:?}"
+    );
+    assert!(
+        chapters
+            .iter()
+            .any(|chapter| chapter.title == "1. The Four Villains of Decision Making"),
+        "expected chapter title in chapter metadata, got {chapters:?}"
     );
 }
 

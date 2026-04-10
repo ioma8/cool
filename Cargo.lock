@@ -2298,6 +2298,7 @@ dependencies = [
  "esp-rtos",
  "esp32c3",
  "heapless 0.8.0",
+ "miniz_oxide",
  "tempfile",
  "xteink-browser",
  "xteink-epub",

@@ -1,11 +1,17 @@
-use xteink_epub::{EpubError, EpubSource};
+use heapless::Vec;
+use miniz_oxide::inflate::stream::InflateState;
+use xteink_epub::{
+    EpubArchive, EpubError, EpubSource, MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY,
+    ReaderBuffers, collect_navigation_titles,
+};
 use xteink_render::{DISPLAY_HEIGHT, DISPLAY_WIDTH, Framebuffer, reader_content_height};
 
 use crate::{
     ListedEntry, SdFilesystem, SdFsFile,
     cache::{
-        CACHE_VERSION, CacheMeta, CachePaths, ProgressState, cache_paths_for_epub, decode_progress,
-        encode_offset, encode_progress, parse_meta, serialize_meta,
+        CACHE_VERSION, CHAPTER_TITLE_CAPACITY, CHAPTERS_MAGIC, CacheMeta, CachePaths,
+        ChapterMetadata, ProgressState, cache_paths_for_epub, decode_progress, encode_progress,
+        parse_meta, serialize_meta,
     },
     log::logln,
     path::join_child_path,
@@ -490,10 +496,10 @@ where
     let mut content = fs
         .open_cache_file_write(paths.content.as_str())
         .map_err(|_| EpubError::Io)?;
-    let mut chapters = fs
-        .open_cache_file_write(paths.chapters.as_str())
-        .map_err(|_| EpubError::Io)?;
     let mut content_buffer = CacheWriteBuffer::new();
+    let mut chapter_offsets = Vec::<u64, MAX_ARCHIVE_ENTRIES>::new();
+    let mut chapter_titles =
+        Vec::<heapless::String<CHAPTER_TITLE_CAPACITY>, MAX_ARCHIVE_ENTRIES>::new();
 
     let mut on_text_chunk = |chunk: &str| -> Result<(), EpubError> {
         if !chunk.is_empty() {
@@ -502,11 +508,12 @@ where
         Ok(())
     };
     let mut on_chapter_start = |_: u16, offset: usize| -> Result<(), EpubError> {
-        write_offset_bytes(
-            &mut chapters,
-            u64::try_from(offset).map_err(|_| EpubError::OutOfSpace)?,
-        )
+        chapter_offsets
+            .push(u64::try_from(offset).map_err(|_| EpubError::OutOfSpace)?)
+            .map_err(|_| EpubError::OutOfSpace)
     };
+
+    let _ = collect_navigation_titles_for_cache(&source, &mut chapter_titles);
 
     let build = display.build_epub_cache_prefix_with_callbacks_and_cancel(
         source,
@@ -518,7 +525,10 @@ where
 
     content_buffer.flush(&mut content)?;
     content.flush().map_err(|_| EpubError::Io)?;
-    chapters.flush().map_err(|_| EpubError::Io)?;
+
+    let mut chapters = build_chapter_metadata(chapter_offsets, chapter_titles)?;
+    fill_missing_chapter_titles_from_content(fs, paths.content.as_str(), &mut chapters)?;
+    write_chapter_metadata(fs, paths.chapters.as_str(), chapters.as_slice())?;
 
     Ok(BuildResult {
         content_length: content_buffer.total_written(),
@@ -601,8 +611,163 @@ fn write_meta<SD: SdFilesystem>(fs: &SD, path: &str, meta: &CacheMeta) -> Result
     write_bytes(fs, path, serialized.as_bytes())
 }
 
-fn write_offset_bytes<F: SdFsFile>(file: &mut F, offset: u64) -> Result<(), EpubError> {
-    let raw = encode_offset(offset);
+fn collect_navigation_titles_for_cache<S: EpubSource>(
+    source: &S,
+    chapter_titles: &mut Vec<heapless::String<CHAPTER_TITLE_CAPACITY>, MAX_ARCHIVE_ENTRIES>,
+) -> Result<(), EpubError> {
+    let mut zip_cd = [0u8; 8 * 1024];
+    let mut inflate = [0u8; 16 * 1024];
+    let mut stream_input = [0u8; 16];
+    let mut xml = [0u8; 8 * 1024];
+    let mut catalog = [0u8; 8 * 1024];
+    let mut path_buf = [0u8; 16];
+    let mut stream_state = InflateState::new(miniz_oxide::DataFormat::Raw);
+    let mut archive = EpubArchive::<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>::new();
+
+    collect_navigation_titles(
+        source,
+        ReaderBuffers {
+            zip_cd: &mut zip_cd,
+            inflate: &mut inflate,
+            stream_input: &mut stream_input,
+            xml: &mut xml,
+            catalog: &mut catalog,
+            path_buf: &mut path_buf,
+            stream_state: &mut stream_state,
+            archive: &mut archive,
+        },
+        |index, title| {
+            ensure_title_slot(chapter_titles, usize::from(index))?;
+            if let Some(slot) = chapter_titles.get_mut(usize::from(index))
+                && slot.is_empty()
+            {
+                push_truncated_title(slot, title);
+            }
+            Ok(())
+        },
+    )
+}
+
+fn ensure_title_slot(
+    chapter_titles: &mut Vec<heapless::String<CHAPTER_TITLE_CAPACITY>, MAX_ARCHIVE_ENTRIES>,
+    index: usize,
+) -> Result<(), EpubError> {
+    while chapter_titles.len() <= index {
+        chapter_titles
+            .push(heapless::String::new())
+            .map_err(|_| EpubError::OutOfSpace)?;
+    }
+    Ok(())
+}
+
+fn build_chapter_metadata(
+    chapter_offsets: Vec<u64, MAX_ARCHIVE_ENTRIES>,
+    mut chapter_titles: Vec<heapless::String<CHAPTER_TITLE_CAPACITY>, MAX_ARCHIVE_ENTRIES>,
+) -> Result<Vec<ChapterMetadata, MAX_ARCHIVE_ENTRIES>, EpubError> {
+    let mut chapters = Vec::new();
+    for (index, offset) in chapter_offsets.into_iter().enumerate() {
+        ensure_title_slot(&mut chapter_titles, index)?;
+        chapters
+            .push(ChapterMetadata {
+                start_offset: offset,
+                title: chapter_titles
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(heapless::String::new),
+            })
+            .map_err(|_| EpubError::OutOfSpace)?;
+    }
+    Ok(chapters)
+}
+
+fn fill_missing_chapter_titles_from_content<SD: SdFilesystem>(
+    fs: &SD,
+    content_path: &str,
+    chapters: &mut [ChapterMetadata],
+) -> Result<(), EpubError> {
+    for chapter in chapters {
+        if !chapter.title.is_empty() {
+            continue;
+        }
+        if let Some(title) = read_chapter_title_fallback(fs, content_path, chapter.start_offset)? {
+            push_truncated_title(&mut chapter.title, title.as_str());
+        }
+    }
+    Ok(())
+}
+
+fn read_chapter_title_fallback<SD: SdFilesystem>(
+    fs: &SD,
+    content_path: &str,
+    start_offset: u64,
+) -> Result<Option<heapless::String<CHAPTER_TITLE_CAPACITY>>, EpubError> {
+    let mut file = fs
+        .open_cache_file_read(content_path)
+        .map_err(|_| EpubError::Io)?;
+    file.seek_from_start(u32::try_from(start_offset).map_err(|_| EpubError::OutOfSpace)?)
+        .map_err(|_| EpubError::Io)?;
+
+    let mut buffer = [0u8; 256];
+    let read = file.read(&mut buffer).map_err(|_| EpubError::Io)?;
+    if read == 0 {
+        return Ok(None);
+    }
+
+    let mut title = heapless::String::<CHAPTER_TITLE_CAPACITY>::new();
+    let mut started = false;
+    for &byte in &buffer[..read] {
+        if byte <= 0x1F {
+            if started {
+                break;
+            }
+            continue;
+        }
+        if byte.is_ascii_whitespace() {
+            if started && !title.ends_with(' ') {
+                let _ = title.push(' ');
+            }
+            continue;
+        }
+        started = true;
+        if title.push(char::from(byte)).is_err() {
+            break;
+        }
+    }
+    while title.ends_with(' ') {
+        title.pop();
+    }
+    if title.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(title))
+}
+
+fn write_chapter_metadata<SD: SdFilesystem>(
+    fs: &SD,
+    path: &str,
+    chapters: &[ChapterMetadata],
+) -> Result<(), EpubError> {
+    let mut file = fs.open_cache_file_write(path).map_err(|_| EpubError::Io)?;
+    write_raw_bytes(&mut file, CHAPTERS_MAGIC)?;
+    for chapter in chapters {
+        write_raw_bytes(&mut file, &chapter.start_offset.to_le_bytes())?;
+        let title_len = u16::try_from(chapter.title.len()).map_err(|_| EpubError::OutOfSpace)?;
+        write_raw_bytes(&mut file, &title_len.to_le_bytes())?;
+        write_raw_bytes(&mut file, chapter.title.as_bytes())?;
+    }
+    file.flush().map_err(|_| EpubError::Io)?;
+    Ok(())
+}
+
+fn push_truncated_title(title: &mut heapless::String<CHAPTER_TITLE_CAPACITY>, source: &str) {
+    for ch in source.chars().take(CHAPTER_TITLE_CAPACITY) {
+        if title.push(ch).is_err() {
+            break;
+        }
+    }
+}
+
+fn write_raw_bytes<F: SdFsFile>(file: &mut F, raw: &[u8]) -> Result<(), EpubError> {
     let mut written = 0usize;
     while written < raw.len() {
         let count = file.write(&raw[written..]).map_err(|_| EpubError::Io)?;

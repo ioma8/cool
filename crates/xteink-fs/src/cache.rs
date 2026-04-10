@@ -2,12 +2,14 @@ use core::fmt::Write;
 
 use heapless::String;
 
-pub const CACHE_VERSION: u8 = 7;
+pub const CACHE_VERSION: u8 = 8;
 pub const META_FILE_NAME: &str = "meta.txt";
 pub const CONTENT_FILE_NAME: &str = "content.txt";
 pub const CHAPTERS_FILE_NAME: &str = "chapters.idx";
 pub const PROGRESS_FILE_NAME: &str = "progress.bin";
 pub const CACHE_ROOT_DIR: &str = "/.cool";
+pub const CHAPTERS_MAGIC: &[u8; 4] = b"CHP1";
+pub const CHAPTER_TITLE_CAPACITY: usize = 64;
 
 const PATH_CAPACITY: usize = 220;
 const NAME_CAPACITY: usize = 64;
@@ -33,6 +35,12 @@ pub struct ProgressState {
     pub previous_page_start_offset: u64,
     pub current_page_start_offset: u64,
     pub next_page_start_offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChapterMetadata {
+    pub start_offset: u64,
+    pub title: String<CHAPTER_TITLE_CAPACITY>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -775,12 +775,116 @@ impl<S: EpubSource> Epub<S> {
     }
 }
 
+pub fn collect_navigation_titles<S, F>(
+    source: &S,
+    buffers: ReaderBuffers<'_>,
+    mut on_title: F,
+) -> Result<(), EpubError>
+where
+    S: EpubSource,
+    F: FnMut(u16, &str) -> Result<(), EpubError>,
+{
+    let ReaderBuffers {
+        zip_cd,
+        inflate,
+        stream_input: _,
+        xml,
+        catalog,
+        path_buf: _,
+        stream_state: _,
+        archive,
+    } = buffers;
+
+    archive.parse(source)?;
+    let container_entry = archive
+        .entry_by_name(source, "META-INF/container.xml", zip_cd)?
+        .ok_or(EpubError::InvalidFormat)?;
+    let container = read_entry(source, &container_entry, inflate, zip_cd)?;
+
+    let (opf_path_start, opf_path_len) = parse_container_root(container)?;
+    let mut opf_path = [0u8; 512];
+    if opf_path_len > opf_path.len() {
+        return Err(EpubError::OutOfSpace);
+    }
+    opf_path[..opf_path_len]
+        .copy_from_slice(&container[opf_path_start..opf_path_start + opf_path_len]);
+
+    let opf_entry = archive
+        .entry_by_name_bytes(source, &opf_path[..opf_path_len], zip_cd)?
+        .ok_or(EpubError::InvalidFormat)?;
+    let (nav_resolved, ncx_resolved) = {
+        let opf = read_entry(source, &opf_entry, inflate, zip_cd)?;
+        parse_opf(
+            opf,
+            &opf_path[..opf_path_len],
+            catalog,
+            xml,
+            source,
+            zip_cd,
+            archive,
+        )?;
+        let opf_base = path_parent(&opf_path[..opf_path_len]);
+        let (nav_doc_href, ncx_doc_href) = find_navigation_title_docs(opf)?;
+        (
+            resolve_navigation_doc(opf, opf_base, nav_doc_href)?,
+            resolve_navigation_doc(opf, opf_base, ncx_doc_href)?,
+        )
+    };
+
+    if let Some((resolved, resolved_len)) = nav_resolved {
+        collect_titles_from_xhtml_nav(
+            source,
+            catalog,
+            &resolved[..resolved_len],
+            inflate,
+            zip_cd,
+            archive,
+            &mut on_title,
+        )?;
+        return Ok(());
+    }
+
+    if let Some((resolved, resolved_len)) = ncx_resolved {
+        collect_titles_from_ncx(
+            source,
+            catalog,
+            &resolved[..resolved_len],
+            inflate,
+            zip_cd,
+            archive,
+            &mut on_title,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn resolve_navigation_doc(
+    opf: &[u8],
+    opf_base: &[u8],
+    doc_href: Option<ManifestHrefRef>,
+) -> Result<Option<([u8; MAX_CHAPTER_DIR_BYTES], usize)>, EpubError> {
+    let Some(doc_href) = doc_href else {
+        return Ok(None);
+    };
+    let href = &opf[doc_href.href_start..doc_href.href_start + usize::from(doc_href.href_len)];
+    let mut resolved = [0u8; MAX_CHAPTER_DIR_BYTES];
+    let resolved_len = resolve_reference(opf_base, href, &mut resolved)?;
+    Ok(Some((resolved, resolved_len)))
+}
+
 #[derive(Clone, Copy)]
 struct ManifestItem {
     href_len: u16,
     href_start: usize,
     media_start: usize,
     media_end: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ManifestHrefRef {
+    href_start: usize,
+    href_len: u16,
 }
 
 #[derive(Clone, Copy)]
@@ -948,6 +1052,245 @@ fn parse_opf<S: EpubSource>(
     }
     catalog[..2].copy_from_slice(&count.to_le_bytes());
     Ok(count)
+}
+
+fn find_navigation_title_docs(
+    opf: &[u8],
+) -> Result<(Option<ManifestHrefRef>, Option<ManifestHrefRef>), EpubError> {
+    let mut nav_doc_href = None;
+    let mut ncx_doc_href = None;
+    let mut cursor = 0usize;
+
+    while cursor < opf.len() {
+        if opf[cursor] != b'<' {
+            cursor += 1;
+            continue;
+        }
+        let Some(tag) = parse_xml_tag(opf, &mut cursor)? else {
+            continue;
+        };
+        if tag.is_end || !tag.name_is("item") {
+            continue;
+        }
+        let Some(href) = tag.attr(b"href") else {
+            continue;
+        };
+        let href_ref = ManifestHrefRef {
+            href_start: slice_offset(opf, href).ok_or(EpubError::InvalidFormat)?,
+            href_len: u16::try_from(href.len()).map_err(|_| EpubError::OutOfSpace)?,
+        };
+        let media = tag.attr(b"media-type").unwrap_or(b"");
+
+        if nav_doc_href.is_none()
+            && (tag
+                .attr(b"properties")
+                .is_some_and(|value| attr_contains_token(value, b"nav"))
+                || href.ends_with(b"nav.xhtml")
+                || href.ends_with(b"toc.xhtml")
+                || href.ends_with(b"_toc_r1.htm"))
+        {
+            nav_doc_href = Some(href_ref);
+        }
+
+        if ncx_doc_href.is_none()
+            && (attr_eq(media, b"application/x-dtbncx+xml") || href.ends_with(b".ncx"))
+        {
+            ncx_doc_href = Some(href_ref);
+        }
+    }
+
+    Ok((nav_doc_href, ncx_doc_href))
+}
+
+fn collect_titles_from_xhtml_nav<S, F>(
+    source: &S,
+    catalog: &[u8],
+    nav_path: &[u8],
+    inflate: &mut [u8],
+    zip_cd: &mut [u8],
+    archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
+    on_title: &mut F,
+) -> Result<(), EpubError>
+where
+    S: EpubSource,
+    F: FnMut(u16, &str) -> Result<(), EpubError>,
+{
+    let entry = archive
+        .entry_by_name_bytes(source, nav_path, zip_cd)?
+        .ok_or(EpubError::InvalidFormat)?;
+    let nav = read_entry(source, &entry, inflate, zip_cd)?;
+    emit_titles_from_xhtml_nav(nav, nav_path, catalog, on_title)
+}
+
+fn collect_titles_from_ncx<S, F>(
+    source: &S,
+    catalog: &[u8],
+    ncx_path: &[u8],
+    inflate: &mut [u8],
+    zip_cd: &mut [u8],
+    archive: &mut EpubArchive<MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_NAME_CAPACITY>,
+    on_title: &mut F,
+) -> Result<(), EpubError>
+where
+    S: EpubSource,
+    F: FnMut(u16, &str) -> Result<(), EpubError>,
+{
+    let entry = archive
+        .entry_by_name_bytes(source, ncx_path, zip_cd)?
+        .ok_or(EpubError::InvalidFormat)?;
+    let ncx = read_entry(source, &entry, inflate, zip_cd)?;
+    emit_titles_from_ncx(ncx, ncx_path, catalog, on_title)
+}
+
+fn emit_titles_from_xhtml_nav<F>(
+    nav: &[u8],
+    nav_path: &[u8],
+    catalog: &[u8],
+    on_title: &mut F,
+) -> Result<(), EpubError>
+where
+    F: FnMut(u16, &str) -> Result<(), EpubError>,
+{
+    let nav_base = path_parent(nav_path);
+    let mut cursor = 0usize;
+    let mut current_href = [0u8; MAX_CHAPTER_DIR_BYTES];
+    let mut current_href_len = 0usize;
+    let mut in_anchor = false;
+    let mut title = [0u8; 256];
+    let mut title_len = 0usize;
+
+    while cursor < nav.len() {
+        if nav[cursor] == b'<' {
+            let Some(tag) = parse_xml_tag(nav, &mut cursor)? else {
+                continue;
+            };
+            if tag.is_end {
+                if tag.name_is("a") && in_anchor {
+                    emit_title_for_path(
+                        catalog,
+                        &current_href[..current_href_len],
+                        &title[..title_len],
+                        on_title,
+                    )?;
+                    in_anchor = false;
+                    current_href_len = 0;
+                    title_len = 0;
+                }
+                continue;
+            }
+            if tag.name_is("a") {
+                if let Some(href) = tag.attr(b"href") {
+                    current_href_len = resolve_reference(nav_base, href, &mut current_href)?;
+                    title_len = 0;
+                    in_anchor = true;
+                }
+            }
+            continue;
+        }
+
+        if in_anchor {
+            append_normalized_text(nav, &mut cursor, &mut title, &mut title_len)?;
+        } else {
+            cursor += 1;
+        }
+    }
+
+    Ok(())
+}
+
+fn emit_titles_from_ncx<F>(
+    ncx: &[u8],
+    ncx_path: &[u8],
+    catalog: &[u8],
+    on_title: &mut F,
+) -> Result<(), EpubError>
+where
+    F: FnMut(u16, &str) -> Result<(), EpubError>,
+{
+    let ncx_base = path_parent(ncx_path);
+    let mut cursor = 0usize;
+    let mut in_nav_label_text = false;
+    let mut pending_title = [0u8; 256];
+    let mut pending_title_len = 0usize;
+    let mut pending_href = [0u8; MAX_CHAPTER_DIR_BYTES];
+
+    while cursor < ncx.len() {
+        if ncx[cursor] == b'<' {
+            let Some(tag) = parse_xml_tag(ncx, &mut cursor)? else {
+                continue;
+            };
+            if tag.is_end {
+                if tag.name_is("text") {
+                    in_nav_label_text = false;
+                }
+                continue;
+            }
+            if tag.name_is("text") {
+                in_nav_label_text = true;
+                continue;
+            }
+            if tag.name_is("content") {
+                if let Some(src) = tag.attr(b"src") {
+                    let pending_href_len = resolve_reference(ncx_base, src, &mut pending_href)?;
+                    emit_title_for_path(
+                        catalog,
+                        &pending_href[..pending_href_len],
+                        &pending_title[..pending_title_len],
+                        on_title,
+                    )?;
+                    pending_title_len = 0;
+                }
+                continue;
+            }
+            continue;
+        }
+
+        if in_nav_label_text {
+            append_normalized_text(ncx, &mut cursor, &mut pending_title, &mut pending_title_len)?;
+        } else {
+            cursor += 1;
+        }
+    }
+
+    Ok(())
+}
+
+fn emit_title_for_path<F>(
+    catalog: &[u8],
+    chapter_path: &[u8],
+    title: &[u8],
+    on_title: &mut F,
+) -> Result<(), EpubError>
+where
+    F: FnMut(u16, &str) -> Result<(), EpubError>,
+{
+    if title.is_empty() {
+        return Ok(());
+    }
+    let Some(index) = find_spine_index_for_path(catalog, chapter_path)? else {
+        return Ok(());
+    };
+    let title = core::str::from_utf8(title).map_err(|_| EpubError::Utf8)?;
+    on_title(index, title)
+}
+
+fn find_spine_index_for_path(
+    catalog: &[u8],
+    chapter_path: &[u8],
+) -> Result<Option<u16>, EpubError> {
+    if catalog.len() < 2 {
+        return Ok(None);
+    }
+    let count = u16::from_le_bytes([catalog[0], catalog[1]]);
+    let mut cursor = 2usize;
+    for index in 0..count {
+        let (start, len, _, next_cursor) = read_spine_entry_at(catalog, cursor)?;
+        if len == chapter_path.len() && &catalog[start..start + len] == chapter_path {
+            return Ok(Some(index));
+        }
+        cursor = next_cursor;
+    }
+    Ok(None)
 }
 
 fn write_spine_record_metadata(target: &mut [u8], entry: EpubEntryMetadata) {
@@ -1998,6 +2341,74 @@ fn parse_num_radix(input: &[u8], radix: u32) -> Option<u32> {
     Some(value)
 }
 
+fn append_normalized_text(
+    data: &[u8],
+    cursor: &mut usize,
+    out: &mut [u8],
+    out_len: &mut usize,
+) -> Result<(), EpubError> {
+    while *cursor < data.len() && data[*cursor] != b'<' {
+        if data[*cursor] == b'&' {
+            let mut end = *cursor + 1;
+            while end < data.len() && data[end] != b';' && end - *cursor <= 12 {
+                end += 1;
+            }
+            if end < data.len() && data[end] == b';' {
+                let before = *out_len;
+                if decode_entity(&data[*cursor..=end], out, out_len)? {
+                    normalize_recent_whitespace(out, before, out_len);
+                    *cursor = end + 1;
+                    continue;
+                }
+            }
+        }
+
+        let ch = data[*cursor];
+        *cursor += 1;
+        if ch.is_ascii_whitespace() {
+            if *out_len > 0 && out[*out_len - 1] != b' ' {
+                if *out_len >= out.len() {
+                    return Err(EpubError::OutOfSpace);
+                }
+                out[*out_len] = b' ';
+                *out_len += 1;
+            }
+            continue;
+        }
+
+        if *out_len >= out.len() {
+            return Err(EpubError::OutOfSpace);
+        }
+        out[*out_len] = ch;
+        *out_len += 1;
+    }
+
+    while *out_len > 0 && out[*out_len - 1] == b' ' {
+        *out_len -= 1;
+    }
+    Ok(())
+}
+
+fn normalize_recent_whitespace(out: &mut [u8], start: usize, out_len: &mut usize) {
+    let mut write = start;
+    let mut last_was_space = start > 0 && out[start - 1] == b' ';
+    for read in start..*out_len {
+        let byte = out[read];
+        if byte.is_ascii_whitespace() {
+            if !last_was_space {
+                out[write] = b' ';
+                write += 1;
+                last_was_space = true;
+            }
+            continue;
+        }
+        out[write] = byte;
+        write += 1;
+        last_was_space = false;
+    }
+    *out_len = write;
+}
+
 fn is_space(ch: u8) -> bool {
     ch == b' ' || ch == b'\n' || ch == b'\r' || ch == b'\t'
 }
@@ -2487,6 +2898,50 @@ mod tests {
 
         assert_eq!(metadata.uncompressed_size as usize, direct.len());
         assert_eq!(&inflate[..direct.len()], direct);
+    }
+
+    #[test]
+    fn collect_navigation_titles_reads_real_fixture_titles() {
+        let Some(path) = fixture_path("Decisive - Chip Heath.epub") else {
+            return;
+        };
+        let bytes = std::fs::read(path).expect("fixture should be readable");
+        let source = VecSource { bytes };
+        let mut zip_cd = vec![0; 16 * 1024];
+        let mut inflate = vec![0; 48 * 1024];
+        let mut stream_input = vec![0; 16];
+        let mut xml = vec![0; 32 * 1024];
+        let mut catalog = vec![0; 8192];
+        let mut path_buf = vec![0; 16];
+        let mut stream_state = InflateState::new(DataFormat::Raw);
+        let mut archive = EpubArchive::new();
+        let mut titles = std::vec::Vec::new();
+
+        collect_navigation_titles(
+            &source,
+            ReaderBuffers {
+                zip_cd: &mut zip_cd,
+                inflate: &mut inflate,
+                stream_input: &mut stream_input,
+                xml: &mut xml,
+                catalog: &mut catalog,
+                path_buf: &mut path_buf,
+                stream_state: &mut stream_state,
+                archive: &mut archive,
+            },
+            |index, title| {
+                titles.push((index, title.to_owned()));
+                Ok(())
+            },
+        )
+        .expect("title collection should succeed");
+
+        assert!(titles.iter().any(|(_, title)| title == "Introduction"));
+        assert!(
+            titles
+                .iter()
+                .any(|(_, title)| title == "1. The Four Villains of Decision Making")
+        );
     }
 
     fn run_runtime_workspace_fixture(bytes: Vec<u8>) {

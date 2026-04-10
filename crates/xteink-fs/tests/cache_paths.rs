@@ -2,8 +2,9 @@
 mod cache;
 
 use cache::{
-    CACHE_VERSION, CacheMeta, ProgressState, cache_paths_for_epub, decode_offset, decode_progress,
-    encode_offset, encode_progress, parse_meta, sanitize_cache_name, serialize_meta,
+    CACHE_VERSION, CHAPTER_TITLE_CAPACITY, CHAPTERS_MAGIC, CacheMeta, ChapterMetadata,
+    ProgressState, cache_paths_for_epub, decode_offset, decode_progress, encode_offset,
+    encode_progress, parse_meta, sanitize_cache_name, serialize_meta,
 };
 
 fn sample_meta() -> CacheMeta {
@@ -65,4 +66,18 @@ fn sanitized_cache_name_respects_component_limit() {
         name.chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
     );
+}
+
+#[test]
+fn chapter_metadata_constants_match_cache_format() {
+    let mut title = heapless::String::<CHAPTER_TITLE_CAPACITY>::new();
+    let _ = title.push_str("Introduction");
+    let chapter = ChapterMetadata {
+        start_offset: 0,
+        title,
+    };
+
+    assert_eq!(CHAPTERS_MAGIC, b"CHP1");
+    assert_eq!(chapter.title.as_str(), "Introduction");
+    assert_eq!(chapter.start_offset, 0);
 }

@@ -146,7 +146,7 @@ Cache files for each EPUB are written under `/.cool/<book>/`:
 
 - `content.txt`: full linearized UTF-8 text stream used for page rendering
 - `meta.txt`: cache validity fields plus final `content_length`
-- `chapters.idx`: little-endian `u64` records, one chapter-start byte offset per chapter in `content.txt`
+- `chapters.idx`: `CHP1` header followed by chapter records of `u64 start_offset`, `u16 title_len`, and UTF-8 title bytes
 - `progress.bin`: three little-endian `u64` values in order `previous`, `current`, `next`
 
 Reader behavior:
@@ -155,7 +155,13 @@ Reader behavior:
 - current reader position is the start byte offset of the rendered page
 - next page starts at the previous render's `next` offset
 - previous page prefers the saved `previous` offset and otherwise rescans from `0` or a chapter boundary
-- chapter jumps are expected to use `chapters.idx` offsets
+- chapter jumps use `chapters.idx` offsets and can also show cached chapter titles
+
+Chapter metadata behavior:
+
+- chapter titles prefer EPUB nav/TOC labels
+- if a chapter has no nav title, cache build falls back to the first visible text near that chapter offset in `content.txt`
+- titles are truncated to the first 64 characters before they are stored
 
 Footer progress behavior:
 
