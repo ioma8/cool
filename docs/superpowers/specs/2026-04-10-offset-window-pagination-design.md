@@ -19,6 +19,8 @@ The authoritative cached book data becomes:
 
 `pages.idx` is removed entirely.
 
+This document now reflects the implemented cache behavior and on-disk formats.
+
 ## Problem
 
 The current implementation mixes incompatible assumptions:
@@ -61,16 +63,20 @@ Full linearized cached text for the book, including pagination control markers a
 
 Requirements:
 
-- must represent the entire cached book, not only a prefix
-- must be valid as the sole source for page rendering
+- represents the entire cached book, not only a prefix
+- is the sole source for page rendering after cache build
+- uses the existing cached replay markers already emitted by `xteink-render`
 - all byte offsets used by reader state and chapter metadata refer into this file
 
 #### `meta.txt`
 
 Stores:
 
+- `version`
+- `source_size`
 - `content_length`
-- source identity / size checks
+- `build_complete`
+- `next_chapter_index`
 - layout signature fields already used for cache invalidation
 
 Requirements:
@@ -82,19 +88,29 @@ Requirements:
 
 Stores chapter start byte offsets into `content.txt`.
 
+Format:
+
+- flat binary file
+- each record is one little-endian `u64`
+- record `n` is the start byte offset of chapter `n` in `content.txt`
+
 Requirements:
 
-- each entry points to a valid start offset for a chapter in cached text
-- chapter navigation depends only on these offsets
+- entries are chapter-start offsets in cached text
+- offsets are strictly increasing
+- first entry is `0`
 - no page numbers are stored here
 
 #### `progress.bin`
 
-Stores:
+Format:
 
-- `previous_page_start_offset`
-- `current_page_start_offset`
-- `next_page_start_offset`
+- flat binary file
+- exactly 24 bytes when present
+- three little-endian `u64` values in this order:
+  - `previous_page_start_offset`
+  - `current_page_start_offset`
+  - `next_page_start_offset`
 
 Requirements:
 
@@ -122,7 +138,7 @@ Page number, if still shown anywhere internally, is derived and disposable.
 1. Load or build `content.txt`, `meta.txt`, and `chapters.idx`
 2. Load `progress.bin`
 3. Render from `current_page_start_offset`
-4. Validate or recompute `next_page_start_offset`
+4. Recompute `next_page_start_offset` from the rendered page
 5. Preserve `previous_page_start_offset` if valid
 
 Default cold-open state:
@@ -163,6 +179,11 @@ Fallback path:
 5. Compute `next`
 6. Persist all three offsets
 
+Implementation note:
+
+- the cache now writes real chapter start offsets during the full-book parse
+- old placeholder behavior that padded `chapters.idx` with zeroes is removed
+
 ## Progress Semantics
 
 Progress is based on the current rendered page start offset relative to cached text length.
@@ -176,35 +197,16 @@ Rule:
 
 This intentionally makes progress represent the start of the currently displayed page, not a guessed midpoint or page-count-based estimate.
 
-## Rendering API Redesign
+## Implemented Reader Behavior
 
-Replace page-number-centric reader flow with offset-centric flow.
+The reader remains page-number-addressable at some outer app/session call sites, but the persisted truth is now offset-based:
 
-Target API shape:
+- reopen uses `progress.bin.current_page_start_offset`
+- rendered progress is computed from byte offsets, not page numbers
+- saved `previous/current/next` offsets are updated after each render
+- direct page-number requests are internally resolved by scanning cached page boundaries from `content.txt`
 
-```rust
-struct OffsetPageWindow {
-    previous_page_start_offset: u64,
-    current_page_start_offset: u64,
-    next_page_start_offset: u64,
-    is_terminal_page: bool,
-    progress_percent: u8,
-}
-
-fn render_page_from_offset(
-    display: &mut Framebuffer,
-    content_path: &str,
-    current_page_start_offset: u64,
-    previous_page_start_offset_hint: u64,
-) -> Result<OffsetPageWindow, EpubError>;
-```
-
-Properties:
-
-- input identity is offset, not page number
-- output provides the new offset window
-- progress is computed from offsets and `meta.txt`
-- callers do not need total page count
+This is intentionally transitional. Storage truth and progress semantics are already offset-based even where some UI/controller APIs still pass page numbers.
 
 ## Cache Build Redesign
 
@@ -215,7 +217,7 @@ Required behavior:
 - linearize the full EPUB into `content.txt`
 - write complete `chapters.idx`
 - write `meta.txt` only after content length is final
-- initialize `progress.bin` to zero state on first build
+- let first render write `progress.bin` from the rendered page window
 
 This removes the current architecture where partial cache generation is mistaken for a complete pagination basis.
 

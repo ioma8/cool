@@ -138,6 +138,32 @@ bash scripts/build-web-simulator.sh
 
 Output is placed in `dist/` and can be hosted as static files.
 
+## EPUB Cache And Pagination
+
+EPUB reading now uses a byte-offset cache model. Pagination, resume, chapter jumps, and footer progress all operate on offsets into a fully cached `content.txt`, not on speculative total page counts.
+
+Cache files for each EPUB are written under `/.cool/<book>/`:
+
+- `content.txt`: full linearized UTF-8 text stream used for page rendering
+- `meta.txt`: cache validity fields plus final `content_length`
+- `chapters.idx`: little-endian `u64` records, one chapter-start byte offset per chapter in `content.txt`
+- `progress.bin`: three little-endian `u64` values in order `previous`, `current`, `next`
+
+Reader behavior:
+
+- cold open builds the full cache before later pages are read from it
+- current reader position is the start byte offset of the rendered page
+- next page starts at the previous render's `next` offset
+- previous page prefers the saved `previous` offset and otherwise rescans from `0` or a chapter boundary
+- chapter jumps are expected to use `chapters.idx` offsets
+
+Footer progress behavior:
+
+- first page always shows `0%`
+- otherwise progress is `floor(current_page_start_offset * 100 / content_length)`
+- non-terminal pages are clamped to `99%`
+- `100%` is shown only for the terminal page at EOF
+
 ## Flashing
 
 ```bash
