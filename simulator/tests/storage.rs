@@ -254,6 +254,50 @@ fn host_storage_progress_uses_current_page_start_offset() {
 }
 
 #[test]
+fn host_storage_reports_current_chapter_footer_context() {
+    let _guard = render_test_mutex()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Some(fixture) = decisive_fixture_path() else {
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::copy(&fixture, tmp.path().join("Decisive - Chip Heath.epub")).expect("copy fixture");
+    let storage = HostStorage::new(tmp.path());
+    let entry = xteink_app::ListedEntry::epub("Decisive - Chip Heath.epub");
+    let cache_paths = xteink_fs::cache_paths_for_epub("/", "Decisive - Chip Heath.epub");
+
+    let mut first = Framebuffer::new();
+    let page_zero = storage
+        .render_epub_from_entry(&mut first, "/", &entry)
+        .expect("page zero should render");
+    let chapters = read_cached_chapters(
+        &tmp.path()
+            .join(cache_paths.chapters.trim_start_matches('/')),
+    );
+
+    assert_eq!(page_zero.chapter_number, Some(1));
+    assert_eq!(
+        page_zero.chapter_title.as_deref(),
+        chapters.first().map(|chapter| chapter.title.as_str())
+    );
+
+    let mut chapter_page = Framebuffer::new();
+    let rendered = storage
+        .render_epub_page_from_entry(&mut chapter_page, "/", &entry, 4)
+        .expect("later page should render");
+
+    assert!(rendered.chapter_number.is_some());
+    assert!(rendered.chapter_number.unwrap_or(0) >= 1);
+    assert!(
+        rendered
+            .chapter_title
+            .as_deref()
+            .is_some_and(|title| !title.is_empty())
+    );
+}
+
+#[test]
 fn host_storage_renders_early_pages_from_full_cache_without_blanks() {
     let _guard = render_test_mutex()
         .lock()

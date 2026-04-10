@@ -47,7 +47,13 @@ impl SessionUi {
         }
     }
 
-    pub fn render_reader_progress<R: AppRenderer>(&self, renderer: &mut R, progress_percent: u8) {
+    pub fn render_reader_footer<R: AppRenderer>(
+        &self,
+        renderer: &mut R,
+        _chapter_number: Option<usize>,
+        chapter_title: Option<&str>,
+        progress_percent: u8,
+    ) {
         let footer_height = xteink_render::reader_footer_height();
         let footer_y = xteink_render::reader_content_height();
         renderer.fill_rect(
@@ -58,9 +64,18 @@ impl SessionUi {
             0xFF,
         );
 
-        let mut label = String::<16>::new();
-        let _ = core::fmt::write(&mut label, format_args!("{}%", progress_percent));
-        renderer.draw_text(4, footer_y.saturating_add(4), label.as_str());
+        let mut right = String::<16>::new();
+        let _ = core::fmt::write(&mut right, format_args!("{}%", progress_percent));
+        let layout = xteink_render::layout_reader_footer(chapter_title, None, right.as_str());
+
+        if let Some(text) = layout.left_text {
+            renderer.draw_text(layout.left_x, footer_y.saturating_add(4), text);
+        }
+        renderer.draw_text(
+            layout.right_x,
+            footer_y.saturating_add(4),
+            layout.right_text,
+        );
     }
 
     pub fn ui_entry_to_listed(&self, entry: &UiEntry) -> ListedEntry {
@@ -163,11 +178,16 @@ mod tests {
     }
 
     #[test]
-    fn render_reader_progress_draws_footer_percent() {
+    fn render_reader_footer_draws_title_and_progress() {
         let ui = SessionUi::new();
         let mut renderer = RecordingRenderer::default();
 
-        ui.render_reader_progress(&mut renderer, 42);
+        ui.render_reader_footer(
+            &mut renderer,
+            Some(12),
+            Some("A Very Long Chapter Title For Footer Layout"),
+            42,
+        );
 
         assert_eq!(renderer.fills.len(), 1);
         assert!(
@@ -175,6 +195,40 @@ mod tests {
                 .texts
                 .iter()
                 .any(|(_, _, text)| text.as_str() == "42%")
+        );
+        let left = renderer
+            .texts
+            .iter()
+            .find(|(_, _, text)| text.as_str().starts_with("A Very Long"))
+            .expect("left chapter title");
+        let right = renderer
+            .texts
+            .iter()
+            .find(|(_, _, text)| text.as_str() == "42%")
+            .expect("right progress");
+
+        assert_eq!(left.0, 4);
+        assert!(right.0 > left.0);
+    }
+
+    #[test]
+    fn render_reader_footer_renders_title_when_progress_leaves_room() {
+        let ui = SessionUi::new();
+        let mut renderer = RecordingRenderer::default();
+
+        ui.render_reader_footer(&mut renderer, Some(123_456_789), Some("Introduction"), 100);
+
+        assert!(
+            renderer
+                .texts
+                .iter()
+                .any(|(_, _, text)| text.as_str() == "100%")
+        );
+        assert!(
+            renderer
+                .texts
+                .iter()
+                .any(|(_, _, text)| text.as_str() == "Introduction")
         );
     }
 }

@@ -35,6 +35,8 @@ impl AppStorage<Framebuffer> for FakeStorage {
         Ok(EpubRenderResult {
             rendered_page: 0,
             progress_percent: 25,
+            chapter_number: None,
+            chapter_title: None,
         })
     }
 
@@ -48,6 +50,8 @@ impl AppStorage<Framebuffer> for FakeStorage {
         Ok(EpubRenderResult {
             rendered_page: target_page,
             progress_percent: 25,
+            chapter_number: None,
+            chapter_title: None,
         })
     }
 }
@@ -100,6 +104,8 @@ impl AppStorage<Framebuffer> for MultiStorage {
         Ok(EpubRenderResult {
             rendered_page: 0,
             progress_percent: 33,
+            chapter_number: None,
+            chapter_title: None,
         })
     }
 
@@ -113,6 +119,8 @@ impl AppStorage<Framebuffer> for MultiStorage {
         Ok(EpubRenderResult {
             rendered_page: target_page,
             progress_percent: 33,
+            chapter_number: None,
+            chapter_title: None,
         })
     }
 }

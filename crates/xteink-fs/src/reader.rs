@@ -82,11 +82,13 @@ pub enum EpubRefreshMode {
     Fast,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpubRenderResult {
     pub rendered_page: usize,
     pub refresh: EpubRefreshMode,
     pub progress_percent: u8,
+    pub chapter_number: Option<usize>,
+    pub chapter_title: Option<heapless::String<CHAPTER_TITLE_CAPACITY>>,
 }
 
 pub fn render_epub_from_entry<SD>(
@@ -309,6 +311,8 @@ where
 
     let progress_percent =
         compute_progress_percent(page_start_offset, next_page_offset, meta.content_length);
+    let footer_context =
+        read_reader_footer_context(fs, cache_paths.chapters.as_str(), page_start_offset)?;
 
     write_cached_progress(
         fs,
@@ -328,7 +332,117 @@ where
             EpubRefreshMode::Full
         },
         progress_percent,
+        chapter_number: footer_context.chapter_number,
+        chapter_title: footer_context.chapter_title,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReaderFooterContext {
+    chapter_number: Option<usize>,
+    chapter_title: Option<heapless::String<CHAPTER_TITLE_CAPACITY>>,
+}
+
+fn read_reader_footer_context<SD: SdFilesystem>(
+    fs: &SD,
+    chapters_path: &str,
+    current_page_start_offset: u64,
+) -> Result<ReaderFooterContext, EpubError> {
+    let mut file = match fs.open_cache_file_read(chapters_path) {
+        Ok(file) => file,
+        Err(_) => {
+            return Ok(ReaderFooterContext {
+                chapter_number: None,
+                chapter_title: None,
+            });
+        }
+    };
+
+    let mut magic = [0u8; 4];
+    if !read_exact_or_eof(&mut file, &mut magic)? || &magic != CHAPTERS_MAGIC {
+        return Ok(ReaderFooterContext {
+            chapter_number: None,
+            chapter_title: None,
+        });
+    }
+
+    let mut first_chapter = None;
+    let mut active_chapter = None;
+    let mut index = 0usize;
+
+    loop {
+        let Some(chapter) = read_chapter_metadata_record(&mut file)? else {
+            break;
+        };
+        index = index.saturating_add(1);
+        if first_chapter.is_none() {
+            first_chapter = Some((index, chapter.clone()));
+        }
+        if chapter.start_offset <= current_page_start_offset {
+            active_chapter = Some((index, chapter));
+        } else {
+            break;
+        }
+    }
+
+    let selected = active_chapter.or(first_chapter);
+    Ok(ReaderFooterContext {
+        chapter_number: selected.as_ref().map(|(number, _)| *number),
+        chapter_title: selected.and_then(|(_, chapter)| {
+            if chapter.title.is_empty() {
+                None
+            } else {
+                Some(chapter.title)
+            }
+        }),
+    })
+}
+
+fn read_chapter_metadata_record<F: SdFsFile>(
+    file: &mut F,
+) -> Result<Option<ChapterMetadata>, EpubError> {
+    let mut start_offset = [0u8; 8];
+    if !read_exact_or_eof(file, &mut start_offset)? {
+        return Ok(None);
+    }
+
+    let mut title_len = [0u8; 2];
+    if !read_exact_or_eof(file, &mut title_len)? {
+        return Err(EpubError::InvalidFormat);
+    }
+    let title_len = usize::from(u16::from_le_bytes(title_len));
+    if title_len > CHAPTER_TITLE_CAPACITY {
+        return Err(EpubError::InvalidFormat);
+    }
+
+    let mut title_bytes = [0u8; CHAPTER_TITLE_CAPACITY];
+    if title_len > 0 && !read_exact_or_eof(file, &mut title_bytes[..title_len])? {
+        return Err(EpubError::InvalidFormat);
+    }
+
+    let title = core::str::from_utf8(&title_bytes[..title_len]).map_err(|_| EpubError::Utf8)?;
+    let mut chapter_title = heapless::String::new();
+    let _ = chapter_title.push_str(title);
+
+    Ok(Some(ChapterMetadata {
+        start_offset: u64::from_le_bytes(start_offset),
+        title: chapter_title,
+    }))
+}
+
+fn read_exact_or_eof<F: SdFsFile>(file: &mut F, buffer: &mut [u8]) -> Result<bool, EpubError> {
+    let mut read = 0usize;
+    while read < buffer.len() {
+        let count = file.read(&mut buffer[read..]).map_err(|_| EpubError::Io)?;
+        if count == 0 {
+            if read == 0 {
+                return Ok(false);
+            }
+            return Err(EpubError::InvalidFormat);
+        }
+        read = read.saturating_add(count);
+    }
+    Ok(true)
 }
 
 fn compute_progress_percent(current_offset: u64, next_page_offset: u64, content_length: u64) -> u8 {

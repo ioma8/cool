@@ -220,6 +220,8 @@ where
         Ok(AppEpubRenderResult {
             rendered_page: rendered.rendered_page,
             progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
         })
     }
 
@@ -241,6 +243,8 @@ where
         Ok(AppEpubRenderResult {
             rendered_page: rendered.rendered_page,
             progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
         })
     }
 }

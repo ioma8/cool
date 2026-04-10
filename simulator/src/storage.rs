@@ -434,6 +434,8 @@ impl AppStorage<Framebuffer> for HostStorage {
         Ok(EpubRenderResult {
             rendered_page: rendered.rendered_page,
             progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
         })
     }
 
@@ -457,6 +459,8 @@ impl AppStorage<Framebuffer> for HostStorage {
         Ok(EpubRenderResult {
             rendered_page: rendered.rendered_page,
             progress_percent: rendered.progress_percent,
+            chapter_number: rendered.chapter_number,
+            chapter_title: rendered.chapter_title,
         })
     }
 }

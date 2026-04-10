@@ -163,8 +163,11 @@ Chapter metadata behavior:
 - if a chapter has no nav title, cache build falls back to the first visible text near that chapter offset in `content.txt`
 - titles are truncated to the first 64 characters before they are stored
 
-Footer progress behavior:
+Reader footer behavior:
 
+- left side shows the start of the current chapter title for the last chapter whose offset is less than or equal to the current page start offset
+- right side shows progress percent
+- title cropping preserves progress first, with at least one space between title and progress when the title fits
 - first page always shows `0%`
 - otherwise progress is `floor(current_page_start_offset * 100 / content_length)`
 - non-terminal pages are clamped to `99%`

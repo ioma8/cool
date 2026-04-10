@@ -80,10 +80,12 @@ impl AppRenderer for xteink_render::Framebuffer {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpubRenderResult {
     pub rendered_page: usize,
     pub progress_percent: u8,
+    pub chapter_number: Option<usize>,
+    pub chapter_title: Option<String<64>>,
 }
 
 pub trait AppStorage<R: AppRenderer> {
@@ -193,8 +195,12 @@ where
                     self.current_path.as_str(),
                     &listed,
                 )?;
-                self.ui
-                    .render_reader_progress(&mut self.renderer, rendered.progress_percent);
+                self.ui.render_reader_footer(
+                    &mut self.renderer,
+                    rendered.chapter_number,
+                    rendered.chapter_title.as_deref(),
+                    rendered.progress_percent,
+                );
                 self.controller.apply_epub_opened(rendered.rendered_page);
                 Ok(Some(BrowserRefresh::Fast))
             }
@@ -211,8 +217,12 @@ where
                     &listed,
                     target_page,
                 )?;
-                self.ui
-                    .render_reader_progress(&mut self.renderer, rendered.progress_percent);
+                self.ui.render_reader_footer(
+                    &mut self.renderer,
+                    rendered.chapter_number,
+                    rendered.chapter_title.as_deref(),
+                    rendered.progress_percent,
+                );
                 self.controller
                     .apply_reader_page_rendered(rendered.rendered_page);
                 Ok(Some(if fast {

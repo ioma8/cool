@@ -45,6 +45,78 @@ pub fn reader_content_height() -> u16 {
     DISPLAY_HEIGHT.saturating_sub(reader_footer_height())
 }
 
+pub const READER_FOOTER_HORIZONTAL_PADDING: u16 = 4;
+
+pub struct ReaderFooterLayout<'a> {
+    pub left_x: u16,
+    pub left_text: Option<&'a str>,
+    pub middle_x: u16,
+    pub middle_text: Option<&'a str>,
+    pub right_x: u16,
+    pub right_text: &'a str,
+}
+
+pub fn layout_reader_footer<'a>(
+    left_text: Option<&'a str>,
+    middle_text: Option<&'a str>,
+    right_text: &'a str,
+) -> ReaderFooterLayout<'a> {
+    let left_x = READER_FOOTER_HORIZONTAL_PADDING;
+    let right_width = text_width(right_text);
+    let right_x = DISPLAY_WIDTH
+        .saturating_sub(READER_FOOTER_HORIZONTAL_PADDING)
+        .saturating_sub(right_width);
+
+    let space_width = text_width(" ");
+    let left_limit = right_x.saturating_sub(space_width);
+    let left_text =
+        left_text.and_then(|text| fitted_text_prefix(text, left_limit.saturating_sub(left_x)));
+    let left_width = left_text.map_or(0, text_width);
+    let middle_x = if left_text.is_some() {
+        left_x
+            .saturating_add(left_width)
+            .saturating_add(space_width)
+    } else {
+        left_x
+    };
+    let middle_limit = right_x.saturating_sub(space_width);
+    let available_middle_width = middle_limit.saturating_sub(middle_x);
+    let middle_text = middle_text.and_then(|text| fitted_text_prefix(text, available_middle_width));
+
+    ReaderFooterLayout {
+        left_x,
+        left_text,
+        middle_x,
+        middle_text,
+        right_x,
+        right_text,
+    }
+}
+
+pub fn text_width(text: &str) -> u16 {
+    u16::try_from(bookerly::BOOKERLY.shape_text(text, |_, _, _| {})).unwrap_or(u16::MAX)
+}
+
+fn fitted_text_prefix(text: &str, max_width: u16) -> Option<&str> {
+    if max_width == 0 || text.is_empty() {
+        return None;
+    }
+    if text_width(text) <= max_width {
+        return Some(text);
+    }
+
+    let mut end = 0usize;
+    for (index, ch) in text.char_indices() {
+        let next_end = index + ch.len_utf8();
+        if text_width(&text[..next_end]) > max_width {
+            break;
+        }
+        end = next_end;
+    }
+
+    if end == 0 { None } else { Some(&text[..end]) }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CachedPageRenderResult {
     pub rendered_page: usize,
@@ -696,6 +768,24 @@ mod tests {
             text[..result.consumed].trim_end(),
             drawn[0].trim_end(),
             "consumed text must match what was actually drawn on the page"
+        );
+    }
+
+    #[test]
+    fn footer_layout_clips_left_text_before_right_progress() {
+        let layout = layout_reader_footer(
+            Some("An Extremely Long Chapter Title That Must Be Clipped"),
+            None,
+            "100%",
+        );
+
+        let clipped = layout.left_text.expect("left text should still render");
+        assert!(clipped.len() < "An Extremely Long Chapter Title That Must Be Clipped".len());
+        let space_width = text_width(" ");
+        assert!(
+            layout.left_x.saturating_add(text_width(clipped)).saturating_add(space_width)
+                <= layout.right_x,
+            "left text must leave room for a separating space before progress"
         );
     }
 }
